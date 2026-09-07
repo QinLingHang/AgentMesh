@@ -1,0 +1,460 @@
+/* =========================================================
+   AgentMesh UI v4.4 — Clean Light
+
+   Final visual closure for v4.3:
+   - removes remaining near-black product surfaces
+   - keeps a soft paper / jade visual language
+   - does not change component contracts or runtime behaviour
+   - code blocks may remain neutral gray for readability
+   ========================================================= */
+
+:root,
+.app-shell-v3 {
+  --v44-page: #f7f8f5;
+  --v44-sidebar: #f1f3ef;
+  --v44-surface: #ffffff;
+  --v44-surface-soft: #f4f6f2;
+  --v44-surface-muted: #eef2ee;
+  --v44-border: #dde3de;
+  --v44-border-strong: #d0d9d3;
+  --v44-text: #29312e;
+  --v44-text-2: #56615c;
+  --v44-text-3: #7f8984;
+  --v44-jade: #5d887b;
+  --v44-jade-strong: #4f776c;
+  --v44-jade-soft: #e7efeb;
+}
+
+/* ---------- Workspace welcome ---------- */
+.tab-workspace .welcome-suggestion {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: 0 4px 16px rgba(47, 59, 53, 0.035) !important;
+}
+
+.tab-workspace .welcome-suggestion:hover {
+  background: #f2f5f1 !important;
+  border-color: #cfdad4 !important;
+}
+
+.tab-workspace .welcome-suggestion-icon {
+  color: var(--v44-jade) !important;
+  background: var(--v44-jade-soft) !important;
+  border-color: #d9e6df !important;
+}
+
+.tab-workspace .welcome-suggestion-copy strong {
+  color: var(--v44-text) !important;
+}
+
+.tab-workspace .welcome-suggestion-copy small {
+  color: var(--v44-text-3) !important;
+}
+
+/* ---------- Shared product overview strips ---------- */
+.calm-overview-strip,
+.governance-usage-strip {
+  gap: 0 !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: none !important;
+}
+
+.calm-overview-strip > div,
+.governance-usage-strip > div {
+  background: var(--v44-surface) !important;
+  border-right: 1px solid var(--v44-border) !important;
+}
+
+.calm-overview-strip > div:last-child,
+.governance-usage-strip > div:last-child {
+  border-right: 0 !important;
+}
+
+.calm-overview-strip span,
+.governance-usage-strip span {
+  color: var(--v44-text-3) !important;
+}
+
+.calm-overview-strip strong,
+.governance-usage-strip strong {
+  color: var(--v44-text) !important;
+}
+
+.calm-overview-strip small,
+.governance-usage-strip small {
+  color: var(--v44-text-3) !important;
+}
+
+/* The agent page has three cells; avoid an empty dark/gray fourth column. */
+.agents-calm-page .calm-overview-strip {
+  grid-template-columns: 180px 180px minmax(280px, 1fr) !important;
+}
+
+.tasks-calm-page .calm-overview-strip,
+.governance-calm-page .calm-overview-strip {
+  grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+}
+
+/* ---------- Agents ---------- */
+.agent-calm-card {
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.agent-calm-card:hover {
+  background: #fbfcfa !important;
+  border-color: #cfdad4 !important;
+  box-shadow: 0 8px 22px rgba(47, 59, 53, 0.045) !important;
+}
+
+.agent-calm-avatar {
+  color: #496d63 !important;
+  background: #e4ede8 !important;
+  border-color: #d8e5de !important;
+}
+
+.agent-calm-title-block strong,
+.agent-calm-metrics strong {
+  color: var(--v44-text) !important;
+}
+
+.agent-calm-title-block span,
+.agent-calm-metrics span,
+.agent-calm-footer {
+  color: var(--v44-text-3) !important;
+}
+
+.agent-calm-tags span {
+  color: #5d766e !important;
+  background: #f0f5f2 !important;
+  border-color: #e1e9e4 !important;
+}
+
+.agent-calm-metrics {
+  gap: 0 !important;
+  background: var(--v44-border) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.agent-calm-metrics > div {
+  background: #f7f9f6 !important;
+  border-right: 1px solid var(--v44-border) !important;
+  border-bottom: 1px solid var(--v44-border) !important;
+}
+
+.agent-calm-metrics > div:nth-child(2n) {
+  border-right: 0 !important;
+}
+
+.agent-calm-metrics > div:nth-last-child(-n + 2) {
+  border-bottom: 0 !important;
+}
+
+.calm-search-field {
+  color: var(--v44-text-3) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.calm-search-field input {
+  color: var(--v44-text) !important;
+}
+
+/* ---------- Knowledge ---------- */
+.knowledge-scope-tabs {
+  background: #f1f4f0 !important;
+  border-color: var(--v44-border) !important;
+}
+
+.knowledge-scope-tabs button {
+  color: #6d7772 !important;
+  background: transparent !important;
+}
+
+.knowledge-scope-tabs button:hover {
+  color: var(--v44-text) !important;
+  background: #e9eeea !important;
+}
+
+.knowledge-scope-tabs button.active {
+  color: #45695f !important;
+  background: var(--v44-surface) !important;
+  box-shadow: 0 1px 5px rgba(47, 59, 53, 0.05) !important;
+}
+
+.knowledge-toolbar,
+.knowledge-toolbar.compact {
+  background: transparent !important;
+}
+
+.knowledge-search,
+.knowledge-toolbar select {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.knowledge-search:focus-within {
+  border-color: #a9beb5 !important;
+  box-shadow: 0 0 0 3px rgba(93, 136, 123, 0.07) !important;
+}
+
+.knowledge-summary-grid > div,
+.knowledge-scope-section,
+.knowledge-library-section,
+.knowledge-center-table-shell,
+.knowledge-base-main,
+.knowledge-project-grid > * {
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  color: var(--v44-text-2) !important;
+}
+
+.knowledge-center-table tbody tr:hover {
+  background: #f6f8f5 !important;
+}
+
+/* ---------- Capability center ---------- */
+.extension-calm-tab {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: none !important;
+}
+
+.extension-calm-tab:hover {
+  background: #f5f8f5 !important;
+  border-color: #cfdad4 !important;
+}
+
+.extension-calm-tab.active {
+  color: var(--v44-text) !important;
+  background: #edf3ef !important;
+  border-color: #cbdad3 !important;
+  box-shadow: inset 3px 0 0 var(--v44-jade) !important;
+}
+
+.extension-calm-icon {
+  color: var(--v44-jade) !important;
+  background: #e7efeb !important;
+}
+
+.extension-calm-copy strong {
+  color: var(--v44-text) !important;
+}
+
+.extension-calm-copy small,
+.extension-calm-content-head h2,
+.extension-panel-surface .subpage-head p,
+.extension-panel-surface .info-box,
+.extension-panel-surface .muted-text {
+  color: var(--v44-text-3) !important;
+}
+
+.extension-calm-count {
+  color: #66857b !important;
+}
+
+.extension-calm-content,
+.extension-panel-surface,
+.extension-add-card,
+.tool-calm-row,
+.connection-calm-card,
+.plugin-calm-card,
+.extension-panel-surface .resource-card,
+.extension-panel-surface .simple-row,
+.extension-panel-surface .plugin-item,
+.extension-panel-surface .inline-form {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: none !important;
+}
+
+.extension-panel-surface .resource-main strong,
+.extension-panel-surface .simple-main strong,
+.extension-panel-surface .plugin-item strong,
+.extension-panel-surface .subpage-head h2 {
+  color: var(--v44-text) !important;
+}
+
+.connection-technical-detail,
+.developer-note,
+.extension-panel-surface .info-box {
+  color: var(--v44-text-3) !important;
+  background: #f7f9f6 !important;
+  border-color: var(--v44-border) !important;
+}
+
+/* ---------- Task history ---------- */
+.task-calm-card,
+.task-calm-detail {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.task-calm-card:hover {
+  background: #fbfcfa !important;
+  border-color: #cfdad4 !important;
+}
+
+.task-calm-title-row strong,
+.task-calm-detail strong,
+.task-calm-detail code {
+  color: var(--v44-text) !important;
+}
+
+.task-calm-detail {
+  background: #f7f9f6 !important;
+}
+
+.task-calm-detail span,
+.task-calm-meta {
+  color: var(--v44-text-3) !important;
+}
+
+/* ---------- Governance ---------- */
+.governance-calm-card,
+.governance-quota-card,
+.governance-member-row,
+.governance-secret-row,
+.audit-calm-row,
+.quota-calm-field {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: none !important;
+}
+
+.governance-calm-card h2,
+.governance-member-copy strong,
+.quota-calm-field > span,
+.governance-section-toggle strong {
+  color: var(--v44-text) !important;
+}
+
+.governance-calm-card p,
+.governance-member-copy small,
+.governance-section-toggle small {
+  color: var(--v44-text-3) !important;
+}
+
+.governance-calm-icon,
+.governance-member-avatar {
+  color: var(--v44-jade) !important;
+  background: #e9f0ec !important;
+}
+
+.governance-calm-page .organization-chip,
+.organization-strip button {
+  color: var(--v44-text-2) !important;
+  background: #f6f8f5 !important;
+  border-color: var(--v44-border) !important;
+}
+
+.governance-calm-page .organization-chip.active {
+  color: #45695f !important;
+  background: #e8f0ec !important;
+  border-color: #d4e2db !important;
+}
+
+.quota-calm-field input,
+.calm-inline-form input,
+.calm-inline-form select,
+.calm-secret-form input,
+.provider-calm-grid input,
+.provider-calm-grid select {
+  color: var(--v44-text) !important;
+  background: #fbfcfa !important;
+  border-color: var(--v44-border) !important;
+}
+
+.governance-section-toggle {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+}
+
+.governance-section-toggle:hover,
+.governance-advanced-section[open] .governance-section-toggle {
+  background: #f3f6f3 !important;
+  border-color: #cfdad4 !important;
+}
+
+/* ---------- Run details: technical, but still light ---------- */
+.run-details-page,
+.workspace-details-drawer .run-details-page,
+.run-details-shell-head,
+.run-details-drawer-head,
+.run-summary-strip,
+.run-detail-content,
+.detail-section,
+.trace-panel-shell,
+.routing-panel-shell,
+.reliability-panel-shell,
+.memory-trace-panel-shell,
+.run-context-card,
+.run-health-card,
+.p6-eval-section {
+  color: var(--v44-text-2) !important;
+  background: var(--v44-surface) !important;
+  border-color: var(--v44-border) !important;
+  box-shadow: none !important;
+}
+
+.run-details-page h1,
+.run-details-page h2,
+.run-details-page h3,
+.run-details-page strong,
+.section-title,
+.run-details-title-row h1 {
+  color: var(--v44-text) !important;
+}
+
+.run-details-page p,
+.run-details-page small,
+.run-details-page .muted-text,
+.run-details-page .empty-state {
+  color: var(--v44-text-3) !important;
+}
+
+.run-detail-tabs button {
+  color: #7d8782 !important;
+}
+
+.run-detail-tabs button.active {
+  color: #45695f !important;
+  border-color: var(--v44-jade) !important;
+}
+
+/* ---------- Neutral technical snippets ---------- */
+.markdown-answer pre,
+.markdown-body pre,
+.run-details-page pre,
+.run-details-page code {
+  background: #f1f3f0 !important;
+  color: #35423d !important;
+  border-color: var(--v44-border) !important;
+}
+
+/* ---------- Search / input hover polish ---------- */
+.calm-page input:hover,
+.calm-page textarea:hover,
+.calm-page select:hover,
+.knowledge-search:hover,
+.calm-search-field:hover {
+  border-color: #cdd6d1 !important;
+}
+
+/* No near-black product card should remain in the normal app surface. */
+@media (prefers-color-scheme: dark) {
+  html,
+  body,
+  #root,
+  .app-shell-v3 {
+    color-scheme: light !important;
+  }
+}

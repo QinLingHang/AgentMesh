@@ -1,0 +1,121 @@
+.routing-panel-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.routing-empty-state {
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  padding: 22px;
+  color: var(--text-muted);
+  background: var(--surface-soft);
+}
+
+.routing-event-list {
+  display: grid;
+  gap: 14px;
+}
+
+.routing-event-card {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+
+.routing-event-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.routing-event-card header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.routing-event-card header small,
+.routing-candidate-row small {
+  color: var(--text-muted);
+}
+
+.routing-status {
+  border-radius: 999px;
+  padding: 4px 9px;
+  font-size: 12px;
+  background: var(--surface-soft);
+}
+
+.routing-decision-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.routing-decision-grid > div {
+  display: grid;
+  gap: 5px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  background: var(--surface-soft);
+}
+
+.routing-decision-grid span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.routing-reason {
+  margin: 12px 0 0;
+  color: var(--text-secondary);
+}
+
+.routing-candidates {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.routing-candidate-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.5fr) repeat(5, minmax(72px, auto));
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  font-size: 12px;
+}
+
+.routing-candidate-row > div {
+  display: grid;
+  gap: 2px;
+}
+
+.constraint-good,
+.constraint-bad {
+  justify-self: end;
+  border-radius: 999px;
+  padding: 3px 8px;
+}
+
+.constraint-good {
+  background: rgba(33, 150, 83, 0.1);
+}
+
+.constraint-bad {
+  background: rgba(235, 87, 87, 0.1);
+}
+
+@media (max-width: 900px) {
+  .routing-decision-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .routing-candidate-row {
+    grid-template-columns: 1fr 1fr;
+  }
+}

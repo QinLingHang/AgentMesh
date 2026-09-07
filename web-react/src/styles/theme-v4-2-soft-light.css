@@ -1,0 +1,655 @@
+/* =========================================================
+   AgentMesh UI v4.2 — Soft Paper
+   GPT-like reading comfort without copying product chrome.
+
+   Goals:
+   - remove white-on-black luminance spikes
+   - neutral paper surfaces, low-chroma jade accent
+   - assistant answer remains the primary reading surface
+   - keep all existing component/layout contracts intact
+   ========================================================= */
+
+:root,
+.app-shell-v3,
+.auth-page,
+.session-restore-page {
+  --am-bg: #f7f7f4;
+  --am-bg-deep: #f1f2ee;
+  --am-sidebar: #f2f3ef;
+  --am-panel: #ffffff;
+  --am-panel-soft: #f7f8f5;
+  --am-panel-raised: #ffffff;
+  --am-panel-hover: #f0f2ee;
+  --am-line: rgba(45, 55, 52, 0.10);
+  --am-line-strong: rgba(45, 55, 52, 0.16);
+  --am-text: #303633;
+  --am-text-2: #56605c;
+  --am-text-3: #7b8581;
+  --am-text-faint: #98a19d;
+  --am-jade: #5e877b;
+  --am-jade-strong: #4f786d;
+  --am-jade-deep: #42675d;
+  --am-jade-soft: rgba(94, 135, 123, 0.10);
+  --am-warning: #9d7f48;
+  --am-warning-soft: #faf6ea;
+  --am-danger: #b76b70;
+  --am-danger-soft: #fbf0f1;
+  --am-shadow: 0 10px 30px rgba(45, 55, 52, 0.06);
+
+  /* Older v3/v3.2 tokens still referenced by several modules. */
+  --v3-bg: #f7f7f4;
+  --v3-bg-soft: #f2f3ef;
+  --v3-panel: #ffffff;
+  --v3-panel-2: #f7f8f5;
+  --v3-panel-hover: #f0f2ee;
+  --v3-border: rgba(45, 55, 52, 0.10);
+  --v3-border-strong: rgba(45, 55, 52, 0.16);
+  --v3-text: #303633;
+  --v3-text-2: #56605c;
+  --v3-text-3: #7b8581;
+  --v3-accent: #648f82;
+  --v3-accent-2: #557f73;
+  --v3-accent-soft: rgba(94, 135, 123, 0.10);
+
+  --calm-bg: #f7f7f4;
+  --calm-bg-2: #f3f4f0;
+  --calm-panel: #ffffff;
+  --calm-panel-2: #f8f8f5;
+  --calm-panel-3: #f1f3ef;
+  --calm-line: rgba(45, 55, 52, 0.10);
+  --calm-line-strong: rgba(45, 55, 52, 0.16);
+  --calm-text: #303633;
+  --calm-text-2: #56605c;
+  --calm-text-3: #7b8581;
+  --calm-accent: #648f82;
+  --calm-accent-strong: #557f73;
+  --calm-accent-soft: rgba(94, 135, 123, 0.10);
+
+  --v41-bg: #f7f7f4;
+  --v41-surface: #ffffff;
+  --v41-surface-raised: #ffffff;
+  --v41-surface-soft: #f6f7f3;
+  --v41-border: rgba(45, 55, 52, 0.10);
+  --v41-border-strong: rgba(45, 55, 52, 0.16);
+  --v41-text: #303633;
+  --v41-text-secondary: #56605c;
+  --v41-text-muted: #7b8581;
+  --v41-accent: #648f82;
+  --v41-accent-strong: #557f73;
+  --v41-accent-soft: rgba(94, 135, 123, 0.10);
+}
+
+html,
+body,
+#root {
+  background: #f7f7f4 !important;
+}
+
+body {
+  color: #303633 !important;
+}
+
+::selection {
+  color: #24302c;
+  background: #dfeae5;
+}
+
+/* =========================================================
+   Global shell
+   ========================================================= */
+
+.app-shell-v3 {
+  background: #f7f7f4 !important;
+  color: #303633 !important;
+}
+
+.app-shell-v3 .global-sidebar {
+  color: #3b423f !important;
+  background: #f1f2ee !important;
+  border-right: 1px solid #e2e4df !important;
+}
+
+.app-shell-v3 .brand-mark {
+  color: #f8fbf9 !important;
+  background: #557b70 !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+.app-shell-v3 .brand strong,
+.app-shell-v3 .workspace-switcher strong,
+.app-shell-v3 .user-card strong {
+  color: #303633 !important;
+}
+
+.app-shell-v3 .brand small,
+.app-shell-v3 .workspace-switcher small,
+.app-shell-v3 .user-card small {
+  color: #818a86 !important;
+}
+
+.app-shell-v3 .workspace-switcher {
+  color: #535c58 !important;
+  background: #f7f8f5 !important;
+  border-color: #e0e3de !important;
+}
+
+.app-shell-v3 .workspace-switcher:hover {
+  background: #ecefeb !important;
+}
+
+.app-shell-v3 .workspace-switcher-mark {
+  color: #45695f !important;
+  background: #e3ece7 !important;
+  border-color: #d6e3dd !important;
+}
+
+.app-shell-v3 .sidebar-primary-action,
+.app-shell-v3 .primary-button,
+.app-shell-v3 .calm-button.primary,
+.tab-workspace .run-button {
+  color: #f7faf8 !important;
+  background: #567f73 !important;
+  border-color: #567f73 !important;
+  box-shadow: none !important;
+}
+
+.app-shell-v3 .sidebar-primary-action:hover,
+.app-shell-v3 .primary-button:hover:not(:disabled),
+.app-shell-v3 .calm-button.primary:hover:not(:disabled),
+.tab-workspace .run-button:hover:not(:disabled) {
+  background: #4a7267 !important;
+}
+
+.app-shell-v3 .global-nav button {
+  color: #66706c !important;
+  background: transparent !important;
+}
+
+.app-shell-v3 .global-nav button:hover {
+  color: #303633 !important;
+  background: #e9ece7 !important;
+}
+
+.app-shell-v3 .global-nav button.active {
+  color: #303633 !important;
+  background: #e5ebe7 !important;
+  border: 1px solid #d8dfda !important;
+  box-shadow: none !important;
+}
+
+.app-shell-v3 .user-avatar {
+  color: #47675f !important;
+  background: #dde7e2 !important;
+}
+
+.app-shell-v3 .icon-button,
+.app-shell-v3 .secondary-button,
+.app-shell-v3 .calm-button,
+.app-shell-v3 .calm-icon-button,
+.app-shell-v3 .square-button {
+  color: #56605c !important;
+  background: #ffffff !important;
+  border-color: #dde1dc !important;
+  box-shadow: none !important;
+}
+
+.app-shell-v3 .icon-button:hover,
+.app-shell-v3 .secondary-button:hover:not(:disabled),
+.app-shell-v3 .calm-button:hover:not(:disabled),
+.app-shell-v3 .calm-icon-button:hover:not(:disabled),
+.app-shell-v3 .square-button:hover:not(:disabled) {
+  color: #303633 !important;
+  background: #f0f2ee !important;
+}
+
+.app-main,
+.tab-agents .app-main,
+.tab-knowledge .app-main,
+.tab-extensions .app-main,
+.tab-tasks .app-main,
+.tab-governance .app-main {
+  background: #f7f7f4 !important;
+}
+
+/* =========================================================
+   Workspace: Chat-first reading surface
+   ========================================================= */
+
+.tab-workspace .app-main,
+.tab-workspace .workspace-layout,
+.tab-workspace .workspace-stage,
+.tab-workspace .workspace-core,
+.tab-workspace .workspace-scroll {
+  color: #303633 !important;
+  background: #f7f7f4 !important;
+}
+
+.tab-workspace .session-rail {
+  color: #3b423f !important;
+  background: #f3f4f0 !important;
+  border-right: 1px solid #e2e4df !important;
+}
+
+.tab-workspace .session-head h2,
+.tab-workspace .recent-heading strong,
+.tab-workspace .session-item strong,
+.tab-workspace .session-project-name,
+.tab-workspace .workspace-title {
+  color: #343b38 !important;
+}
+
+.tab-workspace .session-head .eyebrow,
+.tab-workspace .recent-heading .eyebrow,
+.tab-workspace .session-section-heading > span:first-child,
+.tab-workspace .session-item small,
+.tab-workspace .session-project-count,
+.tab-workspace .session-project-empty,
+.tab-workspace .session-empty {
+  color: #818a86 !important;
+}
+
+.tab-workspace .session-create-button {
+  color: #496b61 !important;
+  background: #e8efeb !important;
+  border-color: #dce6e1 !important;
+}
+
+.tab-workspace .session-item-shell:hover,
+.tab-workspace .session-project-row:hover {
+  background: #ecefeb !important;
+}
+
+.tab-workspace .session-item-shell.active,
+.tab-workspace .session-project-main.selected {
+  background: #e2e9e5 !important;
+}
+
+.tab-workspace .session-popover,
+.tab-workspace .project-popover {
+  color: #4f5854 !important;
+  background: #ffffff !important;
+  border-color: #dfe3de !important;
+  box-shadow: 0 12px 28px rgba(43, 51, 48, 0.08) !important;
+}
+
+.tab-workspace .session-popover button,
+.tab-workspace .project-popover button {
+  color: #4f5854 !important;
+}
+
+.tab-workspace .session-popover button:hover,
+.tab-workspace .project-popover button:hover {
+  color: #2f3633 !important;
+  background: #f2f4f1 !important;
+}
+
+.tab-workspace .workspace-toolbar {
+  background: rgba(247, 247, 244, 0.96) !important;
+  border-bottom: 1px solid #e4e6e1 !important;
+}
+
+.tab-workspace .workspace-breadcrumb,
+.tab-workspace .workspace-toolbar small,
+.tab-workspace .message-label,
+.tab-workspace .result-meta-hint,
+.tab-workspace .composer-keyboard-hint {
+  color: #818a86 !important;
+}
+
+.tab-workspace .workspace-rail-toggle {
+  color: #6f7874 !important;
+  background: #ffffff !important;
+  border-color: #dde1dc !important;
+}
+
+.tab-workspace .workspace-rail-toggle:hover {
+  color: #38403d !important;
+  background: #f0f2ee !important;
+}
+
+.tab-workspace .user-message {
+  color: #353d39 !important;
+  background: #ecefeb !important;
+  border-color: #e2e5e0 !important;
+}
+
+.tab-workspace .agent-result,
+.tab-workspace .agent-result .citation-answer,
+.tab-workspace .agent-result .markdown-answer,
+.tab-workspace .agent-result .markdown-body,
+.tab-workspace .agent-result .progressive-answer,
+.tab-workspace .agent-result .markdown-body p,
+.tab-workspace .agent-result .markdown-body li,
+.tab-workspace .progressive-answer-text {
+  color: #343b38 !important;
+}
+
+.tab-workspace .agent-result h1,
+.tab-workspace .agent-result h2,
+.tab-workspace .agent-result h3,
+.tab-workspace .agent-result h4,
+.tab-workspace .agent-result strong,
+.tab-workspace .agent-result header strong {
+  color: #252c29 !important;
+}
+
+.tab-workspace .agent-result header small {
+  color: #848d89 !important;
+}
+
+.tab-workspace .result-mark {
+  color: #476a60 !important;
+  background: #e2ebe6 !important;
+  border-color: #d9e5df !important;
+}
+
+.tab-workspace .result-state-pill,
+.tab-workspace .result-state-pill.done,
+.tab-workspace .result-state-pill.running {
+  color: #5c756d !important;
+  background: #edf2ef !important;
+  border-color: #e0e7e3 !important;
+}
+
+.tab-workspace .working-answer-body {
+  color: #59635f !important;
+  background: #f2f4f1 !important;
+  border-color: #e3e6e1 !important;
+}
+
+.tab-workspace .working-answer-body small {
+  color: #8b9490 !important;
+}
+
+.tab-workspace .result-meta {
+  border-top-color: #e6e8e4 !important;
+}
+
+.tab-workspace .result-meta.result-meta-compact,
+.tab-workspace .result-meta.result-meta-compact .run-detail-link {
+  background: transparent !important;
+}
+
+.tab-workspace .result-meta.result-meta-compact .result-meta-hint > span:not(.result-meta-dot),
+.tab-workspace .result-meta.result-meta-compact .result-meta-hint small {
+  color: #87908c !important;
+}
+
+.tab-workspace .run-detail-link,
+.tab-workspace .result-meta.result-meta-compact .run-detail-link {
+  color: #668078 !important;
+  border-color: #dde4e0 !important;
+}
+
+.tab-workspace .run-detail-link:hover {
+  color: #425f56 !important;
+  background: #edf2ef !important;
+}
+
+.tab-workspace .workspace-composer-area {
+  background: linear-gradient(180deg, rgba(247,247,244,0), rgba(247,247,244,.96) 22%, #f7f7f4 46%) !important;
+}
+
+.tab-workspace .composer.composer-compact.attachment-drop-zone,
+.tab-workspace .composer-compact > textarea,
+.tab-workspace .composer textarea {
+  color: #303633 !important;
+  background: #ffffff !important;
+  border-color: #d9ded9 !important;
+  box-shadow: 0 4px 18px rgba(45, 55, 52, 0.045) !important;
+}
+
+.tab-workspace .composer.composer-compact.attachment-drop-zone:focus-within,
+.tab-workspace .composer-compact > textarea:focus,
+.tab-workspace .composer textarea:focus {
+  border-color: #aabdb6 !important;
+  box-shadow: 0 0 0 3px rgba(94, 135, 123, 0.08) !important;
+}
+
+.tab-workspace textarea::placeholder {
+  color: #98a19d !important;
+}
+
+.tab-workspace .composer-settings-button,
+.tab-workspace .composer-settings-copy strong {
+  color: #66706c !important;
+}
+
+.tab-workspace .composer-settings-copy small,
+.attachment-drop-hint {
+  color: #929b97 !important;
+}
+
+.attachment-add-button,
+.attachment-preview-card,
+.message-attachment-chip {
+  color: #525c58 !important;
+  background: #f7f8f5 !important;
+  border-color: #dde2dd !important;
+}
+
+.attachment-preview-copy strong,
+.message-attachment-name {
+  color: #3b433f !important;
+}
+
+.attachment-preview-copy small,
+.message-attachment-chip small {
+  color: #858e8a !important;
+}
+
+.attachment-file-mark,
+.attachment-kind {
+  color: #56786e !important;
+  background: #e7efeb !important;
+}
+
+/* Markdown is intentionally closer to ChatGPT's paper reading surface. */
+.markdown-answer,
+.citation-answer,
+.markdown-body {
+  color: #343b38 !important;
+}
+
+.markdown-answer code,
+.markdown-body code {
+  color: #3d544d !important;
+  background: #eff2ef !important;
+}
+
+.markdown-answer pre,
+.markdown-body pre {
+  color: #303633 !important;
+  background: #f1f3f0 !important;
+  border: 1px solid #e0e4df !important;
+}
+
+.markdown-answer table,
+.markdown-body table {
+  color: #343b38 !important;
+  background: #ffffff !important;
+  border-color: #dfe3de !important;
+}
+
+.markdown-answer th,
+.markdown-body th {
+  color: #303633 !important;
+  background: #eef1ee !important;
+  border-color: #dfe3de !important;
+}
+
+.markdown-answer td,
+.markdown-body td {
+  color: #46504c !important;
+  background: #ffffff !important;
+  border-color: #e2e5e1 !important;
+}
+
+/* =========================================================
+   Product pages
+   ========================================================= */
+
+.calm-page,
+.agents-calm-page,
+.knowledge-calm-page,
+.extensions-calm-page,
+.tasks-calm-page,
+.governance-calm-page {
+  color: #303633 !important;
+  background: transparent !important;
+}
+
+.calm-page h1,
+.calm-page h2,
+.calm-page h3,
+.calm-page strong,
+.calm-page-copy h1 {
+  color: #303633 !important;
+}
+
+.calm-page p,
+.calm-page label,
+.calm-page td,
+.calm-page-copy p {
+  color: #626c68 !important;
+}
+
+.calm-page small,
+.calm-page .muted,
+.calm-page .muted-text,
+.calm-kicker {
+  color: #858e8a !important;
+}
+
+.calm-page input,
+.calm-page select,
+.calm-page textarea,
+.governance-calm-page input,
+.governance-calm-page select,
+.governance-calm-page textarea {
+  color: #303633 !important;
+  background: #ffffff !important;
+  border-color: #dce1dc !important;
+  box-shadow: none !important;
+}
+
+.calm-page input::placeholder,
+.calm-page textarea::placeholder,
+.governance-calm-page input::placeholder {
+  color: #9aa29f !important;
+}
+
+.calm-page input:focus,
+.calm-page textarea:focus,
+.calm-page select:focus,
+.governance-calm-page input:focus,
+.governance-calm-page textarea:focus,
+.governance-calm-page select:focus {
+  border-color: #a8bab4 !important;
+  box-shadow: 0 0 0 3px rgba(94,135,123,.07) !important;
+}
+
+/* Broad card/surface set shared by all five product pages. */
+.calm-stat-strip,
+.calm-stat-card,
+.agent-calm-card,
+.agent-card,
+.knowledge-summary-card,
+.knowledge-scope-section,
+.knowledge-library-section,
+.knowledge-base-card,
+.knowledge-project-card,
+.extension-calm-card,
+.extension-section,
+.task-calm-card,
+.task-row,
+.governance-calm-card,
+.governance-advanced-section,
+.workspace-management-dialog,
+.approval-card,
+.warning-box,
+.run-settings-panel,
+.workspace-settings-drawer,
+.workspace-details-drawer {
+  color: #39413d !important;
+  background: #ffffff !important;
+  border-color: #dfe3de !important;
+  box-shadow: none !important;
+}
+
+/* Catch the older hard-coded dark page surfaces without touching semantic badges. */
+.agents-calm-page [class*="summary"],
+.knowledge-calm-page [class*="summary"],
+.extensions-calm-page [class*="summary"],
+.tasks-calm-page [class*="summary"],
+.governance-calm-page [class*="summary"] {
+  border-color: #dfe3de !important;
+}
+
+.knowledge-center-table-shell,
+.knowledge-center-table,
+.tasks-calm-page table,
+.governance-calm-page table {
+  color: #3c4541 !important;
+  background: #ffffff !important;
+  border-color: #dfe3de !important;
+}
+
+.knowledge-center-table th,
+.tasks-calm-page th,
+.governance-calm-page th {
+  color: #68716d !important;
+  background: #f2f4f1 !important;
+  border-color: #dfe3de !important;
+}
+
+.knowledge-center-table td,
+.tasks-calm-page td,
+.governance-calm-page td {
+  color: #4f5955 !important;
+  background: #ffffff !important;
+  border-color: #e3e6e2 !important;
+}
+
+/* Dialog/backdrop should not flash a black curtain. */
+.workspace-dialog-backdrop,
+.workspace-details-backdrop,
+.workspace-drawer-backdrop {
+  background: rgba(67, 76, 72, 0.22) !important;
+}
+
+/* Error / warning states keep semantics but avoid luminous blocks. */
+.error-box,
+.shell-notice {
+  color: #8c5559 !important;
+  background: #fbf1f2 !important;
+  border-color: #ead6d8 !important;
+}
+
+.warning-box,
+.approval-card {
+  color: #665c47 !important;
+  background: #faf7ef !important;
+  border-color: #e8dfc9 !important;
+}
+
+/* Scrollbars are visible but low contrast. */
+* {
+  scrollbar-color: #c4cac6 transparent;
+}
+
+@media (max-width: 900px) {
+  .app-shell-v3 .global-sidebar,
+  .tab-workspace .session-rail {
+    background: #f2f3ef !important;
+  }
+}
+
+/* Long PDF / document answers stay in history without forcing Chromium to
+   continuously paint every off-screen message on later turns. */
+.tab-workspace .conversation-flow > .agent-result,
+.tab-workspace .conversation-flow > .user-message-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 240px;
+}

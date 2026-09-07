@@ -1,0 +1,358 @@
+/* =========================================================
+   Agent Drawer
+   ========================================================= */
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+
+  z-index: 100;
+
+  background:
+    rgba(21, 27, 37, 0.18);
+
+  backdrop-filter:
+    blur(2px);
+}
+
+.agent-drawer {
+  position: absolute;
+
+  top: 0;
+  right: 0;
+  bottom: 0;
+
+  width: min(
+    470px,
+    calc(100vw - 30px)
+  );
+
+  background: #fff;
+
+  box-shadow:
+    -12px 0 35px
+      rgba(
+        22,
+        29,
+        40,
+        0.1
+      );
+
+  overflow-y: auto;
+}
+
+.drawer-head {
+  position: sticky;
+  top: 0;
+
+  z-index: 1;
+
+  min-height: 78px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 20px;
+
+  padding:
+    18px 22px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.96
+    );
+
+  border-bottom:
+    1px solid
+    var(--border);
+}
+
+.drawer-agent {
+  display: flex;
+  align-items: center;
+
+  gap: 12px;
+}
+
+.drawer-avatar {
+  width: 40px;
+  height: 40px;
+
+  display: grid;
+  place-items: center;
+
+  color: #4e5967;
+  background: #e8eaed;
+
+  border-radius: 10px;
+
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.drawer-agent h2 {
+  margin: 0;
+
+  font-size: 17px;
+}
+
+.drawer-agent p {
+  margin:
+    4px 0 0;
+
+  color: var(--text-muted);
+
+  font-size: 9px;
+}
+
+.drawer-body {
+  padding:
+    25px 22px 50px;
+}
+
+.drawer-body section {
+  padding:
+    0 0 27px;
+
+  margin-bottom: 27px;
+
+  border-bottom:
+    1px solid
+    var(--border);
+}
+
+.drawer-body section:last-child {
+  border-bottom: 0;
+}
+
+.drawer-label {
+  display: block;
+
+  margin-bottom: 13px;
+
+  color: var(--text-muted);
+
+  font-size: 8px;
+  font-weight: 700;
+
+  text-transform: uppercase;
+
+  letter-spacing: 0.08em;
+}
+
+.drawer-description {
+  margin: 0;
+
+  color: var(--text-secondary);
+
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.drawer-kv {
+  display: flex;
+  flex-direction: column;
+
+  gap: 11px;
+}
+
+.drawer-kv > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 15px;
+}
+
+.drawer-kv span {
+  color: var(--text-muted);
+
+  font-size: 9px;
+}
+
+.drawer-kv strong,
+.drawer-kv code {
+  max-width: 270px;
+
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+
+  color: #48515d;
+
+  font-size: 9px;
+}
+
+.drawer-metrics {
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      1fr
+    );
+
+  gap: 9px;
+}
+
+.drawer-metrics > div {
+  min-height: 70px;
+
+  display: flex;
+  flex-direction: column;
+
+  justify-content: center;
+
+  gap: 7px;
+
+  padding: 11px;
+
+  background: #f8f9fa;
+
+  border:
+    1px solid
+    var(--border);
+
+  border-radius: 8px;
+}
+
+.drawer-metrics span {
+  color: var(--text-muted);
+
+  font-size: 8px;
+}
+
+.drawer-metrics strong {
+  font-size: 13px;
+
+  font-variant-numeric:
+    tabular-nums;
+}
+
+.capability-profile-list {
+  display: flex;
+  flex-direction: column;
+
+  gap: 10px;
+}
+
+.capability-profile-list article {
+  padding: 13px;
+
+  background: #f9fafb;
+
+  border:
+    1px solid
+    var(--border);
+
+  border-radius: 9px;
+}
+
+.capability-profile-list article
+  header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  margin-bottom: 12px;
+}
+
+.capability-profile-list
+  header
+  strong {
+  font-size: 10px;
+}
+
+.capability-profile-list
+  header
+  span {
+  color: var(--text-muted);
+
+  font-size: 8px;
+}
+
+.capability-profile-list
+  article
+  > div {
+  display: grid;
+
+  grid-template-columns:
+    repeat(
+      2,
+      1fr
+    );
+
+  gap: 9px;
+}
+
+.capability-profile-list
+  article
+  > div
+  > span {
+  display: flex;
+  justify-content: space-between;
+
+  gap: 9px;
+
+  color: var(--text-muted);
+
+  font-size: 8px;
+}
+
+.capability-profile-list b {
+  color: #48515d;
+
+  font-weight: 650;
+}
+
+.drawer-empty {
+  padding: 20px;
+
+  color: var(--text-muted);
+  background: #f8f9fa;
+
+  border-radius: 8px;
+
+  font-size: 9px;
+
+  text-align: center;
+}
+
+/* =========================================================
+   Inline Form
+   ========================================================= */
+
+.inline-form {
+  display: grid;
+
+  grid-template-columns:
+    1fr 2.2fr 1fr auto;
+
+  gap: 12px;
+
+  margin-bottom: 23px;
+
+  padding: 16px;
+
+  background: #fff;
+
+  border:
+    1px solid
+    var(--border);
+
+  border-radius: 10px;
+}
+
+.form-submit {
+  align-self: end;
+}
+
+.mcp-create-form {
+  grid-template-columns:
+    1fr 2.4fr auto;
+}
+

@@ -1,0 +1,361 @@
+/* =========================================================
+   AgentMesh UI v4.1 — Product Interaction Closure
+   Quiet Graphite luminance pass + request-local attachments
+   ========================================================= */
+
+:root {
+  --v41-bg: #0f1519;
+  --v41-surface: #151c21;
+  --v41-surface-raised: #192126;
+  --v41-surface-soft: #12191d;
+  --v41-border: rgba(184, 201, 202, 0.10);
+  --v41-border-strong: rgba(184, 201, 202, 0.16);
+  --v41-text: #d3dcdd;
+  --v41-text-secondary: #9da9ac;
+  --v41-text-muted: #758286;
+  --v41-accent: #71998d;
+  --v41-accent-strong: #82aa9e;
+  --v41-accent-soft: rgba(113, 153, 141, 0.13);
+}
+
+/* One calm text ladder. Avoid pure white and near-invisible grey. */
+.app-shell,
+.calm-page,
+.tab-workspace {
+  color: var(--v41-text);
+}
+
+.calm-page h1,
+.calm-page h2,
+.calm-page h3,
+.calm-page strong,
+.tab-workspace .agent-result h1,
+.tab-workspace .agent-result h2,
+.tab-workspace .agent-result h3,
+.tab-workspace .agent-result h4,
+.tab-workspace .agent-result strong {
+  color: var(--v41-text);
+}
+
+.calm-page p,
+.calm-page label,
+.calm-page td,
+.tab-workspace .agent-result p,
+.tab-workspace .agent-result li,
+.tab-workspace .user-message {
+  color: var(--v41-text-secondary);
+}
+
+.calm-page small,
+.calm-page .muted,
+.tab-workspace small,
+.tab-workspace .message-label {
+  color: var(--v41-text-muted);
+}
+
+/* Old generic inline-form was white. Every v4 product page owns a dark form. */
+.calm-page .inline-form,
+.governance-calm-page .inline-form.calm-inline-form,
+.governance-calm-page .inline-form.calm-secret-form,
+.governance-calm-page form.inline-form {
+  margin-bottom: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.governance-calm-page input,
+.governance-calm-page select,
+.governance-calm-page textarea,
+.calm-page input,
+.calm-page select,
+.calm-page textarea {
+  border-color: var(--v41-border-strong);
+  background: var(--v41-surface-soft);
+  color: var(--v41-text);
+  box-shadow: none;
+}
+
+.governance-calm-page input::placeholder,
+.calm-page input::placeholder,
+.calm-page textarea::placeholder {
+  color: #687579;
+}
+
+/* Run metadata must read like a quiet footnote, never a silver banner. */
+.tab-workspace .result-meta.result-meta-compact {
+  margin-top: 15px;
+  padding: 11px 0 0;
+  border: 0;
+  border-top: 1px solid var(--v41-border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.tab-workspace .result-meta.result-meta-compact .result-meta-hint > span:not(.result-meta-dot) {
+  color: #89979a;
+}
+
+.tab-workspace .result-meta.result-meta-compact .result-meta-hint small {
+  color: #6f7c80;
+}
+
+.tab-workspace .result-meta.result-meta-compact .result-meta-dot {
+  background: #668f83;
+  box-shadow: none;
+}
+
+.tab-workspace .result-meta.result-meta-compact .run-detail-link {
+  padding: 6px 9px;
+  border: 1px solid var(--v41-border);
+  background: rgba(255,255,255,.018);
+  color: #8fa9a2;
+}
+
+.tab-workspace .result-meta.result-meta-compact .run-detail-link:hover {
+  border-color: rgba(113,153,141,.24);
+  background: var(--v41-accent-soft);
+  color: #b7c8c4;
+}
+
+/* Reduce the remaining bright green CTA energy. */
+.calm-button.primary,
+.tab-workspace .primary-button,
+.app-sidebar .sidebar-new-task {
+  border-color: rgba(113,153,141,.20);
+  background: #446b61;
+  color: #e0e9e6;
+  box-shadow: none;
+}
+
+.calm-button.primary:hover,
+.tab-workspace .primary-button:hover:not(:disabled) {
+  background: #4d776d;
+}
+
+/* =========================================================
+   Workspace attachment composer
+   ========================================================= */
+
+.tab-workspace .composer.composer-compact.attachment-drop-zone {
+  border-color: var(--v41-border-strong);
+  background: #141b20;
+}
+
+.tab-workspace .composer.composer-compact.attachment-drop-zone:focus-within {
+  border-color: rgba(113,153,141,.30);
+  box-shadow: 0 0 0 3px rgba(113,153,141,.05);
+}
+
+.attachment-composer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+  padding: 8px 14px 10px;
+}
+
+.attachment-file-input {
+  display: none;
+}
+
+.attachment-add-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--v41-border);
+  border-radius: 9px;
+  background: rgba(255,255,255,.018);
+  color: var(--v41-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.attachment-add-button:hover:not(:disabled) {
+  border-color: rgba(113,153,141,.25);
+  background: var(--v41-accent-soft);
+  color: #bccbc7;
+}
+
+.attachment-add-button:disabled {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.attachment-drop-hint {
+  color: #68767a;
+  font-size: 11px;
+}
+
+.attachment-preview-list {
+  display: flex;
+  flex: 1 0 100%;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 1px;
+  scrollbar-width: thin;
+}
+
+.attachment-preview-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 42px minmax(110px, 1fr) 24px;
+  align-items: center;
+  gap: 9px;
+  min-width: 220px;
+  max-width: 310px;
+  padding: 7px;
+  border: 1px solid var(--v41-border);
+  border-radius: 11px;
+  background: #11181c;
+}
+
+.attachment-preview-card.status-error {
+  border-color: rgba(183,108,108,.25);
+}
+
+.attachment-preview-image,
+.attachment-file-mark {
+  width: 42px;
+  height: 42px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.attachment-file-mark {
+  display: grid;
+  place-items: center;
+  background: rgba(113,153,141,.10);
+  color: #91aaa3;
+}
+
+.attachment-preview-copy {
+  min-width: 0;
+}
+
+.attachment-preview-copy strong {
+  display: block;
+  overflow: hidden;
+  color: #cbd5d5;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-preview-copy small {
+  display: block;
+  margin-top: 3px;
+  color: #748286;
+  font-size: 10px;
+}
+
+.attachment-progress {
+  display: block;
+  width: 100%;
+  height: 2px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: rgba(255,255,255,.05);
+}
+
+.attachment-progress > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #668f83;
+  transition: width 120ms ease;
+}
+
+.attachment-remove-button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #728084;
+  cursor: pointer;
+}
+
+.attachment-remove-button:hover {
+  background: rgba(255,255,255,.04);
+  color: #b2bfc0;
+}
+
+/* Persisted / optimistic message attachment chips. */
+.message-attachment-list {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 8px;
+}
+
+.agent-result .message-attachment-list {
+  justify-content: flex-start;
+}
+
+.message-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 320px;
+  padding: 6px 9px 6px 6px;
+  border: 1px solid var(--v41-border);
+  border-radius: 9px;
+  background: #141c20;
+  color: var(--v41-text-secondary);
+}
+
+.attachment-kind {
+  display: grid;
+  min-width: 30px;
+  height: 24px;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(113,153,141,.10);
+  color: #89a49c;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.attachment-kind.image {
+  background: rgba(104,126,157,.12);
+  color: #8da3bd;
+}
+
+.message-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  color: #b8c4c4;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-attachment-chip small {
+  flex: 0 0 auto;
+  color: #6f7d81;
+  font-size: 9px;
+}
+
+@media (max-width: 760px) {
+  .attachment-drop-hint { display: none; }
+  .attachment-preview-card { min-width: 190px; }
+}
+
+.attachment-remove-button:disabled {
+  opacity: .35;
+  cursor: not-allowed;
+}

@@ -1,0 +1,1477 @@
+import type {
+  Agent,
+  Conversation,
+  ConversationAttachment,
+  DeliveryMode,
+  ExecutionMode,
+  KnowledgeBase,
+  KnowledgeBaseScope,
+  KnowledgeFile,
+  MCPDiscoveredTool,
+  MCPServer,
+  MemoryCategory,
+  MemorySourceType,
+  Message,
+  Planner,
+  PluginInfo,
+  Project,
+  ProjectRuntimeConfig,
+  RunResult,
+  RuntimeReliabilitySnapshot,
+  Scheduler,
+  SynthesisMode,
+  Task,
+  Tool,
+  User,
+  UserMemory,
+} from "./types";
+
+// Browser-facing API defaults to same-origin in both development and production.
+// - Vite dev server proxies /api -> Go control plane.
+// - Production Gateway proxies /api -> Go control plane.
+// This keeps the HttpOnly refresh cookie on the browser-facing site and makes
+// F5 / hard refresh session restoration independent of localhost vs 127.0.0.1.
+const DEFAULT_BASE = "";
+
+const BASE = (
+  import.meta.env.VITE_API_BASE_URL ??
+  DEFAULT_BASE
+).replace(
+  /\/$/,
+  "",
+);
+
+let accessToken = "";
+
+let refreshPromise: Promise<boolean> | null = null;
+
+// =========================================================
+// Refresh Access Token
+//
+// 多个请求同时 401 时，只执行一次 Refresh。
+// =========================================================
+
+async function refreshAccess(): Promise<boolean> {
+  if (refreshPromise) {
+    return refreshPromise;
+  }
+
+  refreshPromise = (async () => {
+    try {
+      const response = await fetch(
+        `${BASE}/api/auth/refresh`,
+        {
+          method: "POST",
+          credentials: "include",
+        },
+      );
+
+      if (!response.ok) {
+        accessToken = "";
+
+        return false;
+      }
+
+      const body = await response.json();
+
+      accessToken = body.data.accessToken;
+
+      return true;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+// =========================================================
+// Unified Request
+// =========================================================
+
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  retry = true,
+): Promise<T> {
+  const headers = new Headers(
+    init.headers,
+  );
+
+  if (accessToken) {
+    headers.set(
+      "Authorization",
+      `Bearer ${accessToken}`,
+    );
+  }
+
+  if (
+    init.body &&
+    !(init.body instanceof FormData) &&
+    !headers.has("Content-Type")
+  ) {
+    headers.set(
+      "Content-Type",
+      "application/json; charset=utf-8",
+    );
+  }
+
+  const response = await fetch(
+    `${BASE}${path}`,
+    {
+      ...init,
+      headers,
+      credentials: "include",
+    },
+  );
+
+  // =====================================================
+  // Access Token expired
+  //
+  // request
+  //   ↓ 401
+  // refresh
+  //   ↓
+  // retry once
+  // =====================================================
+
+  if (
+    response.status === 401 &&
+    retry &&
+    (await refreshAccess())
+  ) {
+    return request<T>(
+      path,
+      init,
+      false,
+    );
+  }
+
+  if (!response.ok) {
+    throw await readApiError(
+      response,
+    );
+  }
+
+  const body = await response.json();
+
+  return body.data as T;
+}
+
+// =========================================================
+// Auth
+// =========================================================
+
+export type VerificationScene =
+  | "register"
+  | "login"
+  | "reset_password";
+
+export type EmailCodeResult = {
+  expiresInSeconds: number;
+  cooldownSeconds: number;
+};
+
+type AuthResponse = {
+  accessToken: string;
+  expiresIn: number;
+  tokenType: string;
+  user: User;
+};
+
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: number | null;
+
+  constructor(
+    message: string,
+    status: number,
+    code: number | null,
+  ) {
+    super(message);
+
+    this.name = "ApiError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+export function friendlyApiError(
+  error: unknown,
+  fallback = "操作失败，请稍后重试。",
+) {
+  if (error instanceof ApiError) {
+    if (error.message.trim() === "model provider not configured") {
+      return "请先在模型设置中配置你自己的 API Key。";
+    }
+
+    if (error.status === 401) {
+      return "登录状态已失效，请重新登录。";
+    }
+
+    if (error.status === 403) {
+      return "你没有权限执行此操作。";
+    }
+
+    if (error.status === 404) {
+      return "请求的资源不存在，或已经被移除。";
+    }
+
+    if (error.status === 409) {
+      if (error.code === 40920) {
+        return "请先在模型设置中配置你自己的 API Key。";
+      }
+      if (error.code === 40930) {
+        return "当前项目已经属于另一个团队。一个项目同时只能属于一个团队；如需更换团队，请先完成项目迁移。";
+      }
+      return "当前数据已发生变化，请刷新后重试。";
+    }
+
+    if (error.status === 429) {
+      return "当前项目额度或请求频率已达到限制，请稍后再试或联系管理员调整额度。";
+    }
+
+    if (error.status >= 500) {
+      return "服务暂时不可用，请稍后重试。";
+    }
+
+    if (error.message.trim()) {
+      return error.message.trim();
+    }
+  }
+
+  if (error instanceof TypeError) {
+    return "无法连接 AgentMesh 服务，请检查网络或服务状态。";
+  }
+
+  return error instanceof Error && error.message.trim()
+    ? error.message.trim()
+    : fallback;
+}
+
+type ErrorEnvelope = {
+  code?: number;
+  message?: string;
+};
+
+async function readApiError(
+  response: Response,
+): Promise<ApiError> {
+  const text =
+    await response.text();
+
+  if (!text) {
+    return new ApiError(
+      `HTTP ${response.status}`,
+      response.status,
+      null,
+    );
+  }
+
+  try {
+    const body =
+      JSON.parse(
+        text,
+      ) as ErrorEnvelope;
+
+    return new ApiError(
+      typeof body.message ===
+          "string" &&
+        body.message.trim()
+        ? body.message.trim()
+        : `HTTP ${response.status}`,
+      response.status,
+      typeof body.code ===
+        "number"
+        ? body.code
+        : null,
+    );
+  } catch {
+    return new ApiError(
+      text,
+      response.status,
+      null,
+    );
+  }
+}
+
+function networkError(
+  error: unknown,
+): Error {
+  if (
+    error instanceof DOMException &&
+    error.name ===
+      "AbortError"
+  ) {
+    return new Error(
+      "请求超时，请确认网络和 AgentMesh 服务状态后重试",
+    );
+  }
+
+  if (
+    error instanceof TypeError
+  ) {
+    return new Error(
+      "无法连接 AgentMesh 服务，请确认后端已启动或稍后重试",
+    );
+  }
+
+  return error instanceof Error
+    ? error
+    : new Error(
+        String(error),
+      );
+}
+
+async function publicJson<T>(
+  path: string,
+  body: Record<
+    string,
+    unknown
+  >,
+): Promise<T> {
+  const controller =
+    new AbortController();
+
+  const timer =
+    window.setTimeout(
+      () =>
+        controller.abort(),
+      20_000,
+    );
+
+  try {
+    const response =
+      await fetch(
+        `${BASE}${path}`,
+        {
+          method: "POST",
+
+          credentials:
+            "include",
+
+          signal:
+            controller.signal,
+
+          headers: {
+            "Content-Type":
+              "application/json; charset=utf-8",
+          },
+
+          body:
+            JSON.stringify(
+              body,
+            ),
+        },
+      );
+
+    if (!response.ok) {
+      throw await readApiError(
+        response,
+      );
+    }
+
+    const envelope =
+      (await response.json()) as {
+        data: T;
+      };
+
+    return envelope.data;
+  } catch (error) {
+    if (
+      error instanceof ApiError
+    ) {
+      throw error;
+    }
+
+    throw networkError(
+      error,
+    );
+  } finally {
+    window.clearTimeout(
+      timer,
+    );
+  }
+}
+
+function acceptAuth(
+  result: AuthResponse,
+): User {
+  accessToken =
+    result.accessToken;
+
+  return result.user;
+}
+
+export async function login(
+  email: string,
+  password: string,
+): Promise<User> {
+  const result =
+    await publicJson<AuthResponse>(
+      "/api/auth/login",
+      {
+        email,
+        password,
+      },
+    );
+
+  return acceptAuth(
+    result,
+  );
+}
+
+export async function sendEmailCode(
+  email: string,
+  scene: VerificationScene,
+): Promise<EmailCodeResult> {
+  return publicJson<EmailCodeResult>(
+    "/api/auth/email/code",
+    {
+      email,
+      scene,
+    },
+  );
+}
+
+export async function registerVerified(
+  email: string,
+  code: string,
+  password: string,
+  displayName: string,
+): Promise<User> {
+  const result =
+    await publicJson<AuthResponse>(
+      "/api/auth/register/verify",
+      {
+        email,
+        code,
+        password,
+        displayName,
+      },
+    );
+
+  return acceptAuth(
+    result,
+  );
+}
+
+export async function loginWithCode(
+  email: string,
+  code: string,
+): Promise<User> {
+  const result =
+    await publicJson<AuthResponse>(
+      "/api/auth/login/code",
+      {
+        email,
+        code,
+      },
+    );
+
+  return acceptAuth(
+    result,
+  );
+}
+
+export async function resetPassword(
+  email: string,
+  code: string,
+  newPassword: string,
+): Promise<void> {
+  await publicJson<null>(
+    "/api/auth/password/reset",
+    {
+      email,
+      code,
+      newPassword,
+    },
+  );
+
+  accessToken = "";
+}
+
+export async function logout() {
+  await fetch(
+    `${BASE}/api/auth/logout`,
+    {
+      method: "POST",
+      credentials: "include",
+    },
+  );
+
+  accessToken = "";
+}
+
+export const me = () =>
+  request<User>(
+    "/api/me",
+  );
+
+// =========================================================
+// Conversation
+// =========================================================
+
+export const listConversations = () =>
+  request<Conversation[]>(
+    "/api/conversations",
+  );
+
+export const createConversation = (
+  title = "新会话",
+) =>
+  request<Conversation>(
+    "/api/conversations",
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        title,
+      }),
+    },
+  );
+
+export const renameConversation = (
+  conversationId: number,
+  title: string,
+) =>
+  request<Conversation>(
+    `/api/conversations/${conversationId}`,
+    {
+      method: "PATCH",
+
+      body: JSON.stringify({
+        title,
+      }),
+    },
+  );
+
+export const deleteConversation = (
+  conversationId: number,
+) =>
+  request<null>(
+    `/api/conversations/${conversationId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const listMessages = (
+  id: number,
+) =>
+  request<Message[]>(
+    `/api/conversations/${id}/messages`,
+  );
+
+
+// =========================================================
+// Projects / Workspace Organization
+// =========================================================
+
+export const listProjects = () =>
+  request<Project[]>(
+    "/api/projects",
+  );
+
+export const createProject = (
+  name: string,
+  description = "",
+) =>
+  request<Project>(
+    "/api/projects",
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        name,
+        description,
+      }),
+    },
+  );
+
+export const updateProject = (
+  projectId: number,
+  name: string,
+  description = "",
+) =>
+  request<Project>(
+    `/api/projects/${projectId}`,
+    {
+      method: "PATCH",
+
+      body: JSON.stringify({
+        name,
+        description,
+      }),
+    },
+  );
+
+export const deleteProject = (
+  projectId: number,
+) =>
+  request<null>(
+    `/api/projects/${projectId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const moveConversationToProject = (
+  conversationId: number,
+  projectId: number,
+) =>
+  request<null>(
+    `/api/projects/${projectId}/conversations/${conversationId}`,
+    {
+      method: "PUT",
+    },
+  );
+
+export const removeConversationFromProject = (
+  conversationId: number,
+) =>
+  request<null>(
+    `/api/projects/conversations/${conversationId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+// =========================================================
+// Project Runtime Context
+// =========================================================
+
+export const getProjectRuntimeConfig = (
+  projectId: number,
+) =>
+  request<ProjectRuntimeConfig>(
+    `/api/projects/${projectId}/runtime`,
+  );
+
+export const updateProjectRuntimeConfig = (
+  projectId: number,
+  config: ProjectRuntimeConfig,
+) =>
+  request<ProjectRuntimeConfig>(
+    `/api/projects/${projectId}/runtime`,
+    {
+      method: "PUT",
+      body: JSON.stringify(
+        config,
+      ),
+    },
+  );
+
+// =========================================================
+// Knowledge Bases / Files
+// =========================================================
+
+export const listKnowledgeBases = () =>
+  request<KnowledgeBase[]>(
+    "/api/knowledge/bases",
+  );
+
+export const createKnowledgeBase = (
+  name: string,
+  description: string,
+  scope: KnowledgeBaseScope,
+  projectId: number | null = null,
+) =>
+  request<KnowledgeBase>(
+    "/api/knowledge/bases",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        description,
+        scope,
+        projectId,
+      }),
+    },
+  );
+
+export const updateKnowledgeBase = (
+  knowledgeBaseId: number,
+  name: string,
+  description: string,
+) =>
+  request<KnowledgeBase>(
+    `/api/knowledge/bases/${knowledgeBaseId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        name,
+        description,
+      }),
+    },
+  );
+
+export const deleteKnowledgeBase = (
+  knowledgeBaseId: number,
+) =>
+  request<null>(
+    `/api/knowledge/bases/${knowledgeBaseId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const listKnowledgeFiles = () =>
+  request<KnowledgeFile[]>(
+    "/api/knowledge/files",
+  );
+
+export const listKnowledgeBaseFiles = (
+  knowledgeBaseId: number,
+) =>
+  request<KnowledgeFile[]>(
+    `/api/knowledge/bases/${knowledgeBaseId}/files`,
+  );
+
+export const uploadKnowledgeBaseFile = (
+  knowledgeBaseId: number,
+  file: File,
+) => {
+  const body = new FormData();
+  body.append("file", file);
+
+  return request<KnowledgeFile>(
+    `/api/knowledge/bases/${knowledgeBaseId}/files`,
+    {
+      method: "POST",
+      body,
+    },
+  );
+};
+
+export const deleteKnowledgeBaseFile = (
+  knowledgeBaseId: number,
+  fileId: number,
+) =>
+  request<null>(
+    `/api/knowledge/bases/${knowledgeBaseId}/files/${fileId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const reindexKnowledgeFile = (
+  fileId: number,
+) =>
+  request<KnowledgeFile>(
+    `/api/knowledge/files/${fileId}/reindex`,
+    {
+      method: "POST",
+    },
+  );
+
+// Project Home compatibility API: uses the Project's default PROJECT KB.
+export const listProjectKnowledgeFiles = (
+  projectId: number,
+) =>
+  request<KnowledgeFile[]>(
+    `/api/projects/${projectId}/knowledge/files`,
+  );
+
+export const uploadProjectKnowledgeFile = (
+  projectId: number,
+  file: File,
+) => {
+  const body = new FormData();
+  body.append("file", file);
+
+  return request<KnowledgeFile>(
+    `/api/projects/${projectId}/knowledge/files`,
+    {
+      method: "POST",
+      body,
+    },
+  );
+};
+
+export const deleteProjectKnowledgeFile = (
+  projectId: number,
+  fileId: number,
+) =>
+  request<null>(
+    `/api/projects/${projectId}/knowledge/files/${fileId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const listProjectGlobalKnowledgeBindings = (
+  projectId: number,
+) =>
+  request<KnowledgeBase[]>(
+    `/api/projects/${projectId}/knowledge/global-bindings`,
+  );
+
+export const bindProjectGlobalKnowledgeBase = (
+  projectId: number,
+  knowledgeBaseId: number,
+) =>
+  request<null>(
+    `/api/projects/${projectId}/knowledge/global-bindings/${knowledgeBaseId}`,
+    {
+      method: "PUT",
+    },
+  );
+
+export const unbindProjectGlobalKnowledgeBase = (
+  projectId: number,
+  knowledgeBaseId: number,
+) =>
+  request<null>(
+    `/api/projects/${projectId}/knowledge/global-bindings/${knowledgeBaseId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+
+// =========================================================
+// User-global Long-term Memory
+// =========================================================
+
+export type MemoryListFilters = {
+  category?: MemoryCategory;
+  status?: string;
+  keyword?: string;
+  limit?: number;
+};
+
+export type CreateMemoryRequest = {
+  category: MemoryCategory;
+  memoryKey: string;
+  content: string;
+  sourceType?: MemorySourceType;
+  confidence?: number;
+  status?: string;
+};
+
+export type UpdateMemoryRequest =
+  Partial<CreateMemoryRequest>;
+
+export const listMemories = (
+  filters: MemoryListFilters = {},
+) => {
+  const params =
+    new URLSearchParams();
+
+  if (filters.category) {
+    params.set(
+      "category",
+      filters.category,
+    );
+  }
+
+  if (filters.status) {
+    params.set(
+      "status",
+      filters.status,
+    );
+  }
+
+  if (filters.keyword) {
+    params.set(
+      "keyword",
+      filters.keyword,
+    );
+  }
+
+  if (filters.limit != null) {
+    params.set(
+      "limit",
+      String(filters.limit),
+    );
+  }
+
+  const query =
+    params.toString();
+
+  return request<UserMemory[]>(
+    `/api/memories${
+      query ? `?${query}` : ""
+    }`,
+  );
+};
+
+export const getMemory = (
+  memoryId: number,
+) =>
+  request<UserMemory>(
+    `/api/memories/${memoryId}`,
+  );
+
+export const createMemory = (
+  input: CreateMemoryRequest,
+) =>
+  request<UserMemory>(
+    "/api/memories",
+    {
+      method: "POST",
+      body: JSON.stringify(
+        input,
+      ),
+    },
+  );
+
+export const updateMemory = (
+  memoryId: number,
+  input: UpdateMemoryRequest,
+) =>
+  request<UserMemory>(
+    `/api/memories/${memoryId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(
+        input,
+      ),
+    },
+  );
+
+export const deleteMemory = (
+  memoryId: number,
+) =>
+  request<null>(
+    `/api/memories/${memoryId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+// =========================================================
+// Agent
+// =========================================================
+
+export const listAgents = () =>
+  request<Agent[]>(
+    "/api/agents",
+  );
+
+export const seedDemoAgents = () =>
+  request<Agent[]>(
+    "/api/agents/seed-demo",
+    {
+      method: "POST",
+    },
+  );
+
+export const createAgent = (
+  agent: Partial<Agent>,
+) =>
+  request<Agent>(
+    "/api/agents",
+    {
+      method: "POST",
+
+      body: JSON.stringify(
+        agent,
+      ),
+    },
+  );
+
+// =========================================================
+// Task History
+// =========================================================
+
+export const listTasks = () =>
+  request<Task[]>(
+    "/api/tasks",
+  );
+
+export const deleteTask = (
+  taskId: number,
+) =>
+  request<null>(
+    `/api/tasks/${taskId}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const cancelTask = (
+  taskId: number,
+) =>
+  request<Task>(
+    `/api/tasks/${taskId}/cancel`,
+    {
+      method: "POST",
+    },
+  );
+
+export const getRuntimeReliability = () =>
+  request<RuntimeReliabilitySnapshot>(
+    "/api/runtime/reliability",
+  );
+
+// =========================================================
+// Conversation Attachments
+// Request-local files/images. These are not knowledge-base ingestion.
+// =========================================================
+
+async function uploadMultipart<T>(
+  path: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+  retry = true,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const body = new FormData();
+    body.append("file", file);
+
+    xhr.open("POST", `${BASE}${path}`);
+    xhr.withCredentials = true;
+    if (accessToken) xhr.setRequestHeader("Authorization", `Bearer ${accessToken}`);
+
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && event.total > 0) {
+        onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      }
+    };
+
+    xhr.onerror = () => reject(new TypeError("network upload failed"));
+    xhr.onload = async () => {
+      if (xhr.status === 401 && retry) {
+        try {
+          if (await refreshAccess()) {
+            resolve(await uploadMultipart<T>(path, file, onProgress, false));
+            return;
+          }
+        } catch (error) {
+          reject(error);
+          return;
+        }
+      }
+
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let message = `HTTP ${xhr.status}`;
+        let code: number | null = null;
+        try {
+          const parsed = JSON.parse(xhr.responseText || "{}") as ErrorEnvelope;
+          if (typeof parsed.message === "string" && parsed.message.trim()) message = parsed.message.trim();
+          if (typeof parsed.code === "number") code = parsed.code;
+        } catch {
+          if (xhr.responseText) message = xhr.responseText;
+        }
+        reject(new ApiError(message, xhr.status, code));
+        return;
+      }
+
+      try {
+        const envelope = JSON.parse(xhr.responseText) as { data: T };
+        onProgress?.(100);
+        resolve(envelope.data);
+      } catch {
+        reject(new ApiError("上传响应格式不正确", xhr.status, null));
+      }
+    };
+
+    xhr.send(body);
+  });
+}
+
+export const uploadConversationAttachment = (
+  conversationId: number,
+  file: File,
+  onProgress?: (percent: number) => void,
+) => uploadMultipart<ConversationAttachment>(
+  `/api/conversations/${conversationId}/attachments`,
+  file,
+  onProgress,
+);
+
+export const listConversationAttachments = (conversationId: number) =>
+  request<ConversationAttachment[]>(`/api/conversations/${conversationId}/attachments`);
+
+export const deleteConversationAttachment = (conversationId: number, attachmentId: number) =>
+  request<void>(`/api/conversations/${conversationId}/attachments/${attachmentId}`, { method: "DELETE" });
+
+// =========================================================
+// Run New Task
+// =========================================================
+
+export type RunTaskRequest = {
+  conversationId: number | null;
+
+  task: string;
+
+  scheduler: Scheduler;
+
+  planner: Planner;
+
+  executionMode: ExecutionMode;
+
+  synthesisMode: SynthesisMode;
+
+  deliveryMode: DeliveryMode;
+
+  maxLatencyMs: number;
+
+  maxCost: number;
+
+  minQuality: number;
+
+  attachmentIds?: number[];
+};
+
+export type RunTaskStreamCallbacks = {
+  onDelta?: (delta: string) => void;
+  onStatus?: (message: string) => void;
+  onReady?: () => void;
+};
+
+type RunTaskStreamEvent = {
+  type?: string;
+  delta?: string;
+  message?: string;
+  phase?: string;
+  result?: RunResult;
+};
+
+export async function runTaskStream(
+  input: RunTaskRequest,
+  callbacks: RunTaskStreamCallbacks = {},
+  retry = true,
+): Promise<RunResult> {
+  const headers = new Headers({ "Content-Type": "application/json; charset=utf-8" });
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+
+  const response = await fetch(`${BASE}/api/tasks/run-stream`, {
+    method: "POST",
+    credentials: "include",
+    headers,
+    body: JSON.stringify({
+      conversationId: input.conversationId,
+      task: input.task,
+      scheduler: input.scheduler,
+      planner: input.planner,
+      executionMode: input.executionMode,
+      synthesisMode: input.synthesisMode,
+      attachmentIds: input.attachmentIds ?? [],
+      constraints: {
+        maxLatencyMs: input.maxLatencyMs,
+        maxCost: input.maxCost,
+        minQuality: input.minQuality,
+      },
+    }),
+  });
+
+  if (response.status === 401 && retry && (await refreshAccess())) {
+    return runTaskStream(input, callbacks, false);
+  }
+  if (!response.ok) throw await readApiError(response);
+  if (!response.body) throw new ApiError("服务器没有返回流式响应", 502, null);
+
+  callbacks.onReady?.();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: RunResult | null = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() ?? "";
+
+    for (const raw of lines) {
+      const line = raw.trim();
+      if (!line) continue;
+      let event: RunTaskStreamEvent;
+      try {
+        event = JSON.parse(line) as RunTaskStreamEvent;
+      } catch {
+        continue;
+      }
+      if (event.type === "delta" && event.delta) callbacks.onDelta?.(event.delta);
+      if (event.type === "status" && event.message) callbacks.onStatus?.(event.message);
+      if (event.type === "ready") callbacks.onStatus?.("模型已连接，正在生成回答…");
+      if (event.type === "error") {
+        const message = event.message || "任务执行失败";
+        if (message === "model provider not configured") {
+          throw new ApiError(message, 409, 40920);
+        }
+        throw new ApiError(message, 422, null);
+      }
+      if (event.type === "result" && event.result) finalResult = event.result;
+    }
+  }
+
+  if (buffer.trim()) {
+    try {
+      const event = JSON.parse(buffer) as RunTaskStreamEvent;
+      if (event.type === "result" && event.result) finalResult = event.result;
+      if (event.type === "error") {
+        const message = event.message || "任务执行失败";
+        if (message === "model provider not configured") throw new ApiError(message, 409, 40920);
+        throw new ApiError(message, 422, null);
+      }
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+    }
+  }
+
+  if (!finalResult) throw new ApiError("流式响应意外结束，请重试。", 502, null);
+  return finalResult;
+}
+
+export const runTask = (
+  input: RunTaskRequest,
+) =>
+  request<RunResult>(
+    input.deliveryMode === "durable"
+      ? "/api/tasks/run-durable"
+      : "/api/tasks/run",
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        conversationId:
+          input.conversationId,
+
+        task: input.task,
+
+        scheduler:
+          input.scheduler,
+
+        planner:
+          input.planner,
+
+        executionMode:
+          input.executionMode,
+
+        synthesisMode:
+          input.synthesisMode,
+
+        attachmentIds:
+          input.attachmentIds ?? [],
+
+        constraints: {
+          maxLatencyMs:
+            input.maxLatencyMs,
+
+          maxCost:
+            input.maxCost,
+
+          minQuality:
+            input.minQuality,
+        },
+      }),
+    },
+  );
+
+// =========================================================
+// Resume Existing Long-lived Task
+//
+// React only sends:
+//
+// {
+//     task: supplementalInput
+// }
+//
+// 不发送 continuation。
+// =========================================================
+
+export const resumeTask = (
+  taskId: number,
+  supplementalInput: string,
+) =>
+  request<RunResult>(
+    `/api/tasks/${taskId}/resume`,
+    {
+      method: "POST",
+
+      body: JSON.stringify({
+        task:
+          supplementalInput,
+      }),
+    },
+  );
+
+export const decideTaskApproval = (
+  taskId: number,
+  decision: "approve" | "reject",
+) =>
+  request<RunResult>(
+    `/api/tasks/${taskId}/resume`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        decision,
+      }),
+    },
+  );
+
+// =========================================================
+// Plugin
+// =========================================================
+
+export const listPlugins = () =>
+  request<PluginInfo[]>(
+    "/api/runtime/plugins",
+  );
+
+// =========================================================
+// Tool
+// =========================================================
+
+export const listTools = () =>
+  request<Tool[]>(
+    "/api/tools",
+  );
+
+export const createTool = (
+  tool: Partial<Tool>,
+) =>
+  request<Tool>(
+    "/api/tools",
+    {
+      method: "POST",
+      body: JSON.stringify(tool),
+    },
+  );
+
+export const seedDemoTools = () =>
+  request<Tool[]>(
+    "/api/tools/seed-demo",
+    {
+      method: "POST",
+    },
+  );
+
+export const deleteTool = (
+  id: number,
+) =>
+  request<void>(
+    `/api/tools/${id}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+// =========================================================
+// MCP Server
+// =========================================================
+
+export const listMCPServers = () =>
+  request<MCPServer[]>(
+    "/api/mcp-servers",
+  );
+
+export const createMCPServer = (
+  server: Partial<MCPServer>,
+) =>
+  request<MCPServer>(
+    "/api/mcp-servers",
+    {
+      method: "POST",
+
+      body: JSON.stringify(
+        server,
+      ),
+    },
+  );
+
+export const deleteMCPServer = (
+  id: number,
+) =>
+  request<void>(
+    `/api/mcp-servers/${id}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+export const seedDemoMCPServer =
+  () =>
+    request<MCPServer>(
+      "/api/mcp-servers/seed-demo",
+      {
+        method: "POST",
+      },
+    );
+
+export const discoverMCPTools =
+  async (
+    id: number,
+  ) =>
+    (
+      await request<{
+        tools: MCPDiscoveredTool[];
+      }>(
+        `/api/mcp-servers/${id}/discover`,
+        {
+          method: "POST",
+        },
+      )
+    ).tools;
+// =========================================================
+// Personal model provider / BYOK
+// =========================================================
+export async function getUserModelProvider() {
+  return request<import("./types").UserModelProvider | null>("/api/me/model-provider");
+}
+
+export async function upsertUserModelProvider(input: import("./types").UserModelProviderInput) {
+  return request<import("./types").UserModelProvider>("/api/me/model-provider", {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteUserModelProvider() {
+  return request<void>("/api/me/model-provider", { method: "DELETE" });
+}
+
+// =========================================================
+// P9 Enterprise Governance
+// =========================================================
+export async function getProjectGovernance(projectId: number) {
+  return request<import("./types").GovernanceOverview>(`/api/projects/${projectId}/governance`);
+}
+export async function addProjectMember(projectId: number, email: string, role: string) {
+  return request<import("./types").ProjectMember>(`/api/projects/${projectId}/members`, {
+    method: "POST",
+    body: JSON.stringify({ email, role }),
+  });
+}
+export async function removeProjectMember(projectId: number, userId: number) {
+  return request<void>(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" });
+}
+export async function updateProjectQuota(projectId: number, quota: import("./types").ProjectQuota) {
+  return request<import("./types").ProjectQuota>(`/api/projects/${projectId}/quota`, {
+    method: "PUT",
+    body: JSON.stringify(quota),
+  });
+}
+export async function createProjectSecret(projectId: number, name: string, kind: string, value: string) {
+  return request<import("./types").ProjectSecret>(`/api/projects/${projectId}/secrets`, {
+    method: "POST",
+    body: JSON.stringify({ name, kind, value }),
+  });
+}
+export async function deleteProjectSecret(projectId: number, secretId: number) {
+  return request<void>(`/api/projects/${projectId}/secrets/${secretId}`, { method: "DELETE" });
+}
+export async function upsertProjectModelProvider(projectId: number, provider: import("./types").ProjectModelProvider) {
+  return request<import("./types").ProjectModelProvider>(`/api/projects/${projectId}/model-provider`, {
+    method: "PUT",
+    body: JSON.stringify(provider),
+  });
+}
+export async function listOrganizations() {
+  return request<import("./types").Organization[]>("/api/organizations");
+}
+export async function createOrganization(name: string) {
+  return request<import("./types").Organization>("/api/organizations", { method: "POST", body: JSON.stringify({ name }) });
+}
+export async function addOrganizationMember(organizationId: number, email: string, role: string) {
+  return request<unknown>(`/api/organizations/${organizationId}/members`, { method: "POST", body: JSON.stringify({ email, role }) });
+}
+export async function bindOrganizationProject(organizationId: number, projectId: number) {
+  return request<void>(`/api/organizations/${organizationId}/projects/${projectId}`, { method: "PUT" });
+}

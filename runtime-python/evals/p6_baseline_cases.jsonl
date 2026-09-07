@@ -1,0 +1,4 @@
+{"id":"general-answer","task":"Explain what AgentMesh can do","expected":{"minOverallScore":0.70,"maxFailureCategory":"none"}}
+{"id":"tool-calculator","task":"Calculate 382 * 927 with the calculator tool","expected":{"minOverallScore":0.75,"toolRequired":true}}
+{"id":"memory-recall","task":"Recall a previously stored coding preference","expected":{"minOverallScore":0.70,"memoryAllowed":true}}
+{"id":"project-rag","task":"Answer from project knowledge with citations","expected":{"minOverallScore":0.70,"citationsRequired":true}}

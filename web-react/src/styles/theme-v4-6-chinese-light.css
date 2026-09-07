@@ -1,0 +1,32 @@
+/* AgentMesh v4.6 — 中文浅色统一主题 */
+:root,.app-shell-v3{color-scheme:light;--am-bg:#f7f8f5;--am-panel:#fff;--am-panel-2:#f4f6f2;--am-line:#dde3de;--am-text:#29312e;--am-text-2:#56615c;--am-muted:#7f8984;--calm-bg:#f7f8f5;--calm-bg-2:#f4f6f2;--calm-panel:#fff;--calm-panel-2:#f8faf8;--calm-panel-3:#f1f4f1;--calm-line:#dde3de;--calm-line-strong:#cfd8d2;--calm-text:#29312e;--calm-text-2:#56615c;--calm-text-3:#7f8984;--calm-accent:#5f8d7e;--calm-accent-strong:#4f7c6e;--calm-accent-soft:#edf4f0;--calm-danger:#b85f65;--calm-danger-soft:#fff2f2}
+html,body,#root,.app-shell-v3,.app-main{background:#f7f8f5!important;color:#29312e!important}
+.calm-empty-card,.calm-loading-card,.workspace-empty,.empty-state,.run-empty,.project-runtime-empty,.trace-empty,.extension-calm-content,.extension-panel-surface,.agent-calm-card,.governance-calm-card,.governance-quota-card,.task-calm-card,.run-details-page,.run-detail-content,.detail-section{background:#fff!important;color:#56615c!important;border-color:#dde3de!important}
+.calm-empty-card.large,.agents-calm-page .calm-empty-card,.extensions-calm-page .calm-empty-card,.governance-calm-page .calm-empty-card{background:#f8faf8!important;color:#7f8984!important;border:1px dashed #d6dfd9!important;box-shadow:none!important}
+.run-settings-drawer,.workspace-settings-drawer,.settings-drawer,.run-settings-panel,.run-settings-body,.run-settings-section,.run-details-drawer,.workspace-details-drawer,.agent-drawer,.drawer-panel,.modal-panel,.dialog-panel,.task-delete-dialog,.calm-dialog,.memory-editor{background:#fff!important;color:#56615c!important;border-color:#dde3de!important;box-shadow:0 12px 36px rgba(47,59,53,.08)!important}
+.run-settings-drawer select,.run-settings-drawer input,.run-settings-drawer textarea,.workspace-settings-drawer select,.workspace-settings-drawer input,.settings-drawer select,.settings-drawer input,.drawer-panel select,.drawer-panel input{background:#fbfcfb!important;color:#29312e!important;border-color:#d9e2dc!important}
+.run-settings-drawer h1,.run-settings-drawer h2,.run-settings-drawer h3,.run-settings-drawer strong,.agent-drawer h1,.agent-drawer h2,.agent-drawer h3,.agent-drawer strong{color:#29312e!important}
+.run-settings-drawer p,.run-settings-drawer small,.agent-drawer p,.agent-drawer small{color:#7f8984!important}
+.drawer-backdrop,.modal-backdrop,.task-delete-backdrop,.memory-editor-backdrop,.workspace-overlay,.run-settings-backdrop{background:rgba(61,72,67,.22)!important;backdrop-filter:blur(2px)}
+pre,.markdown-answer pre,.markdown-body pre,.run-details-page pre,.trace-code,.code-block{background:#f1f3f0!important;color:#35423d!important;border-color:#dde3de!important}
+.workspace-switcher,.sidebar-primary-action{transition:transform .14s ease,box-shadow .14s ease,background .14s ease}.workspace-switcher:hover,.sidebar-primary-action:hover{transform:translateY(-1px);box-shadow:0 6px 16px rgba(64,91,82,.10)}.workspace-switcher:active,.sidebar-primary-action:active{transform:translateY(0)}
+
+/* v4.6.1 — remove remaining dark Calm surfaces */
+.tab-agents .app-main,.tab-knowledge .app-main,.tab-extensions .app-main,.tab-tasks .app-main,.tab-governance .app-main,.calm-page{background:#f7f8f5!important;color:#29312e!important}
+.calm-page input,.calm-page textarea,.calm-page select{background:#fff!important;color:#29312e!important;border-color:#d9e2dc!important}
+.calm-page input::placeholder,.calm-page textarea::placeholder{color:#9aa39e!important}
+.calm-editor-card,.calm-overview-strip,.calm-toolbar-row,.organization-admin,.governance-member-row,.quota-calm-field,.provider-calm-grid label{background:#fff!important;color:#56615c!important;border-color:#dde3de!important;box-shadow:none!important}
+.calm-editor-card{box-shadow:0 10px 28px rgba(47,59,53,.06)!important}
+.calm-editor-head strong,.calm-page h1,.calm-page h2,.calm-page h3,.calm-page strong{color:#29312e!important}
+.calm-page p,.calm-page small,.calm-page .muted,.calm-page .muted-text,.calm-form-grid label>span,.provider-calm-grid label>span,.quota-calm-field>span{color:#7f8984!important}
+.calm-button,.calm-icon-button{background:#fff!important;color:#56615c!important;border-color:#d9e2dc!important}
+.calm-button:hover:not(:disabled),.calm-icon-button:hover:not(:disabled){background:#f4f7f4!important;color:#29312e!important;border-color:#cbd6cf!important}
+.calm-button.primary{background:#5f8d7e!important;color:#fff!important;border-color:#5f8d7e!important}
+.calm-button.primary:hover:not(:disabled){background:#527f70!important}
+.calm-button.subtle{background:#edf4f0!important;color:#456e61!important;border-color:#d7e5dd!important}
+.calm-button.ghost{background:#fff!important}
+.calm-feedback.error{background:#fff3f3!important;color:#b45d62!important;border-color:#f1d3d3!important}
+.calm-feedback.success{background:#eef7f2!important;color:#3f705f!important;border-color:#d3e7dc!important}
+.agent-calm-card,.calm-search-field,.organization-chip,.governance-role-chip{background:#fff!important;color:#56615c!important;border-color:#dde3de!important}
+.agent-calm-card:hover{background:#fbfcfb!important}
+.calm-feedback.warning{background:#fff8e8!important;color:#8b6b2f!important;border-color:#ead9aa!important}

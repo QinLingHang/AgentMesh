@@ -1,0 +1,35 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import test from "node:test";
+
+const root = path.resolve(import.meta.dirname, "..");
+const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
+
+test("Tool approval uses explicit approve/reject controls instead of typed technical authorization", () => {
+  const panel = read("src/features/workspace/ResumePanel.tsx");
+  const api = read("src/api.ts");
+
+  assert.match(panel, /需要你的确认/);
+  assert.match(panel, /取消操作/);
+  assert.match(panel, /确认执行/);
+  assert.match(panel, /onApprovalDecision\("reject"\)/);
+  assert.match(panel, /onApprovalDecision\("approve"\)/);
+  assert.match(api, /export const decideTaskApproval/);
+  assert.match(api, /JSON\.stringify\(\{\s*decision,/s);
+});
+
+test("Browser Task contract exposes only approval preview and never authoritative continuation", () => {
+  const types = read("src/types.ts");
+  assert.match(types, /export type TaskApproval/);
+  assert.match(types, /argumentsPreview\?: Record<string, unknown>/);
+  assert.doesNotMatch(types, /export type Task = \{[\s\S]*continuation\??:/);
+});
+
+test("Run Details Tool & MCP observability includes approval events", () => {
+  const tabs = read("src/features/run-details/RunDetailsTabs.tsx");
+  const panel = read("src/features/run-details/ToolMCPTracePanel.tsx");
+  assert.match(tabs, /event\.kind === "approval"/);
+  assert.match(panel, /event\.kind === "approval"/);
+  assert.match(panel, /human approval/);
+});

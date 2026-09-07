@@ -1,0 +1,369 @@
+/* =========================================================
+   响应式
+   ========================================================= */
+
+@media (
+  max-width: 1200px
+) {
+  .app-shell {
+    grid-template-columns:
+      190px minmax(0, 1fr);
+  }
+
+  .workspace-layout {
+    grid-template-columns:
+      200px minmax(0, 1fr);
+  }
+
+  .config-main {
+    grid-template-columns:
+      repeat(
+        2,
+        1fr
+      );
+  }
+
+  .metric-grid {
+    grid-template-columns:
+      repeat(
+        2,
+        1fr
+      );
+  }
+}
+
+@media (
+  max-width: 900px
+) {
+  .app-shell {
+    grid-template-columns:
+      68px minmax(0, 1fr);
+  }
+
+  .global-sidebar {
+    padding:
+      20px 9px;
+  }
+
+  .brand {
+    justify-content: center;
+
+    padding: 0;
+  }
+
+  .brand > div,
+  .global-nav span,
+  .runtime-card,
+  .user-card > div {
+    display: none;
+  }
+
+  .global-nav button {
+    justify-content: center;
+
+    padding: 0;
+  }
+
+  .user-card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .workspace-layout {
+    grid-template-columns:
+      1fr;
+  }
+
+  .session-rail {
+    display: none;
+  }
+
+  .page {
+    width:
+      calc(100% - 36px);
+  }
+
+  .policy-grid {
+    grid-template-columns:
+      repeat(
+        2,
+        1fr
+      );
+  }
+
+  .inline-form,
+  .mcp-create-form {
+    grid-template-columns:
+      1fr;
+  }
+
+  .form-submit {
+    align-self: auto;
+  }
+}
+
+@media (
+  max-width: 650px
+) {
+  .workspace-toolbar {
+    padding:
+      0 18px;
+  }
+
+  .workspace-scroll-inner {
+    width:
+      calc(100% - 28px);
+  }
+
+  .workspace-composer-area {
+    padding:
+      10px 14px 16px;
+  }
+
+  .config-main,
+  .advanced-fields,
+  .metric-grid,
+  .policy-grid {
+    grid-template-columns:
+      1fr;
+  }
+
+  .composer-footer,
+  .result-meta {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-button {
+    width: 100%;
+  }
+
+  .run-details-page {
+    width:
+      calc(100% - 28px);
+  }
+
+  .auth-page {
+    grid-template-columns:
+      1fr;
+  }
+
+  .auth-visual {
+    min-height: 320px;
+
+    padding: 34px;
+  }
+
+  .auth-copy h1 {
+    font-size: 43px;
+  }
+
+  .auth-main {
+    padding:
+      38px 24px;
+  }
+
+  .page-head,
+  .subpage-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .resource-card {
+    grid-template-columns:
+      1fr;
+  }
+
+  .resource-side {
+    flex-wrap: wrap;
+  }
+}
+
+
+
+/* =========================================================
+   v2.2A UI Separation Responsive Rules
+   ========================================================= */
+
+@media (max-width: 1380px) {
+  .workspace-stage.details-open {
+    grid-template-columns:
+      minmax(0, 1fr)
+      minmax(440px, 46vw);
+  }
+
+  .workspace-stage.details-open
+    .workspace-policy-button span,
+  .workspace-stage.details-open
+    .workspace-policy-button small {
+    display: none;
+  }
+}
+
+@media (max-width: 1120px) {
+  .workspace-stage.details-open {
+    grid-template-columns:
+      minmax(0, 1fr);
+  }
+
+  .workspace-details-drawer {
+    position: absolute;
+    inset:
+      0 0 0 auto;
+
+    z-index: 25;
+
+    width: min(
+      560px,
+      calc(100% - 36px)
+    );
+
+    box-shadow:
+      -16px 0 44px
+        rgba(
+          26,
+          32,
+          44,
+          0.13
+        );
+  }
+
+  .workspace-stage.details-open
+    .workspace-scroll-inner,
+  .workspace-stage.details-open
+    .composer,
+  .workspace-stage.details-open
+    .composer-error {
+    width: min(
+      900px,
+      calc(100% - 64px)
+    );
+  }
+}
+
+@media (max-width: 650px) {
+  .workspace-policy-button span,
+  .workspace-policy-button small {
+    display: none;
+  }
+
+  .workspace-details-drawer,
+  .run-settings-drawer {
+    width: 100%;
+  }
+
+  .workspace-details-drawer {
+    inset: 0;
+  }
+
+  .run-details-drawer-mode.run-details-page {
+    padding:
+      18px 15px 44px;
+  }
+
+  .run-details-drawer-mode
+    .metric-grid,
+  .run-details-drawer-mode
+    .overview-facts {
+    grid-template-columns: 1fr;
+  }
+
+  .run-details-drawer-mode
+    .run-summary-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .run-details-drawer-mode
+    .run-summary-item,
+  .run-details-drawer-mode
+    .run-summary-item:nth-child(even),
+  .run-details-drawer-mode
+    .run-summary-item:nth-child(5) {
+    grid-column: auto;
+
+    border-right: 0;
+    border-bottom:
+      1px solid
+      var(--border);
+  }
+
+  .composer-settings-copy small,
+  .result-meta-hint small {
+    display: none;
+  }
+
+  .run-settings-head,
+  .run-settings-drawer
+    .run-config {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+/* =========================================================
+   v2.3A Product Workspace Responsive
+   ========================================================= */
+
+@media (max-width: 1200px) {
+  .app-shell {
+    grid-template-columns: 196px minmax(0, 1fr);
+  }
+
+  .workspace-layout {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 900px) {
+  .welcome-suggestions {
+    grid-template-columns: 1fr;
+    max-width: 520px;
+  }
+
+  .workspace-welcome {
+    min-height: 520px;
+  }
+}
+
+@media (max-width: 650px) {
+  .workspace-mode-chip {
+    display: none;
+  }
+
+  .workspace-scroll-inner {
+    width: calc(100% - 28px);
+    padding-bottom: 118px;
+  }
+
+  .workspace-welcome {
+    justify-content: flex-start;
+    min-height: auto;
+    padding-top: 58px;
+  }
+
+  .workspace-welcome h1 {
+    font-size: 30px;
+  }
+
+  .workspace-welcome > p {
+    font-size: 11px;
+  }
+
+  .composer-keyboard-hint {
+    display: none;
+  }
+
+  .composer-footer-clean {
+    flex-direction: row;
+    align-items: center;
+  }
+
+  .composer-settings-copy small {
+    display: none;
+  }
+
+  .run-button {
+    width: auto;
+    margin-left: auto;
+  }
+}

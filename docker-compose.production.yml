@@ -1,0 +1,262 @@
+name: ${AGENTMESH_COMPOSE_PROJECT:-agentmesh-production}
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-agentmesh_mvp}
+      MYSQL_USER: ${MYSQL_USER:-agentmesh}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./infra/mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 30s
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 30s
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.25
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+      ETCD_SNAPSHOT_COUNT: "50000"
+    volumes:
+      - milvus_etcd_data:/etcd
+    command: >-
+      etcd -advertise-client-urls=http://etcd:2379
+      -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-agentmesh-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+    volumes:
+      - milvus_minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 30s
+      timeout: 20s
+      retries: 5
+
+  milvus:
+    image: milvusdb/milvus:v3.0.0
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["milvus", "run", "standalone"]
+    security_opt: ["seccomp:unconfined"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-agentmesh-minio}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?set MINIO_SECRET_KEY}
+    volumes:
+      - milvus_data:/var/lib/milvus
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 5
+
+  migrate:
+    build:
+      context: ./backend-go
+    restart: "no"
+    logging: *default-logging
+    command: ["/app/agentmesh-migrate"]
+    environment: &backend-env
+      BUSINESS_PORT: "8086"
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-agentmesh_mvp}
+      MYSQL_USER: ${MYSQL_USER:-agentmesh}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set MYSQL_PASSWORD}
+      REDIS_ADDR: redis:6379
+      REDIS_DB: "0"
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
+      JWT_ISSUER: agentmesh-control-plane
+      VERIFICATION_PEPPER: ${VERIFICATION_PEPPER:?set VERIFICATION_PEPPER}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-console}
+      EMAIL_ADDRESS: ${EMAIL_ADDRESS:-}
+      EMAIL_AUTH_CODE: ${EMAIL_AUTH_CODE:-}
+      EMAIL_APP_NAME: ${EMAIL_APP_NAME:-AgentMesh}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      RUNTIME_BASE_URL: http://runtime-python:9572
+      RUNTIME_INTERNAL_TOKEN: ${RUNTIME_INTERNAL_TOKEN:?set RUNTIME_INTERNAL_TOKEN}
+      MCP_DEMO_ENDPOINT: http://mcp-demo:9583/mcp
+      ALLOWED_ORIGINS: ${PUBLIC_ORIGIN:-http://localhost:8080}
+      KNOWLEDGE_STORAGE_ROOT: /app/data/knowledge
+      DURABLE_RUNTIME_ENABLED: "true"
+      CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go:8086
+      DURABLE_RUNTIME_MAX_QUEUE_DEPTH: ${DURABLE_RUNTIME_MAX_QUEUE_DEPTH:-500}
+      GOVERNANCE_MASTER_KEY: ${GOVERNANCE_MASTER_KEY:?set GOVERNANCE_MASTER_KEY}
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  backend-go:
+    build:
+      context: ./backend-go
+    restart: unless-stopped
+    logging: *default-logging
+    environment: *backend-env
+    volumes:
+      - knowledge_data:/app/data/knowledge
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    expose:
+      - "8086"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8086/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 30s
+
+  runtime-python:
+    build:
+      context: ./runtime-python
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      INTERNAL_TOKEN: ${RUNTIME_INTERNAL_TOKEN:?set RUNTIME_INTERNAL_TOKEN}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
+      MODEL_API_KEY: ${MODEL_API_KEY:-}
+      MODEL_BASE_URL: ${MODEL_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      MODEL_NAME: ${MODEL_NAME:-qwen-plus}
+      MODEL_VISION_NAME: ${MODEL_VISION_NAME:-qwen-vl-plus}
+      MODEL_HTTP_TRUST_ENV: "false"
+      REDIS_URL: redis://redis:6379/0
+      MILVUS_URI: http://milvus:19530
+      RUNTIME_WORKER_ENABLED: "true"
+      RUNTIME_WORKER_ID: ${RUNTIME_WORKER_ID:-runtime-compose-1}
+      RUNTIME_WORKER_ENDPOINT: http://runtime-python:9572
+      CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go:8086
+      RUNTIME_WORKER_CAPACITY: ${RUNTIME_WORKER_CAPACITY:-4}
+      RERANKER_HTTP_TRUST_ENV: "false"
+      EMBEDDING_HTTP_TRUST_ENV: "false"
+    depends_on:
+      backend-go:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    expose:
+      - "9572"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9572/readyz', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 30s
+
+  mcp-demo:
+    build:
+      context: ./runtime-python
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-m", "app.mcp.demo_server"]
+    environment:
+      MCP_DEMO_HOST: 0.0.0.0
+      MCP_DEMO_PORT: "9583"
+    expose:
+      - "9583"
+
+  web-react:
+    build:
+      context: ./web-react
+      args:
+        VITE_API_BASE_URL: ""
+    restart: unless-stopped
+    logging: *default-logging
+    depends_on:
+      backend-go:
+        condition: service_healthy
+    expose:
+      - "80"
+
+  gateway:
+    build:
+      context: ./infra/gateway
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      REQUIRE_TLS: ${REQUIRE_TLS:-false}
+    volumes:
+      - ${TLS_CERT_DIR:-./infra/gateway/tls}:/etc/agentmesh/tls:ro
+    depends_on:
+      backend-go:
+        condition: service_healthy
+      runtime-python:
+        condition: service_healthy
+      web-react:
+        condition: service_started
+    ports:
+      - "${HTTP_PORT:-8080}:80"
+      - "${HTTPS_PORT:-8443}:443"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/livez"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  mysql_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-mysql-data
+  redis_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-redis-data
+  milvus_etcd_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-milvus-etcd-data
+  milvus_minio_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-milvus-minio-data
+  milvus_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-milvus-data
+  knowledge_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-knowledge-data

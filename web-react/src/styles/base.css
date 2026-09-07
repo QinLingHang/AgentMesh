@@ -1,0 +1,369 @@
+
+:root {
+  font-family:
+    Inter,
+    "PingFang SC",
+    "Microsoft YaHei",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+
+  /* Product surfaces */
+  --bg: #f6f7fb;
+  --sidebar: #f3f5f9;
+  --surface: #ffffff;
+  --surface-soft: #f9fafc;
+  --surface-raised: rgba(255, 255, 255, 0.88);
+
+  /* Typography */
+  --text: #18202b;
+  --text-secondary: #5d6878;
+  --text-muted: #929baa;
+  --text-faint: #b1b8c4;
+
+  /* Lines */
+  --border: #e6e9ef;
+  --border-strong: #d9dee7;
+
+  /* Brand */
+  --primary: #5664df;
+  --primary-hover: #4653cf;
+  --primary-strong: #3f4dbd;
+  --primary-soft: #eef0ff;
+  --primary-softer: #f6f7ff;
+
+  /* Semantics */
+  --success: #2f9f69;
+  --success-soft: #edf9f2;
+  --danger: #c84c57;
+  --danger-soft: #fff0f1;
+  --warning: #9b691d;
+  --warning-soft: #fff6df;
+
+  /* Shape */
+  --radius-xs: 7px;
+  --radius-sm: 10px;
+  --radius-md: 14px;
+  --radius-lg: 18px;
+  --radius-xl: 24px;
+
+  /* Elevation */
+  --shadow-xs: 0 1px 2px rgba(20, 27, 38, 0.04);
+  --shadow-sm:
+    0 1px 2px rgba(20, 27, 38, 0.04),
+    0 8px 22px rgba(20, 27, 38, 0.04);
+  --shadow-md:
+    0 12px 32px rgba(28, 35, 52, 0.08),
+    0 2px 8px rgba(28, 35, 52, 0.04);
+  --shadow-lg:
+    0 24px 64px rgba(30, 38, 58, 0.14),
+    0 6px 20px rgba(30, 38, 58, 0.07);
+
+  --shadow: var(--shadow-sm);
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --duration-fast: 140ms;
+  --duration-base: 200ms;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100vh;
+
+  color: var(--text);
+  background: var(--bg);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  border: 0;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+input,
+textarea,
+select {
+  outline: none;
+}
+
+::selection {
+  background: #dfe3ff;
+}
+
+/* =========================================================
+   通用按钮
+   ========================================================= */
+
+.primary-button,
+.secondary-button,
+.square-button,
+.icon-button,
+.plain-button,
+.run-detail-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 8px;
+
+  border-radius: 9px;
+
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.primary-button {
+  min-height: 40px;
+
+  padding: 0 15px;
+
+  color: #fff;
+  background: var(--primary);
+
+  font-size: 13px;
+  font-weight: 650;
+
+  box-shadow:
+    0 1px 2px rgba(40, 52, 130, 0.12);
+}
+
+.primary-button:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+.secondary-button {
+  min-height: 40px;
+
+  padding: 0 14px;
+
+  color: #404957;
+  background: #fff;
+
+  border: 1px solid var(--border-strong);
+
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: #f9fafb;
+}
+
+.compact-button {
+  min-height: 34px;
+
+  padding: 0 11px;
+
+  font-size: 11px;
+}
+
+.square-button,
+.icon-button {
+  width: 34px;
+  height: 34px;
+
+  padding: 0;
+
+  color: var(--text-secondary);
+  background: transparent;
+
+  border: 1px solid transparent;
+}
+
+.square-button {
+  background: #fff;
+  border-color: var(--border);
+}
+
+.square-button:hover,
+.icon-button:hover {
+  color: var(--text);
+  background: #eceef1;
+}
+
+.plain-button {
+  padding: 0;
+
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.full-button {
+  width: 100%;
+}
+
+.danger-link {
+  padding: 7px 8px;
+
+  color: var(--danger);
+  background: transparent;
+
+  border: 0;
+
+  font-size: 11px;
+  font-weight: 600;
+
+  border-radius: 7px;
+}
+
+.danger-link:hover {
+  background: var(--danger-soft);
+}
+
+/* =========================================================
+   基础表单
+   ========================================================= */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.field > span,
+.run-config label > span,
+.advanced-fields label > span {
+  color: var(--text-secondary);
+
+  font-size: 11px;
+  font-weight: 600;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+
+  color: var(--text);
+  background: #fff;
+
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+input,
+select {
+  min-height: 41px;
+
+  padding: 0 12px;
+}
+
+textarea {
+  padding: 15px 16px;
+
+  resize: none;
+
+  line-height: 1.65;
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #a9b1ee;
+
+  box-shadow:
+    0 0 0 3px rgba(82, 99, 217, 0.08);
+}
+
+
+/* =========================================================
+   v2.3A Product Design System
+   ========================================================= */
+
+body {
+  background:
+    linear-gradient(180deg, #f8f9fc 0%, var(--bg) 100%);
+}
+
+button,
+a,
+input,
+textarea,
+select {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 0;
+  box-shadow:
+    0 0 0 3px rgba(86, 100, 223, 0.14);
+}
+
+.primary-button {
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(135deg, #6370e8 0%, var(--primary) 55%, #4c59d1 100%);
+  box-shadow:
+    0 6px 16px rgba(86, 100, 223, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) ease;
+}
+
+.primary-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  background:
+    linear-gradient(135deg, #5967e3 0%, var(--primary-hover) 100%);
+  box-shadow:
+    0 9px 20px rgba(72, 84, 207, 0.22);
+}
+
+.secondary-button,
+.square-button {
+  border-color: var(--border);
+  box-shadow: var(--shadow-xs);
+}
+
+input,
+textarea,
+select {
+  border-radius: var(--radius-sm);
+  border-color: var(--border-strong);
+}
+
+input:focus,
+textarea:focus,
+select:focus {
+  border-color: #aeb6ef;
+  box-shadow:
+    0 0 0 3px rgba(86, 100, 223, 0.09);
+}

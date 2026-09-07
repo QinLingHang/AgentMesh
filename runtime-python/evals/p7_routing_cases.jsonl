@@ -1,0 +1,3 @@
+{"id":"quality_first","complexity":"high","riskLevel":"high","maxLatencyMs":8000,"maxCost":0.15,"minQuality":0.85,"expected":"quality_reliability_weighted"}
+{"id":"fast_cheap","complexity":"low","riskLevel":"low","maxLatencyMs":1500,"maxCost":0.02,"minQuality":0.70,"expected":"latency_cost_weighted"}
+{"id":"degraded_constraints","complexity":"medium","riskLevel":"medium","maxLatencyMs":100,"maxCost":0.001,"minQuality":0.99,"expected":"best_effort_degraded"}

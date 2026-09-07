@@ -1,0 +1,253 @@
+
+/*
+ * AgentMesh UI v3.2 — Calm Product workspace fallback
+ *
+ * This file intentionally scopes visual overrides to the workspace so that
+ * it is safe to add back when ResumePanel.tsx imports "./workspace-calm.css".
+ */
+
+.workspace-layout {
+  --calm-bg: #0b1115;
+  --calm-surface: #10191e;
+  --calm-surface-2: #121d23;
+  --calm-border: rgba(150, 180, 180, 0.12);
+  --calm-border-strong: rgba(150, 180, 180, 0.18);
+  --calm-text: #dce6e5;
+  --calm-text-secondary: #a6b6b5;
+  --calm-text-muted: #738584;
+  --calm-accent: #72cbb3;
+  --calm-accent-soft: rgba(114, 203, 179, 0.12);
+  --calm-danger: #d88a8a;
+  --calm-warning: #cdbb83;
+
+  color: var(--calm-text);
+  background: var(--calm-bg);
+}
+
+.workspace-layout * {
+  box-sizing: border-box;
+}
+
+.workspace-core {
+  min-width: 0;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(114, 203, 179, 0.035), transparent 34%),
+    var(--calm-bg);
+}
+
+.workspace-toolbar {
+  min-height: 62px;
+  padding: 12px 24px;
+  border-bottom: 1px solid var(--calm-border);
+  background: rgba(11, 17, 21, 0.92);
+}
+
+.workspace-title {
+  color: #dfe9e8;
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.workspace-toolbar small {
+  display: block;
+  margin-top: 4px;
+  color: var(--calm-text-muted);
+  font-size: 11px;
+  font-weight: 450;
+}
+
+.runtime-state {
+  color: var(--calm-text-muted);
+  font-size: 11px;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--calm-accent);
+  box-shadow: 0 0 0 3px rgba(114, 203, 179, 0.08);
+}
+
+.workspace-scroll {
+  background: transparent;
+}
+
+.workspace-scroll-inner {
+  width: min(920px, calc(100% - 48px));
+  margin: 0 auto;
+  padding: 28px 0 34px;
+}
+
+.workspace-composer-area {
+  padding: 10px 24px 24px;
+  background:
+    linear-gradient(to bottom, rgba(11, 17, 21, 0), rgba(11, 17, 21, 0.98) 18%);
+}
+
+.workspace-composer-area > .composer {
+  width: min(920px, 100%);
+  margin: 0 auto;
+}
+
+.composer {
+  color: var(--calm-text);
+}
+
+.composer textarea,
+.workspace-composer-area textarea {
+  width: 100%;
+  min-height: 86px;
+  resize: vertical;
+  border: 1px solid var(--calm-border-strong);
+  border-radius: 14px;
+  outline: none;
+  background: var(--calm-surface);
+  color: var(--calm-text);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.12);
+  font: inherit;
+  line-height: 1.65;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.composer textarea {
+  padding: 15px 17px;
+}
+
+.composer textarea::placeholder {
+  color: #687b7a;
+}
+
+.composer textarea:focus {
+  border-color: rgba(114, 203, 179, 0.42);
+  background: #111c20;
+}
+
+.warning-box {
+  border: 1px solid rgba(205, 187, 131, 0.28);
+  border-radius: 12px;
+  background: rgba(205, 187, 131, 0.055);
+  color: var(--calm-text-secondary);
+}
+
+.warning-box strong {
+  color: #d9c995;
+  font-weight: 620;
+}
+
+.warning-box small {
+  color: var(--calm-text-muted);
+}
+
+.field > span {
+  color: var(--calm-text-secondary);
+  font-size: 12px;
+}
+
+.error-box {
+  border: 1px solid rgba(216, 138, 138, 0.24);
+  border-radius: 10px;
+  background: rgba(216, 138, 138, 0.06);
+  color: #d8aaaa;
+}
+
+.composer-footer {
+  gap: 12px;
+}
+
+.composer-footer > span {
+  color: var(--calm-text-muted);
+  font-size: 11px;
+}
+
+.secondary-button {
+  border: 1px solid var(--calm-border-strong);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--calm-text-secondary);
+}
+
+.secondary-button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(150, 180, 180, 0.25);
+}
+
+.primary-button {
+  border: 1px solid rgba(114, 203, 179, 0.24);
+  border-radius: 10px;
+  background: #3d927d;
+  color: #eef8f5;
+  box-shadow: 0 5px 18px rgba(61, 146, 125, 0.14);
+}
+
+.primary-button:hover:not(:disabled) {
+  background: #479e89;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.spinner {
+  border-color: rgba(238, 248, 245, 0.24);
+  border-top-color: #eef8f5;
+}
+
+/* Keep long assistant messages readable without bright cards. */
+.workspace-layout .message,
+.workspace-layout .message-card,
+.workspace-layout .assistant-message,
+.workspace-layout .message-bubble {
+  color: var(--calm-text);
+}
+
+.workspace-layout .message-card,
+.workspace-layout .assistant-message {
+  border-color: var(--calm-border);
+  background: var(--calm-surface);
+}
+
+.workspace-layout strong,
+.workspace-layout b {
+  color: #dce7e5;
+}
+
+.workspace-layout code {
+  color: #b7d9cf;
+  background: rgba(114, 203, 179, 0.07);
+}
+
+/* Narrow screens */
+@media (max-width: 900px) {
+  .workspace-scroll-inner {
+    width: calc(100% - 32px);
+  }
+
+  .workspace-composer-area {
+    padding: 10px 16px 18px;
+  }
+}
+
+@media (max-width: 650px) {
+  .workspace-scroll-inner {
+    width: calc(100% - 24px);
+    padding-top: 20px;
+  }
+
+  .workspace-toolbar {
+    padding: 10px 16px;
+  }
+
+  .composer-footer {
+    align-items: stretch;
+  }
+
+  .composer-footer .run-button {
+    width: 100%;
+  }
+}
