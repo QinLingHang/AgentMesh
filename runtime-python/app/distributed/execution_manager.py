@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -17,6 +18,8 @@ class DurableExecutionEnvelope(BaseModel):
     job_id: int = Field(alias="jobId")
     execution_id: str = Field(alias="executionId", min_length=1)
     lease_token: str = Field(alias="leaseToken", min_length=1)
+    fence_epoch: int = Field(default=0, alias="fenceEpoch")
+    dispatcher_epoch: int = Field(default=0, alias="dispatcherEpoch")
     callback_url: str = Field(alias="callbackUrl", min_length=1)
     request: RuntimeRequest
 
@@ -68,10 +71,19 @@ class DurableExecutionManager:
         shutdown_grace_seconds: float,
         dedupe_retention_seconds: float,
         runner: Callable[[RuntimeRequest], Awaitable[RuntimeResponse]],
+        node_id: str = "",
+        node_zone: str = "",
+        node_version: str = "",
+        node_capacity: int = 0,
     ) -> None:
         self.worker_id = worker_id.strip()
         self.worker_endpoint = worker_endpoint.rstrip("/")
         self.capacity = max(1, int(capacity))
+        self.node_id = (node_id or self.worker_id).strip()
+        self.node_zone = node_zone.strip()
+        self.node_version = node_version.strip()
+        self.node_capacity = max(self.capacity, int(node_capacity or self.capacity))
+        self.started_at = datetime.now(timezone.utc)
         self.internal_token = internal_token
         self.control_plane_base_url = control_plane_base_url.rstrip("/")
         self.heartbeat_interval_seconds = max(1.0, heartbeat_interval_seconds)
@@ -93,6 +105,26 @@ class DurableExecutionManager:
 
     def active_count(self) -> int:
         return sum(1 for record in self._records.values() if not record.task.done())
+
+    def active_execution_leases(self) -> list[dict[str, object]]:
+        leases: list[dict[str, object]] = []
+        for record in self._records.values():
+            if record.task.done():
+                continue
+            envelope = record.envelope
+            leases.append(
+                {
+                    "jobId": envelope.job_id,
+                    "executionId": envelope.execution_id,
+                    "leaseToken": envelope.lease_token,
+                    "fenceEpoch": envelope.fence_epoch,
+                }
+            )
+        return leases
+
+    async def set_draining(self, draining: bool) -> None:
+        self._draining = bool(draining)
+        await self._send_heartbeat_once()
 
     async def start(self) -> None:
         if self._heartbeat_task is not None:
@@ -207,6 +239,8 @@ class DurableExecutionManager:
             "workerId": self.worker_id,
             "executionId": envelope.execution_id,
             "leaseToken": envelope.lease_token,
+            "fenceEpoch": envelope.fence_epoch,
+            "dispatcherEpoch": envelope.dispatcher_epoch,
             "status": status,
         }
         if response is not None:
@@ -240,10 +274,16 @@ class DurableExecutionManager:
             return
         payload = {
             "workerId": self.worker_id,
+            "nodeId": self.node_id,
+            "zone": self.node_zone,
+            "version": self.node_version,
+            "startedAt": self.started_at.isoformat().replace("+00:00", "Z"),
             "endpoint": self.worker_endpoint,
             "capacity": self.capacity,
+            "nodeCapacity": self.node_capacity,
             "activeExecutions": self.active_count(),
             "draining": self._draining,
+            "executionLeases": self.active_execution_leases(),
         }
         headers = {
             "X-Internal-Token": self.internal_token,

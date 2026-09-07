@@ -7,6 +7,7 @@ func registerDurableRuntimeRoutes(protected *gin.RouterGroup, deps Dependencies)
 		return
 	}
 	protected.GET("/runtime/reliability", deps.DurableRuntimeHandler.Reliability)
+	protected.GET("/runtime/topology", deps.DurableRuntimeHandler.Topology)
 	protected.POST("/tasks/:id/cancel", deps.DurableRuntimeHandler.Cancel)
 }
 

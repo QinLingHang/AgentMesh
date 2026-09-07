@@ -1,14 +1,62 @@
-# Next Roadmap after MVP-0
+# AgentMesh Development Roadmap
 
-1. Complete local verification and A/B tenant isolation tests.
-2. Replace mock model with Qwen Model Plugin and add model usage/cost accounting.
-3. Add Tool Registry + Tool Calling + MCP adapter.
-4. Add Text RAG baseline, then hybrid retrieval/RRF/reranker and RAG Eval.
-5. Add Redis short-term memory and Agent Experience Memory.
-6. Build benchmark for Fixed / LLM Supervisor / Capability / Greedy.
-7. Add Task Profile structured output and dynamic Capability Profile.
-8. Upgrade Dynamic DAG with dependency/conditional nodes.
-9. Implement Adaptive Multi-objective Scheduler + Runtime Rescheduler.
-10. Add OTel/Prometheus/Grafana and load tests.
-11. Add DSH Adapter as an external heterogeneous Agent/Runtime integration.
-12. Multimodal RAG, security, Docker/Linux/Nginx/HTTPS, CI/CD.
+The public `v1.0.0-rc.2` release remains frozen. Development continues on unreleased sprint branches until the planned platform capabilities and final cloud acceptance are complete.
+
+## Completed foundation
+
+- Agent Runtime / Multi-Agent / DAG
+- Text RAG / Hybrid Retrieval / Rerank / Citation
+- Memory
+- Tool / MCP / Secure Action
+- Evaluation / Adaptive Routing
+- Durable Queue / Worker Lease / Fencing
+- Organization / Project / RBAC / BYOK / Quota
+- Production migration / gateway / HTTPS topology
+- Browser E2E / release hygiene
+
+## V2 — Intelligence & Multimodal — CLOSED
+
+- Multi-modal Knowledge
+- PDF / Image ingestion
+- Vision Runtime
+- TEXT / VISUAL / HYBRID Retrieval
+- Multi-modal Citation
+- Advanced Evaluation / Judge
+- Token / Cost Accounting
+- Advanced Observability
+
+V2 completed independent automated acceptance before being merged into `develop`.
+
+## V3 — Distributed Runtime / Multi-node / HA — CURRENT
+
+- Worker Horizontal Scaling
+- Multi-node Runtime
+- Node Registration / Discovery
+- Worker + Node Capacity-aware Scheduling
+- Dispatcher HA Lease / Epoch
+- Cross-node Lease / Fencing
+- Safe Worker-loss Reassignment
+- Fail-closed Ambiguous Execution Boundary
+- Control-plane Request HA overlay
+- Distributed Runtime topology and metrics
+- Multi-node failover acceptance
+
+## V4 — Platform Ecosystem
+
+- Public API / API Key
+- Python SDK
+- Agent Marketplace
+- Agent Versioning / Installation
+- MCP / Plugin Registry
+- Permission Governance
+
+## Final Production Closure
+
+- Cloud multi-node deployment
+- Public domain / HTTPS
+- Load / capacity validation
+- Monitoring / alerting
+- Backup / restore / disaster recovery
+- Stateful dependency HA validation
+- Full security / privacy / release validation
+- Final public Release

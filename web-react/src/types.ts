@@ -345,6 +345,7 @@ export type TaskConstraints = {
   maxLatencyMs: number;
   maxCost: number;
   minQuality: number;
+  retryOnWorkerLoss?: boolean;
 };
 
 // =========================================================
@@ -549,7 +550,51 @@ export type RuntimeReliabilitySnapshot = {
   availableWorkers: number;
   drainingWorkers: number;
   circuitOpenWorkers: number;
+  nodes?: number;
+  availableNodes?: number;
+  staleNodes?: number;
+  totalCapacity?: number;
+  activeExecutions?: number;
+  utilizationPercent?: number;
+  dispatcherLeader?: boolean;
+  dispatcherEpoch?: number;
+  dispatcherLeaseRemainingMs?: number;
   oldestQueuedMs: number;
+};
+
+export type RuntimeNodeSummary = {
+  nodeId: string;
+  zone?: string;
+  version?: string;
+  capacity: number;
+  activeExecutions: number;
+  workerCount: number;
+  draining: boolean;
+  status: string;
+  lastHeartbeatAt: string;
+};
+
+export type RuntimeWorkerSummary = {
+  workerId: string;
+  nodeId: string;
+  zone?: string;
+  version?: string;
+  capacity: number;
+  activeExecutions: number;
+  authoritativeActive: number;
+  nodeCapacity: number;
+  nodeActiveExecutions: number;
+  schedulingScore: number;
+  draining: boolean;
+  status: string;
+  consecutiveFailures: number;
+  lastHeartbeatAt: string;
+};
+
+export type RuntimeTopologySnapshot = {
+  reliability: RuntimeReliabilitySnapshot;
+  nodes: RuntimeNodeSummary[];
+  workers: RuntimeWorkerSummary[];
 };
 
 // =========================================================

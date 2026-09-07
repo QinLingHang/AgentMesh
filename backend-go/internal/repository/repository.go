@@ -489,6 +489,13 @@ type DurableRuntimeRepository interface {
 		model.RuntimeWorker,
 	) error
 
+	RenewRuntimeExecutionLeases(
+		context.Context,
+		string,
+		[]model.RuntimeExecutionLeaseRef,
+		time.Duration,
+	) (int64, error)
+
 	RuntimeWorkerByID(
 		context.Context,
 		string,
@@ -563,6 +570,18 @@ type DurableRuntimeRepository interface {
 		time.Time,
 	) (int64, error)
 
+	RecoverLostAcceptedRuntimeJobs(
+		context.Context,
+		time.Time,
+		time.Duration,
+		int,
+	) (int64, int64, error)
+
+	MarkStaleRuntimeTopology(
+		context.Context,
+		time.Time,
+	) (int64, int64, error)
+
 	ListExpiredAcceptedRuntimeJobs(
 		context.Context,
 		time.Time,
@@ -585,4 +604,24 @@ type DurableRuntimeRepository interface {
 		context.Context,
 		time.Time,
 	) (*model.RuntimeReliabilitySnapshot, error)
+
+	RuntimeTopologySnapshot(
+		context.Context,
+		time.Time,
+	) (*model.RuntimeTopologySnapshot, error)
+
+	AcquireRuntimeDispatcherLease(
+		context.Context,
+		string,
+		time.Duration,
+	) (*model.RuntimeDispatcherLease, bool, error)
+
+	ReleaseRuntimeDispatcherLease(
+		context.Context,
+		string,
+	) error
+
+	RuntimeDispatcherLease(
+		context.Context,
+	) (*model.RuntimeDispatcherLease, error)
 }

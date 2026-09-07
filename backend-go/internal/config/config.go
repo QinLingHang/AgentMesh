@@ -59,8 +59,11 @@ type Knowledge struct {
 type DurableRuntime struct {
 	Enabled                 bool
 	ControlPlaneBaseURL     string
+	DispatcherID            string
+	DispatcherLeaseDuration time.Duration
 	PollInterval            time.Duration
 	LeaseDuration           time.Duration
+	ExecutionLeaseDuration  time.Duration
 	WorkerStaleAfter        time.Duration
 	AcceptanceTimeout       time.Duration
 	RetryBackoff            time.Duration
@@ -193,6 +196,14 @@ func Load() (Config, error) {
 	durableEnabled, err := strconv.ParseBool(env("DURABLE_RUNTIME_ENABLED", "true"))
 	if err != nil {
 		return Config{}, errors.New("DURABLE_RUNTIME_ENABLED must be true or false")
+	}
+	durableDispatcherLeaseSeconds, err := positiveInt("DURABLE_RUNTIME_DISPATCHER_LEASE_SECONDS", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	durableExecutionLeaseSeconds, err := positiveInt("DURABLE_RUNTIME_EXECUTION_LEASE_SECONDS", 20)
+	if err != nil {
+		return Config{}, err
 	}
 	durablePollMS, err := positiveInt("DURABLE_RUNTIME_POLL_MS", 300)
 	if err != nil {
@@ -445,8 +456,11 @@ func Load() (Config, error) {
 		DurableRuntime: DurableRuntime{
 			Enabled:                 durableEnabled,
 			ControlPlaneBaseURL:     env("CONTROL_PLANE_INTERNAL_BASE_URL", "http://127.0.0.1:8086"),
+			DispatcherID:            env("DURABLE_RUNTIME_DISPATCHER_ID", "dispatcher-local-1"),
+			DispatcherLeaseDuration: time.Duration(durableDispatcherLeaseSeconds) * time.Second,
 			PollInterval:            time.Duration(durablePollMS) * time.Millisecond,
 			LeaseDuration:           time.Duration(durableLeaseSeconds) * time.Second,
+			ExecutionLeaseDuration:  time.Duration(durableExecutionLeaseSeconds) * time.Second,
 			WorkerStaleAfter:        time.Duration(durableWorkerStaleSeconds) * time.Second,
 			AcceptanceTimeout:       time.Duration(durableAcceptanceSeconds) * time.Second,
 			RetryBackoff:            time.Duration(durableRetryMS) * time.Millisecond,

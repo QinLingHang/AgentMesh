@@ -461,3 +461,87 @@
   gap: 5px;
   margin-right: 6px;
 }
+
+/* =========================================================
+ * V3 Distributed Runtime topology
+ * ======================================================= */
+.distributed-runtime-overview {
+  margin: 14px 0 18px;
+  border: 1px solid var(--line-subtle, #e5e7eb);
+  border-radius: 16px;
+  background: var(--surface-raised, #fff);
+  overflow: hidden;
+}
+
+.distributed-runtime-overview > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 16px 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.distributed-runtime-overview > summary::-webkit-details-marker { display: none; }
+.distributed-runtime-overview > summary > div { display: grid; gap: 3px; }
+.distributed-runtime-overview > summary strong { font-size: 15px; }
+.distributed-runtime-overview > summary small { color: var(--text-muted, #667085); }
+.runtime-topology-health { font-size: 12px; color: var(--text-muted, #667085); white-space: nowrap; }
+
+.runtime-topology-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 18px 14px;
+}
+
+.runtime-topology-metrics > div {
+  padding: 10px 11px;
+  border-radius: 12px;
+  background: var(--surface-soft, #f8fafc);
+  display: grid;
+  gap: 4px;
+}
+
+.runtime-topology-metrics span { font-size: 11px; color: var(--text-muted, #667085); }
+.runtime-topology-metrics strong { font-size: 14px; }
+
+.runtime-node-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 0 18px 14px;
+}
+
+.runtime-node-card {
+  border: 1px solid var(--line-subtle, #e5e7eb);
+  border-radius: 12px;
+  padding: 12px;
+}
+.runtime-node-card header { display: flex; justify-content: space-between; gap: 10px; }
+.runtime-node-card header > div { display: grid; gap: 2px; min-width: 0; }
+.runtime-node-card header strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.runtime-node-card header span { font-size: 11px; color: var(--text-muted, #667085); }
+.runtime-node-status { font-size: 10px; font-style: normal; color: var(--text-muted, #667085); }
+.runtime-node-status.active { color: #047857; }
+.runtime-node-status.offline { color: #b42318; }
+.runtime-node-meta { display: flex; gap: 12px; margin-top: 10px; flex-wrap: wrap; }
+.runtime-node-meta span { font-size: 11px; color: var(--text-muted, #667085); }
+.runtime-node-meta b { color: var(--text-primary, #101828); font-weight: 600; }
+
+.runtime-worker-table { margin: 0 18px 18px; border-top: 1px solid var(--line-subtle, #e5e7eb); }
+.runtime-worker-row { display: grid; grid-template-columns: 1.4fr 1.4fr .7fr .7fr .8fr; gap: 10px; padding: 8px 2px; border-bottom: 1px solid var(--line-subtle, #eef2f6); font-size: 11px; }
+.runtime-worker-row.head { color: var(--text-muted, #667085); font-weight: 600; }
+.runtime-worker-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.failover-retry-toggle { grid-column: 1 / -1; }
+.failover-retry-control { display: flex; align-items: flex-start; gap: 9px; }
+.failover-retry-control input { width: 16px; height: 16px; margin-top: 2px; }
+.failover-retry-control small { max-width: 560px; color: var(--text-muted, #667085); line-height: 1.45; }
+
+@media (max-width: 900px) {
+  .runtime-topology-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .runtime-worker-row { grid-template-columns: 1.3fr 1.3fr .8fr .8fr; }
+  .runtime-worker-row span:nth-child(4) { display: none; }
+}

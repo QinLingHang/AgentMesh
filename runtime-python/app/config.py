@@ -88,6 +88,10 @@ class Settings(
     runtime_worker_endpoint: str = "http://127.0.0.1:9572"
     control_plane_internal_base_url: str = "http://127.0.0.1:8086"
     runtime_worker_capacity: int = 4
+    runtime_node_id: str = ""
+    runtime_node_zone: str = "local"
+    runtime_node_version: str = "3.0.0-dev"
+    runtime_node_capacity: int = 0
     runtime_worker_heartbeat_seconds: float = 5.0
     runtime_worker_callback_timeout_seconds: float = 5.0
     runtime_worker_callback_max_retries: int = 5

@@ -20,8 +20,11 @@ import (
 type DurableRuntimeConfig struct {
 	Enabled                 bool
 	ControlPlaneBaseURL     string
+	DispatcherID            string
+	DispatcherLeaseDuration time.Duration
 	PollInterval            time.Duration
 	LeaseDuration           time.Duration
+	ExecutionLeaseDuration  time.Duration
 	WorkerStaleAfter        time.Duration
 	AcceptanceTimeout       time.Duration
 	RetryBackoff            time.Duration
@@ -43,12 +46,14 @@ type DurableRuntimeService struct {
 }
 
 type DurableExecutionCallback struct {
-	WorkerID      string                         `json:"workerId"`
-	ExecutionID   string                         `json:"executionId"`
-	LeaseToken    string                         `json:"leaseToken"`
-	Status        string                         `json:"status"`
-	Response      *runtimeclient.ExecuteResponse `json:"response,omitempty"`
-	ErrorCategory string                         `json:"errorCategory,omitempty"`
+	WorkerID        string                         `json:"workerId"`
+	ExecutionID     string                         `json:"executionId"`
+	LeaseToken      string                         `json:"leaseToken"`
+	FenceEpoch      int64                          `json:"fenceEpoch"`
+	DispatcherEpoch int64                          `json:"dispatcherEpoch"`
+	Status          string                         `json:"status"`
+	Response        *runtimeclient.ExecuteResponse `json:"response,omitempty"`
+	ErrorCategory   string                         `json:"errorCategory,omitempty"`
 }
 
 func NewDurableRuntimeService(
@@ -57,11 +62,20 @@ func NewDurableRuntimeService(
 	runtime *runtimeclient.Client,
 	cfg DurableRuntimeConfig,
 ) *DurableRuntimeService {
+	if strings.TrimSpace(cfg.DispatcherID) == "" {
+		cfg.DispatcherID = "dispatcher-local-1"
+	}
+	if cfg.DispatcherLeaseDuration <= 0 {
+		cfg.DispatcherLeaseDuration = 5 * time.Second
+	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 300 * time.Millisecond
 	}
 	if cfg.LeaseDuration <= 0 {
 		cfg.LeaseDuration = 15 * time.Second
+	}
+	if cfg.ExecutionLeaseDuration <= 0 {
+		cfg.ExecutionLeaseDuration = 20 * time.Second
 	}
 	if cfg.WorkerStaleAfter <= 0 {
 		cfg.WorkerStaleAfter = 20 * time.Second
@@ -101,6 +115,7 @@ func (s *DurableRuntimeService) Start(parent context.Context) {
 		defer s.wg.Done()
 		ticker := time.NewTicker(s.cfg.PollInterval)
 		defer ticker.Stop()
+		s.dispatchTick(ctx)
 		for {
 			select {
 			case <-ctx.Done():
@@ -118,6 +133,9 @@ func (s *DurableRuntimeService) Stop() {
 	}
 	s.cancel()
 	s.wg.Wait()
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = s.repo.ReleaseRuntimeDispatcherLease(releaseCtx, s.cfg.DispatcherID)
+	cancel()
 	s.cancel = nil
 }
 
@@ -289,10 +307,36 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 	if !s.cfg.Enabled {
 		return
 	}
-	now := time.Now().UTC()
-	if _, err := s.repo.RecoverExpiredRuntimeLeases(ctx, now); err != nil {
-		log.Printf("p8 recover runtime leases: %v", err)
+
+	lease, leader, err := s.repo.AcquireRuntimeDispatcherLease(
+		ctx, s.cfg.DispatcherID, s.cfg.DispatcherLeaseDuration,
+	)
+	if err != nil {
+		log.Printf("v3 acquire dispatcher lease: %v", err)
+		return
 	}
+	if !leader {
+		return
+	}
+
+	now := time.Now().UTC()
+	staleBefore := now.Add(-s.cfg.WorkerStaleAfter)
+	if workers, nodes, topologyErr := s.repo.MarkStaleRuntimeTopology(ctx, staleBefore); topologyErr != nil {
+		log.Printf("v3 mark stale runtime topology: %v", topologyErr)
+	} else if workers > 0 || nodes > 0 {
+		log.Printf("v3 topology offline workers=%d nodes=%d", workers, nodes)
+	}
+	if _, err := s.repo.RecoverExpiredRuntimeLeases(ctx, now); err != nil {
+		log.Printf("v3 recover pre-accept runtime leases: %v", err)
+	}
+	if requeued, failed, recoverErr := s.repo.RecoverLostAcceptedRuntimeJobs(
+		ctx, now, s.cfg.RetryBackoff, 50,
+	); recoverErr != nil {
+		log.Printf("v3 recover accepted runtime executions: %v", recoverErr)
+	} else if requeued > 0 || failed > 0 {
+		log.Printf("v3 accepted execution recovery requeued=%d failed=%d", requeued, failed)
+	}
+
 	expired, err := s.repo.ListExpiredAcceptedRuntimeJobs(ctx, now, 50)
 	if err == nil {
 		for _, job := range expired {
@@ -300,13 +344,17 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 		}
 	}
 
-	workers, err := s.repo.ListAvailableRuntimeWorkers(ctx, now.Add(-s.cfg.WorkerStaleAfter), 32)
+	workers, err := s.repo.ListAvailableRuntimeWorkers(ctx, staleBefore, 64)
 	if err != nil {
-		log.Printf("p8 list workers: %v", err)
+		log.Printf("v3 list workers: %v", err)
 		return
 	}
+	dispatcherEpoch := int64(0)
+	if lease != nil {
+		dispatcherEpoch = lease.Epoch
+	}
 	for _, worker := range workers {
-		slots := worker.Capacity - worker.ActiveExecutions
+		slots := worker.Capacity - worker.AuthoritativeActive
 		if slots < 1 {
 			continue
 		}
@@ -314,18 +362,27 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 			leaseToken := uuid.NewString()
 			job, requestJSON, err := s.repo.ClaimNextRuntimeJob(ctx, worker.WorkerID, leaseToken, s.cfg.LeaseDuration)
 			if err != nil {
-				log.Printf("p8 claim job: %v", err)
+				log.Printf("v3 claim job: %v", err)
 				break
 			}
 			if job == nil {
-				return
+				// Capacity may have changed after the worker list snapshot. Do not
+				// stop the whole dispatcher; another node may still have capacity.
+				break
 			}
-			s.dispatchOne(ctx, worker, job, leaseToken, requestJSON)
+			s.dispatchOne(ctx, worker, job, leaseToken, dispatcherEpoch, requestJSON)
 		}
 	}
 }
 
-func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.RuntimeWorker, job *model.RuntimeJob, leaseToken string, requestJSON []byte) {
+func (s *DurableRuntimeService) dispatchOne(
+	ctx context.Context,
+	worker model.RuntimeWorker,
+	job *model.RuntimeJob,
+	leaseToken string,
+	dispatcherEpoch int64,
+	requestJSON []byte,
+) {
 	var req runtimeclient.ExecuteRequest
 	if err := json.Unmarshal(requestJSON, &req); err != nil {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "invalid durable runtime payload")
@@ -390,6 +447,7 @@ func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.Ru
 	acceptCtx, cancel := runtimeclient.AcceptanceTimeout(ctx, s.cfg.AcceptanceTimeout)
 	accepted, dispatchErr := s.runtime.SubmitDurableExecution(acceptCtx, worker.Endpoint, runtimeclient.DurableExecutionEnvelope{
 		JobID: job.ID, ExecutionID: job.ExecutionID, LeaseToken: leaseToken,
+		FenceEpoch: job.FenceEpoch, DispatcherEpoch: dispatcherEpoch,
 		CallbackURL: callbackURL, Request: req,
 	})
 	cancel()
@@ -427,11 +485,26 @@ func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.Ru
 	}
 }
 
-func (s *DurableRuntimeService) Heartbeat(ctx context.Context, worker model.RuntimeWorker) error {
+func (s *DurableRuntimeService) Heartbeat(
+	ctx context.Context,
+	worker model.RuntimeWorker,
+	leases []model.RuntimeExecutionLeaseRef,
+) error {
 	if strings.TrimSpace(worker.WorkerID) == "" || strings.TrimSpace(worker.Endpoint) == "" {
 		return ErrInvalidInput
 	}
-	return s.repo.HeartbeatRuntimeWorker(ctx, worker)
+	worker.WorkerID = strings.TrimSpace(worker.WorkerID)
+	worker.NodeID = strings.TrimSpace(worker.NodeID)
+	if worker.NodeID == "" {
+		worker.NodeID = worker.WorkerID
+	}
+	if err := s.repo.HeartbeatRuntimeWorker(ctx, worker); err != nil {
+		return err
+	}
+	_, err := s.repo.RenewRuntimeExecutionLeases(
+		ctx, worker.WorkerID, leases, s.cfg.ExecutionLeaseDuration,
+	)
+	return err
 }
 
 func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callback DurableExecutionCallback) error {
@@ -443,6 +516,13 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		return ErrNotFound
 	}
 	if job.Status == "COMPLETED" || job.Status == "CANCELED" || job.Status == "FAILED" {
+		return nil
+	}
+
+	// V3 adds a monotonic fence epoch on top of the random lease token. Older
+	// P8 workers omit it (zero) and remain compatible; V3 workers must match the
+	// current assignment so callbacks from a recovered stale node are ignored.
+	if callback.FenceEpoch != 0 && callback.FenceEpoch != job.FenceEpoch {
 		return nil
 	}
 
@@ -478,7 +558,9 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		return ErrNotFound
 	}
 	response := callback.Response
-	response.Trace = append([]map[string]any{durableReliabilityTrace(job, callback.WorkerID, "completed")}, response.Trace...)
+	response.Trace = append([]map[string]any{durableReliabilityTrace(
+		job, callback.WorkerID, callback.DispatcherEpoch, "completed",
+	)}, response.Trace...)
 
 	var projectID *int64
 	if s.taskService.projectRuntime != nil && task.ConversationID != nil {
@@ -545,19 +627,26 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
 }
 
-func durableReliabilityTrace(job *model.RuntimeJob, workerID, status string) map[string]any {
-	detail, _ := json.Marshal(map[string]any{
-		"deliveryMode":   "durable",
-		"jobId":          job.ID,
-		"executionId":    job.ExecutionID,
-		"workerId":       workerID,
-		"attempt":        job.AttemptCount,
-		"maxAttempts":    job.MaxAttempts,
-		"dispatchStatus": status,
-	})
+func durableReliabilityTrace(job *model.RuntimeJob, workerID string, dispatcherEpoch int64, status string) map[string]any {
+	detail := map[string]any{
+		"deliveryMode":      "durable",
+		"jobId":             job.ID,
+		"executionId":       job.ExecutionID,
+		"workerId":          workerID,
+		"fenceEpoch":        job.FenceEpoch,
+		"dispatcherEpoch":   dispatcherEpoch,
+		"attempt":           job.AttemptCount,
+		"maxAttempts":       job.MaxAttempts,
+		"failoverRetrySafe": job.FailoverRetrySafe,
+		"dispatchStatus":    status,
+	}
+	if job.NodeID != nil {
+		detail["nodeId"] = *job.NodeID
+	}
+	encoded, _ := json.Marshal(detail)
 	return map[string]any{
 		"kind": "reliability", "title": "Durable Runtime Dispatch", "status": "completed",
-		"detail": string(detail), "elapsedMs": 0,
+		"detail": string(encoded), "elapsedMs": 0,
 	}
 }
 
@@ -586,5 +675,29 @@ func (s *DurableRuntimeService) Reliability(ctx context.Context) (*model.Runtime
 	if !s.cfg.Enabled {
 		return &model.RuntimeReliabilitySnapshot{Enabled: false}, nil
 	}
-	return s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	snapshot, err := s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	if err != nil {
+		return nil, err
+	}
+	if lease, leaseErr := s.repo.RuntimeDispatcherLease(ctx); leaseErr == nil && lease != nil {
+		snapshot.DispatcherLeader = lease.HolderID == s.cfg.DispatcherID && lease.LeaseUntil.After(time.Now().UTC())
+	}
+	return snapshot, nil
+}
+
+func (s *DurableRuntimeService) Topology(ctx context.Context) (*model.RuntimeTopologySnapshot, error) {
+	if !s.cfg.Enabled {
+		return &model.RuntimeTopologySnapshot{
+			Reliability: model.RuntimeReliabilitySnapshot{Enabled: false},
+			Nodes:       []model.RuntimeNode{}, Workers: []model.RuntimeWorker{},
+		}, nil
+	}
+	topology, err := s.repo.RuntimeTopologySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	if err != nil {
+		return nil, err
+	}
+	if lease, leaseErr := s.repo.RuntimeDispatcherLease(ctx); leaseErr == nil && lease != nil {
+		topology.Reliability.DispatcherLeader = lease.HolderID == s.cfg.DispatcherID && lease.LeaseUntil.After(time.Now().UTC())
+	}
+	return topology, nil
 }
