@@ -14,6 +14,20 @@ const memberDisplayName = "P12 Browser Member";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function envelopeData(raw) {
   return raw?.data ?? raw;
 }
@@ -73,21 +87,71 @@ async function waitForJson(url, timeoutMs = 10000) {
   return await response.json();
 }
 
+function waitForChildExit(child, timeoutMs = 5000) {
+  if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      child.off("close", onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    child.once("exit", onExit);
+    child.once("close", onExit);
+  });
+}
+
 async function stopChild(child) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  if (process.platform === "win32" && child.pid) {
-    await new Promise((resolve) => {
-      const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-      killer.once("error", resolve);
-      killer.once("exit", resolve);
-    });
-    return;
+  if (!child) return;
+
+  try {
+    if (child.exitCode === null && child.signalCode === null) {
+      if (process.platform === "win32" && child.pid) {
+        const killer = spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        await withTimeout(
+          new Promise((resolve) => {
+            killer.once("error", resolve);
+            killer.once("exit", resolve);
+            killer.once("close", resolve);
+          }),
+          5000,
+          `taskkill ${child.pid}`,
+        ).catch(() => {
+          try { killer.kill(); } catch {}
+        });
+        await waitForChildExit(child, 5000);
+      } else {
+        try { child.kill("SIGTERM"); } catch {}
+        if (!(await waitForChildExit(child, 2500))) {
+          try { child.kill("SIGKILL"); } catch {}
+          await waitForChildExit(child, 2500);
+        }
+      }
+    }
+  } finally {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    child.stdin?.destroy();
+    child.unref?.();
   }
-  try { child.kill("SIGTERM"); } catch {}
-  await sleep(500);
-  if (child.exitCode === null) {
-    try { child.kill("SIGKILL"); } catch {}
+}
+
+async function closeBrowser(child, cdp) {
+  if (cdp) {
+    try {
+      await withTimeout(cdp.send("Browser.close"), 1500, "Browser.close");
+    } catch {}
+    try { cdp.close(); } catch {}
   }
+  await withTimeout(stopChild(child), 8000, "browser process cleanup");
 }
 
 async function cleanupProfile(profile) {
@@ -102,18 +166,32 @@ async function cleanupProfile(profile) {
   }
 }
 
-function spawnCollected(command, args, options = {}) {
+function spawnCollected(command, args, options = {}, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { ...options, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      callback();
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      void stopChild(child).finally(() => {
+        reject(new Error(`${command} ${args.join(" ")} timed out after ${timeoutMs}ms\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
+      });
+    }, timeoutMs);
     child.stdout?.on("data", (chunk) => { stdout += String(chunk); });
     child.stderr?.on("data", (chunk) => { stderr += String(chunk); });
-    child.once("error", reject);
-    child.once("exit", (code) => {
+    child.once("error", (error) => finish(() => reject(error)));
+    child.once("exit", (code) => finish(() => {
       if (code === 0) resolve({ stdout, stderr });
       else reject(new Error(`${command} ${args.join(" ")} exited ${code}\nSTDOUT:\n${stdout}\nSTDERR:\n${stderr}`));
-    });
+    }));
   });
 }
 
@@ -453,16 +531,13 @@ async function run() {
   } catch (error) {
     primaryError = error;
   } finally {
-    if (cdp) {
-      try { await cdp.send("Browser.close"); } catch {}
-      try { cdp.close(); } catch {}
+    try { await withTimeout(closeBrowser(browserChild, cdp), 10000, "P12 browser cleanup"); } catch (error) { cleanupError ??= error; }
+    for (const [label, child] of [["Vite", vite], ["Go server", goServer]]) {
+      try { await withTimeout(stopChild(child), 10000, `P12 ${label} cleanup`); } catch (error) { cleanupError ??= error; }
     }
-    for (const child of [browserChild, vite, goServer]) {
-      try { await stopChild(child); } catch (error) { cleanupError ??= error; }
-    }
-    try { await cleanupProfile(profile); } catch (error) { cleanupError ??= error; }
+    try { await withTimeout(cleanupProfile(profile), 6000, "P12 browser profile cleanup"); } catch (error) { cleanupError ??= error; }
     try { fs.rmSync(knowledgeRoot, { recursive: true, force: true }); } catch (error) { cleanupError ??= error; }
-    try { await runFixture("cleanup", ["--database", fixture.database]); } catch (error) { cleanupError ??= error; }
+    try { await withTimeout(runFixture("cleanup", ["--database", fixture.database]), 35000, "P12 fixture cleanup"); } catch (error) { cleanupError ??= error; }
   }
 
   if (primaryError) {
@@ -473,4 +548,10 @@ async function run() {
   if (cleanupError) throw cleanupError;
 }
 
-await run();
+try {
+  await run();
+  process.exit(0);
+} catch (error) {
+  console.error(error?.stack ?? error);
+  process.exit(1);
+}

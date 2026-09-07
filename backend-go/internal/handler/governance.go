@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"example.com/agentmesh-control-plane/internal/model"
 	"example.com/agentmesh-control-plane/internal/service"
@@ -248,4 +249,78 @@ func (h *GovernanceHandler) DeleteUserModelProvider(c *gin.Context) {
 		return
 	}
 	ok(c, nil)
+}
+
+func parseOptionalTime(c *gin.Context, key string) (*time.Time, bool) {
+	raw := c.Query(key)
+	if raw == "" {
+		return nil, true
+	}
+	value, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		fail(c, http.StatusBadRequest, 40103, key+" 必须为 RFC3339 时间")
+		return nil, false
+	}
+	return &value, true
+}
+
+func costQuery(c *gin.Context) (model.CostQuery, bool) {
+	from, okv := parseOptionalTime(c, "from")
+	if !okv {
+		return model.CostQuery{}, false
+	}
+	to, okv := parseOptionalTime(c, "to")
+	if !okv {
+		return model.CostQuery{}, false
+	}
+	return model.CostQuery{
+		From:      from,
+		To:        to,
+		Provider:  c.Query("provider"),
+		ModelName: c.Query("model"),
+	}, true
+}
+
+func (h *GovernanceHandler) UserCostSummary(c *gin.Context) {
+	query, okv := costQuery(c)
+	if !okv {
+		return
+	}
+	data, err := h.s.CostSummary(c, uid(c), nil, query)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, data)
+}
+
+func (h *GovernanceHandler) ProjectCostSummary(c *gin.Context) {
+	pid, okv := projectIDParam(c)
+	if !okv {
+		return
+	}
+	query, okv := costQuery(c)
+	if !okv {
+		return
+	}
+	data, err := h.s.CostSummary(c, uid(c), &pid, query)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, data)
+}
+
+func (h *GovernanceHandler) RunCost(c *gin.Context) {
+	taskID, err := strconv.ParseInt(c.Param("taskId"), 10, 64)
+	if err != nil || taskID <= 0 {
+		fail(c, http.StatusBadRequest, 40104, "任务 ID 不合法")
+		return
+	}
+	data, err := h.s.RunCost(c, uid(c), taskID)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, data)
 }

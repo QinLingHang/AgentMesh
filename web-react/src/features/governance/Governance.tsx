@@ -1,6 +1,6 @@
 // Compatibility contract keywords: Project Model Provider | 审计日志 | OWNER ADMIN DEVELOPER VIEWER
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import type { GovernanceOverview, Organization, Project, ProjectModelProvider, ProjectQuota } from "../../types";
+import type { CostSummary, GovernanceOverview, Organization, Project, ProjectModelProvider, ProjectQuota } from "../../types";
 import {
   addOrganizationMember,
   addProjectMember,
@@ -10,6 +10,7 @@ import {
   deleteProjectSecret,
   ApiError,
   friendlyApiError,
+  getProjectCostSummary,
   getProjectGovernance,
   listOrganizations,
   removeProjectMember,
@@ -44,6 +45,7 @@ function auditResultLabel(result: string) {
 export function Governance({ projects }: { projects: Project[] }) {
   const [projectId, setProjectId] = useState<number | null>(projects[0]?.id ?? null);
   const [data, setData] = useState<GovernanceOverview | null>(null);
+  const [costSummary, setCostSummary] = useState<CostSummary | null>(null);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
   const [success, setSuccess] = useState("");
@@ -86,10 +88,16 @@ export function Governance({ projects }: { projects: Project[] }) {
     setWarning("");
     setSuccess("");
     try {
-      setData(await getProjectGovernance(id));
+      const [governance, costs] = await Promise.all([
+        getProjectGovernance(id),
+        getProjectCostSummary(id).catch(() => null),
+      ]);
+      setData(governance);
+      setCostSummary(costs);
     } catch (e) {
       setError(friendlyApiError(e, "治理配置暂时无法读取，请稍后重试。"));
       setData(null);
+      setCostSummary(null);
     } finally {
       setLoading(false);
     }
@@ -256,6 +264,41 @@ export function Governance({ projects }: { projects: Project[] }) {
               <small>上限 ${data.quota.monthlyCostLimit.toFixed(2)}</small>
             </div>
           </section>
+
+          {costSummary && (
+            <section className="governance-calm-card" data-testid="v2-cost-summary">
+              <div className="governance-calm-card-head">
+                <span className="governance-calm-icon"><Icon name="chart" size={17} /></span>
+                <div>
+                  <h2>V2 Runtime 成本分析</h2>
+                  <p>按当前项目聚合持久化的 Run Token 与模型成本；未配置模型价格的运行保持“成本未知”，不会伪造金额。</p>
+                </div>
+              </div>
+              <div className="calm-overview-strip governance-usage-strip">
+                <div><span>Runs</span><strong>{costSummary.runCount.toLocaleString()}</strong></div>
+                <div><span>Total Tokens</span><strong>{costSummary.totalTokens.toLocaleString()}</strong></div>
+                <div><span>Estimated Cost</span><strong>${costSummary.estimatedCost.toFixed(4)}</strong></div>
+                <div><span>成本未知 Runs</span><strong>{costSummary.unknownCostRuns.toLocaleString()}</strong><small>已知 {costSummary.knownCostRuns.toLocaleString()}</small></div>
+              </div>
+              {costSummary.breakdown.length > 0 && (
+                <div className="calm-table-shell">
+                  <table className="calm-table">
+                    <thead><tr><th>Provider / Model</th><th>Runs</th><th>Tokens</th><th>Estimated Cost</th></tr></thead>
+                    <tbody>
+                      {costSummary.breakdown.map((item) => (
+                        <tr key={`${item.provider}:${item.modelName}`}>
+                          <td>{item.provider || "—"} / {item.modelName || "—"}</td>
+                          <td>{item.runs.toLocaleString()}</td>
+                          <td>{item.totalTokens.toLocaleString()}</td>
+                          <td>${item.estimatedCost.toFixed(4)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
 
           <div className="governance-calm-grid primary-grid">
             <article className="governance-calm-card organization-card" data-testid="organization-section">

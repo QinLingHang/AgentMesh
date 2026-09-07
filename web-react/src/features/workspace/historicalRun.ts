@@ -25,6 +25,8 @@ import type {
 
 const EMPTY_OBSERVABILITY: ObservabilitySummary = {
   modelCalls: 0,
+  modelProvider: "",
+  modelName: "",
   modelInputTokens: 0,
   modelOutputTokens: 0,
   modelTotalTokens: 0,
@@ -43,6 +45,13 @@ const EMPTY_OBSERVABILITY: ObservabilitySummary = {
   modelCostKnown: false,
   toolSuccesses: 0,
   toolFailures: 0,
+  retrievalMode: "",
+  ragLatencyMs: 0,
+  ragRawHits: 0,
+  ragHits: 0,
+  ragContextHits: 0,
+  ragTextCandidates: 0,
+  ragVisualCandidates: 0,
 };
 
 function asRecord(
@@ -265,6 +274,8 @@ function normalizeObservability(
     modelCalls: asNumber(
       record.modelCalls,
     ),
+    modelProvider: asString(record.modelProvider),
+    modelName: asString(record.modelName),
     modelInputTokens: asNumber(
       record.modelInputTokens,
     ),
@@ -317,6 +328,13 @@ function normalizeObservability(
     toolFailures: asNumber(
       record.toolFailures,
     ),
+    retrievalMode: asString(record.retrievalMode),
+    ragLatencyMs: asNumber(record.ragLatencyMs),
+    ragRawHits: asNumber(record.ragRawHits),
+    ragHits: asNumber(record.ragHits),
+    ragContextHits: asNumber(record.ragContextHits),
+    ragTextCandidates: asNumber(record.ragTextCandidates),
+    ragVisualCandidates: asNumber(record.ragVisualCandidates),
   };
 }
 
@@ -381,6 +399,14 @@ function normalizeCitations(
           "number"
             ? record.end
             : null,
+        pageNumber:
+          typeof record.pageNumber === "number" ? record.pageNumber : null,
+        assetId:
+          typeof record.assetId === "string" ? record.assetId : null,
+        modality:
+          typeof record.modality === "string" ? record.modality : null,
+        visualType:
+          typeof record.visualType === "string" ? record.visualType : null,
       } satisfies RuntimeCitation;
     })
     .filter(
@@ -482,6 +508,10 @@ function normalizeScorecard(
     taskSuccess: asNumber(record.taskSuccess),
     answerQuality: asNumber(record.answerQuality),
     groundedness: asNumber(record.groundedness),
+    correctness: asNumber(record.correctness, asNumber(record.answerQuality)),
+    citationQuality: asNumber(record.citationQuality, asNumber(record.groundedness)),
+    taskCompletion: asNumber(record.taskCompletion, asNumber(record.taskSuccess)),
+    judgeReason: asString(record.judgeReason),
     toolReliability: asNumber(record.toolReliability),
     ragQuality: asNumber(record.ragQuality),
     memoryContribution: asNumber(record.memoryContribution),

@@ -24,6 +24,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		{name: "governance", fn: EnsureGovernanceSchema},
 		{name: "user_model", fn: EnsureUserModelSchema},
 		{name: "attachments", fn: EnsureAttachmentSchema},
+		{name: "v2_intelligence", fn: EnsureV2IntelligenceSchema},
 	}
 
 	for _, step := range steps {

@@ -438,20 +438,36 @@ async function run() {
     );
     assert.ok(lazyJsResources > initialJsResources, "opening a secondary module should load a lazy JS chunk");
     await assertPage(cdp, "知识库", "知识库");
-    await assertPage(cdp, "扩展能力", "扩展能力");
-    await assertPage(cdp, "任务记录", "任务记录");
+    await assertPage(cdp, "能力中心", "让 AgentMesh 做得更多");
+    await assertPage(cdp, "任务记录", "任务");
     await assertPage(cdp, "治理与安全", "治理与安全");
     await waitFor(
       cdp,
       `[...document.querySelectorAll('main h2')].some((node) => node.textContent?.includes("团队协作"))`,
       "Team collaboration section",
     );
-    await waitFor(cdp, `document.body.innerText.includes("用户 #7")`, "audit actor");
+
+    assert.equal(
+      await cdp.evaluate(clickButtonExpression("高级安全与模型设置")),
+      true,
+      "advanced governance toggle should exist",
+    );
     await waitFor(cdp, `document.body.innerText.includes("••••7890")`, "masked secret hint");
     assert.equal(await cdp.evaluate(`document.body.innerText.includes("plaintext-secret")`), false);
 
+    assert.equal(
+      await cdp.evaluate(clickButtonExpression("审计记录")),
+      true,
+      "audit toggle should exist",
+    );
+    await waitFor(
+      cdp,
+      `document.querySelector('.audit-card .audit-actor')?.textContent?.includes("用户 #7")`,
+      "audit actor",
+    );
+
     await fetch(`${appUrl}/__p11__/rate-limit`);
-    await assertPage(cdp, "工作台", "工作台", ".workspace-title");
+    await assertPage(cdp, "工作台", "工作台", ".workspace-breadcrumb span");
     await assertPage(cdp, "治理与安全", "治理与安全");
     await waitFor(cdp, `document.body.innerText.includes("当前项目额度或请求频率已达到限制")`, "friendly 429 error");
 

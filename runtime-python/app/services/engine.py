@@ -64,6 +64,11 @@ from app.models.runtime import (
 )
 from app.models.contracts import ModelInputAttachment
 from app.knowledge.parser import parse_document_bytes
+from app.multimodal.retrieval import (
+    classify_retrieval_mode,
+    diversify_multimodal_hits,
+    filter_hits_for_mode,
+)
 from app.rag import (
     AdaptiveRAGRouter,
     RAGMode,
@@ -3330,6 +3335,9 @@ class RuntimeEngine:
                 )
             )
 
+            retrieval_mode_decision = classify_retrieval_mode(req.task, rag_decision.analysis)
+            retrieval_mode = retrieval_mode_decision.mode
+
             # Project Knowledge is opt-in by request semantics. Ordinary world
             # knowledge questions should use the base model, while request-local
             # attachments are already the authoritative evidence for this turn.
@@ -3366,6 +3374,12 @@ class RuntimeEngine:
                             rag_decision
                             .mode
                             .value,
+
+                        "retrievalMode":
+                            retrieval_mode.value,
+
+                        "retrievalModeReason":
+                            retrieval_mode_decision.reason,
 
                         "intent":
                             rag_decision
@@ -3468,6 +3482,9 @@ class RuntimeEngine:
                                 .mode
                                 .value,
 
+                            "retrievalMode":
+                                retrieval_mode.value,
+
                             "reason":
                                 rag_decision
                                 .reason,
@@ -3510,6 +3527,9 @@ class RuntimeEngine:
                                 rag_decision
                                 .mode
                                 .value,
+
+                            "retrievalMode":
+                                retrieval_mode.value,
 
                             "top_k":
                                 rag_decision
@@ -3650,8 +3670,10 @@ class RuntimeEngine:
                                 ),
 
                                 top_k=(
-                                    rag_decision
-                                    .top_k
+                                    max(
+                                        rag_decision.top_k,
+                                        rag_decision.top_k * 3,
+                                    )
                                 ),
 
                                 max_rounds=(
@@ -3806,14 +3828,36 @@ class RuntimeEngine:
                             .retrieve(
                                 req.task,
                                 top_k=(
-                                    rag_decision
-                                    .top_k
+                                    max(
+                                        rag_decision.top_k,
+                                        rag_decision.top_k * 3,
+                                    )
                                 ),
                                 filters={
                                     "userId":
                                         req.user_id
                                 },
                             )
+                        )
+
+                    raw_retrieval_hits = list(retrieval_hits)
+                    retrieval_hits = diversify_multimodal_hits(
+                        filter_hits_for_mode(
+                            raw_retrieval_hits,
+                            retrieval_mode,
+                        ),
+                        top_k=rag_decision.top_k,
+                    )
+
+                    if (
+                        rag_decision.mode.value == "agentic_rag"
+                        and raw_retrieval_hits
+                        and not retrieval_hits
+                    ):
+                        rag_grounding_sufficient = False
+                        rag_grounding_reason = (
+                            "retrieval evidence did not match requested "
+                            f"{retrieval_mode.value} modality"
                         )
 
                     rag_diagnostics: dict[
@@ -3955,9 +3999,27 @@ class RuntimeEngine:
                                     .mode
                                     .value,
 
+                                "retrievalMode":
+                                    retrieval_mode.value,
+
+                                "rawHits":
+                                    len(raw_retrieval_hits),
+
                                 "hits":
                                     len(
                                         retrieval_hits
+                                    ),
+
+                                "textCandidates":
+                                    sum(
+                                        1 for hit in raw_retrieval_hits
+                                        if str(hit.document.metadata.get("modality", "text")).lower() == "text"
+                                    ),
+
+                                "visualCandidates":
+                                    sum(
+                                        1 for hit in raw_retrieval_hits
+                                        if str(hit.document.metadata.get("modality", "text")).lower() != "text"
                                     ),
 
                                 "contextHits":
@@ -3982,6 +4044,18 @@ class RuntimeEngine:
 
                                         "score":
                                             hit.score,
+
+                                        "modality":
+                                            hit.document.metadata.get("modality", "text"),
+
+                                        "pageNumber":
+                                            hit.document.metadata.get("pageNumber"),
+
+                                        "visualType":
+                                            hit.document.metadata.get("visualType"),
+
+                                        "assetId":
+                                            hit.document.metadata.get("assetId"),
 
                                         "reranker":
                                             hit

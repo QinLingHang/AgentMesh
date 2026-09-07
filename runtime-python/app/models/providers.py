@@ -11,6 +11,7 @@ from app.models.contracts import (
     ModelResponse,
     ToolCall,
 )
+from app.models.cost import ModelPricing, UsageCostCalculator
 from app.models.errors import ModelError, ModelErrorType
 import httpx
 
@@ -215,24 +216,15 @@ class OpenAICompatibleModelProvider:
         # Defensive defaults keep provider response parsing robust even when a
         # lightweight test/dynamic fixture bypasses __init__. Normal production
         # construction still sets these attributes explicitly.
-        input_cost_per_million = max(
-            0.0,
-            float(getattr(self, "input_cost_per_million", 0.0) or 0.0),
+        pricing = ModelPricing(
+            input_cost_per_million=max(0.0, float(getattr(self, "input_cost_per_million", 0.0) or 0.0)),
+            output_cost_per_million=max(0.0, float(getattr(self, "output_cost_per_million", 0.0) or 0.0)),
         )
-        output_cost_per_million = max(
-            0.0,
-            float(getattr(self, "output_cost_per_million", 0.0) or 0.0),
-        )
-        pricing_configured = (
-            input_cost_per_million > 0
-            or output_cost_per_million > 0
-        )
-        estimated_cost = (
-            input_tokens / 1_000_000.0 * input_cost_per_million
-            + output_tokens / 1_000_000.0 * output_cost_per_million
-            if pricing_configured
-            else None
-        )
+        estimated_cost = UsageCostCalculator.calculate(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            pricing=pricing,
+        ).amount
         return ModelResponse(content=choice.message.content or "", provider=self.name,
             model=response.model or request.model,
             input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens,
@@ -284,14 +276,15 @@ class OpenAICompatibleModelProvider:
         input_tokens = max(1, input_chars // 4)
         output_tokens = max(1, len(content) // 4) if content else 0
         total_tokens = input_tokens + output_tokens
-        input_cost_per_million = max(0.0, float(getattr(self, "input_cost_per_million", 0.0) or 0.0))
-        output_cost_per_million = max(0.0, float(getattr(self, "output_cost_per_million", 0.0) or 0.0))
-        pricing_configured = input_cost_per_million > 0 or output_cost_per_million > 0
-        estimated_cost = (
-            input_tokens / 1_000_000.0 * input_cost_per_million
-            + output_tokens / 1_000_000.0 * output_cost_per_million
-            if pricing_configured else None
+        pricing = ModelPricing(
+            input_cost_per_million=max(0.0, float(getattr(self, "input_cost_per_million", 0.0) or 0.0)),
+            output_cost_per_million=max(0.0, float(getattr(self, "output_cost_per_million", 0.0) or 0.0)),
         )
+        estimated_cost = UsageCostCalculator.calculate(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            pricing=pricing,
+        ).amount
         yield {
             "type": "done",
             "content": content,

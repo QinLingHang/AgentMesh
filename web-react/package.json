@@ -1,7 +1,7 @@
 {
   "name": "agentmesh-web",
   "private": true,
-  "version": "1.0.0-rc.1",
+  "version": "2.0.0-dev",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -10,6 +10,7 @@
     "test": "node --test tests/*.test.mjs",
     "test:e2e:p11": "node e2e/p11-browser-e2e.mjs",
     "test:e2e:p12-session": "node e2e/p12-dev-session-restore.mjs",
+    "test:e2e:v2": "node e2e/v2-intelligence-browser-e2e.mjs",
     "test:p11:bundle": "node e2e/p11-bundle-gate.mjs",
     "test:p11": "npm run build && npm run test:p11:bundle && npm run test:e2e:p11"
   },

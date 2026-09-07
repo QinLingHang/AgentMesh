@@ -103,6 +103,11 @@ func EnsureWorkspaceSchema(
 			storage_key VARCHAR(512) NOT NULL,
 			status VARCHAR(32) NOT NULL DEFAULT 'UPLOADED',
 			chunk_count INT NOT NULL DEFAULT 0,
+			text_chunk_count INT NOT NULL DEFAULT 0,
+			visual_evidence_count INT NOT NULL DEFAULT 0,
+			page_count INT NOT NULL DEFAULT 0,
+			visual_status VARCHAR(32) NOT NULL DEFAULT 'not_applicable',
+			visual_error_message VARCHAR(1000) NULL,
 			error_message VARCHAR(1000) NULL,
 			indexed_at TIMESTAMP(6) NULL,
 			created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
@@ -321,6 +326,28 @@ func evolveKnowledgeFileTable(
 			 ON DELETE CASCADE`,
 		); err != nil {
 			return err
+		}
+	}
+
+	v2Columns := []struct {
+		name string
+		ddl  string
+	}{
+		{"text_chunk_count", `ALTER TABLE project_knowledge_files ADD COLUMN text_chunk_count INT NOT NULL DEFAULT 0 AFTER chunk_count`},
+		{"visual_evidence_count", `ALTER TABLE project_knowledge_files ADD COLUMN visual_evidence_count INT NOT NULL DEFAULT 0 AFTER text_chunk_count`},
+		{"page_count", `ALTER TABLE project_knowledge_files ADD COLUMN page_count INT NOT NULL DEFAULT 0 AFTER visual_evidence_count`},
+		{"visual_status", `ALTER TABLE project_knowledge_files ADD COLUMN visual_status VARCHAR(32) NOT NULL DEFAULT 'not_applicable' AFTER page_count`},
+		{"visual_error_message", `ALTER TABLE project_knowledge_files ADD COLUMN visual_error_message VARCHAR(1000) NULL AFTER visual_status`},
+	}
+	for _, item := range v2Columns {
+		present, columnErr := columnExists(ctx, db, "project_knowledge_files", item.name)
+		if columnErr != nil {
+			return columnErr
+		}
+		if !present {
+			if _, columnErr = db.ExecContext(ctx, item.ddl); columnErr != nil {
+				return columnErr
+			}
 		}
 	}
 

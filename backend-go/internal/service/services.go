@@ -1358,6 +1358,31 @@ func (s *TaskService) SetAttachmentService(attachments *AttachmentService) {
 	s.attachments = attachments
 }
 
+func (s *TaskService) recordRunCost(
+	ctx context.Context,
+	uid int64,
+	taskID int64,
+	projectID *int64,
+	observability runtimeclient.ObservabilitySummary,
+	estimatedCost float64,
+) {
+	if s.governance == nil || taskID <= 0 || uid <= 0 {
+		return
+	}
+	status := "unavailable"
+	if observability.ModelCostKnown {
+		status = "estimated"
+	}
+	s.governance.RecordRunCost(ctx, model.RunCostRecord{
+		TaskID: taskID, UserID: uid, ProjectID: projectID,
+		Provider: observability.ModelProvider, ModelName: observability.ModelName,
+		InputTokens:   int64(observability.ModelInputTokens),
+		OutputTokens:  int64(observability.ModelOutputTokens),
+		TotalTokens:   int64(observability.ModelTotalTokens),
+		EstimatedCost: estimatedCost, CostStatus: status,
+	})
+}
+
 func (s *TaskService) resolveRequestModelRuntime(
 	ctx context.Context,
 	uid int64,
@@ -1630,6 +1655,7 @@ func (s *TaskService) RunInteractiveStream(
 	observability := runtimeclient.ObservabilitySummary{
 		ModelCalls: 1, ModelInputTokens: done.InputTokens, ModelOutputTokens: done.OutputTokens,
 		ModelTotalTokens: done.TotalTokens, ModelLatencyMS: elapsed,
+		ModelProvider: done.Provider, ModelName: done.Model,
 		AgentAttempts: 1, AgentSuccesses: 1, DAGCompletedNodes: 1,
 	}
 	if done.EstimatedCost != nil {
@@ -1646,9 +1672,13 @@ func (s *TaskService) RunInteractiveStream(
 			"observability": observability, "citations": []runtimeclient.RuntimeCitation{},
 		})
 	}
+	var costProjectID *int64
 	if s.governance != nil && projectRuntimeContext != nil {
 		s.governance.RecordUsage(ctx, projectRuntimeContext.ProjectID, int64(done.TotalTokens), cost, 0)
+		pid := projectRuntimeContext.ProjectID
+		costProjectID = &pid
 	}
+	s.recordRunCost(ctx, uid, task.ID, costProjectID, observability, cost)
 
 	task.Status = "COMPLETED"
 	task.ResultText = &finalAnswer
@@ -2318,9 +2348,13 @@ func (s *TaskService) Run(
 			Constraints: in.Constraints,
 		},
 	)
+	var runCostProjectID *int64
 	if s.governance != nil && projectRuntimeContext != nil {
 		s.governance.RecordUsage(ctx, projectRuntimeContext.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+		pid := projectRuntimeContext.ProjectID
+		runCostProjectID = &pid
 	}
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(
@@ -2951,9 +2985,13 @@ func (s *TaskService) Resume(
 			ExecutionMode: task.ExecutionMode, SynthesisMode: task.SynthesisMode,
 			Constraints: task.Constraints,
 		})
+	var runCostProjectID *int64
 	if s.governance != nil && projectRuntimeContext != nil {
 		s.governance.RecordUsage(ctx, projectRuntimeContext.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+		pid := projectRuntimeContext.ProjectID
+		runCostProjectID = &pid
 	}
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(
