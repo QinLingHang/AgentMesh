@@ -192,6 +192,9 @@ export function Workspace({
   const [quality, setQuality] =
     useState(0.8);
 
+  const [retryOnWorkerLoss, setRetryOnWorkerLoss] =
+    useState(false);
+
   const [busy, setBusy] =
     useState(false);
 
@@ -645,6 +648,7 @@ export function Workspace({
         maxLatencyMs: latency,
         maxCost: cost,
         minQuality: quality,
+        retryOnWorkerLoss: deliveryMode === "durable" ? retryOnWorkerLoss : false,
         attachmentIds: submittedAttachments.map((item) => item.server!.id),
       };
 
@@ -1125,6 +1129,8 @@ export function Workspace({
           setCost={setCost}
           quality={quality}
           setQuality={setQuality}
+          retryOnWorkerLoss={retryOnWorkerLoss}
+          setRetryOnWorkerLoss={setRetryOnWorkerLoss}
         />
       </div>
     </div>

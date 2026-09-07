@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import type { RuntimeReliabilitySnapshot, Task } from "../../types";
-import { getRuntimeReliability } from "../../api";
+import type { RuntimeReliabilitySnapshot, RuntimeTopologySnapshot, Task } from "../../types";
+import { getRuntimeReliability, getRuntimeTopology } from "../../api";
 import { RuntimeStatusBadge } from "../../components/common/RuntimeStatusBadge";
 import { Icon } from "../../components/common/Icon";
 import { formatMoney } from "../../utils/format";
+import { DistributedRuntimeOverview } from "./DistributedRuntimeOverview";
 
 type DeleteState = { task: Task; phase: "confirm" | "deleting" } | null;
 
@@ -42,6 +43,7 @@ export function Tasks({
   const [feedback, setFeedback] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const [cancelingId, setCancelingId] = useState<number | null>(null);
   const [reliability, setReliability] = useState<RuntimeReliabilitySnapshot | null>(null);
+  const [topology, setTopology] = useState<RuntimeTopologySnapshot | null>(null);
   const [expandedTaskId, setExpandedTaskId] = useState<number | null>(null);
 
   useEffect(() => {
@@ -52,6 +54,12 @@ export function Tasks({
         if (active) setReliability(snapshot);
       } catch {
         // Runtime telemetry is optional for the user-facing history page.
+      }
+      try {
+        const snapshot = await getRuntimeTopology();
+        if (active) setTopology(snapshot);
+      } catch {
+        // V3 topology is additive; task history remains usable if unavailable.
       }
     };
     void refresh();
@@ -139,6 +147,10 @@ export function Tasks({
           )}
         </div>
       </section>
+
+      {topology?.reliability.enabled && (
+        <DistributedRuntimeOverview topology={topology} />
+      )}
 
       {feedback && (
         <div className={`calm-feedback ${feedback.type}`} role={feedback.type === "error" ? "alert" : "status"}>

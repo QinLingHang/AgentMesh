@@ -144,6 +144,11 @@ class TaskConstraints(
         alias="minQuality",
     )
 
+    retry_on_worker_loss: bool = Field(
+        default=False,
+        alias="retryOnWorkerLoss",
+    )
+
 RuntimeStatus = Literal[
     "SUBMITTED",
     "RUNNING",

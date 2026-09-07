@@ -27,6 +27,8 @@ export function RunSettingsDrawer({
   setCost,
   quality,
   setQuality,
+  retryOnWorkerLoss,
+  setRetryOnWorkerLoss,
 }: {
   open: boolean;
   onClose: () => void;
@@ -46,6 +48,8 @@ export function RunSettingsDrawer({
   setCost: (value: number) => void;
   quality: number;
   setQuality: (value: number) => void;
+  retryOnWorkerLoss: boolean;
+  setRetryOnWorkerLoss: (value: boolean) => void;
 }) {
   if (!open) {
     return null;
@@ -123,6 +127,8 @@ export function RunSettingsDrawer({
           setCost={setCost}
           quality={quality}
           setQuality={setQuality}
+          retryOnWorkerLoss={retryOnWorkerLoss}
+          setRetryOnWorkerLoss={setRetryOnWorkerLoss}
         />
 
         <footer className="run-settings-foot">

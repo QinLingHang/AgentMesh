@@ -4,9 +4,9 @@
 > 基于 **Go + Python + React + TypeScript** 构建，覆盖 Agent Runtime、Multi-Agent、RAG、Memory、Tool、MCP、BYOK、RBAC、可观测性、分布式执行与生产部署。
 
 **当前公开版本：** `v1.0.0-rc.2`  
-**当前开发版本：** `2.0.0-dev`（V2 Intelligence & Multimodal Sprint，未发布）  
+**当前开发版本：** `3.0.0-dev`（V3 Distributed Runtime / Multi-node / HA Sprint，未发布）
 **开源协议：** Apache License 2.0  
-**项目状态：** V2 开发中；在计划能力全部完成并通过全量验收前不发布新的 Release
+**项目状态：** V2 已完成并通过独立验收；当前进入 V3 分布式 Runtime 大版本开发，在全部计划能力和最终云端验收完成前不发布新的 Release
 
 ---
 
@@ -409,20 +409,20 @@ AgentMesh 已实现面向分布式 Runtime 的基础能力。
 目前包括：
 
 - Durable Queue
-- Worker Registration
-- Worker Heartbeat
-- Lease
-- Fencing
+- Worker Registration / Heartbeat
+- Runtime Node Registration / Discovery
+- Worker / Node Capacity-aware Scheduling
+- Lease / Cross-node Fencing
+- Dispatcher HA Lease / Epoch
 - Idempotent Execution
-- Capacity
 - Backpressure
-- Deadline
-- Cancellation
+- Deadline / Cancellation
 - Safe Retry Boundary
-- Worker Recovery
-- Dispatcher Recovery
+- Worker / Node Recovery
+- Safe Task Reassignment
 - Circuit Breaker
-- Graceful Shutdown
+- Graceful Drain / Shutdown
+- Distributed Runtime Topology / Metrics
 
 任务执行不再只依赖单进程内存状态，而是逐步演进为：
 
@@ -438,7 +438,7 @@ Worker Pool
 Agent Runtime
 ```
 
-为后续 Worker 横向扩展和更高并发场景提供基础。
+V3 在该基础上进一步提供多节点 Worker、节点级容量约束、Dispatcher 主备接管、跨节点任务重分配和 Runtime 拓扑可观测能力。
 
 ---
 
@@ -977,7 +977,7 @@ File Size
 SHA-256
 ```
 
-对于当前 `2.0.0-dev` 开发快照，它仅用于验证 **development source handoff** 的文件完整性，并不代表新的公开 Release，也不会改变已冻结的 `v1.0.0-rc.2` Tag、ZIP 或其 SHA-256。最终正式发布时会重新生成对应正式版本的 Release Manifest。
+对于当前 `3.0.0-dev` 开发快照，它仅用于验证 **development source handoff** 的文件完整性，并不代表新的公开 Release，也不会改变已冻结的 `v1.0.0-rc.2` Tag、ZIP 或其 SHA-256。最终正式发布时会重新生成对应正式版本的 Release Manifest。
 
 ---
 
@@ -1046,7 +1046,7 @@ docs/NEXT_ROADMAP.md
 
 AgentMesh 已暂停继续发布小版本。当前公开的 `v1.0.0-rc.2` 保持冻结，后续开发在未发布分支持续推进，待计划能力整体完成、全量回归和云端验收通过后再统一发布正式版本。
 
-**V2 — Intelligence & Multimodal Sprint（当前）**
+**V2 — Intelligence & Multimodal Sprint（已完成）**
 
 - Multi-modal RAG
 - PDF / Image Knowledge
@@ -1059,16 +1059,20 @@ AgentMesh 已暂停继续发布小版本。当前公开的 `v1.0.0-rc.2` 保持�
 - Token / Cost Accounting
 - Advanced Observability
 
-当前 V2 开发源码已进入整体验收准备阶段，但在 Python / Go / React / Browser E2E / Privacy 等强制 Gate 全部取得真实 PASS 前，不标记为正式完成版本。
+V2 已完成 Python / Go / React / Browser E2E / MySQL Isolation / Privacy 等独立自动化验收并正式关单。
 
-**V3 — Distributed Runtime Sprint**
+**V3 — Distributed Runtime / Multi-node / HA Sprint（当前）**
 
 - Worker Horizontal Scaling
 - Multi-node Runtime
-- Capacity-aware Scheduling
-- Failover / Recovery
-- High Availability
-- Distributed Observability
+- Node Registration / Discovery
+- Worker + Node Capacity-aware Scheduling
+- Dispatcher HA Lease / Epoch
+- Cross-node Lease / Fencing
+- Worker / Node Failure Recovery
+- Safe Task Reassignment
+- Control-plane Request HA Overlay
+- Distributed Observability / Runtime Topology Dashboard
 
 **V4 — Platform Ecosystem Sprint**
 
@@ -1187,7 +1191,7 @@ AgentMesh 基于 **Apache License 2.0** 开源。
 
 ### 35. 使用说明
 
-AgentMesh 当前公开版本仍为 `v1.0.0-rc.2` Release Candidate；`2.0.0-dev` 仅代表未发布开发源码，不是新的公开 Release。
+AgentMesh 当前公开版本仍为 `v1.0.0-rc.2` Release Candidate；`3.0.0-dev` 仅代表未发布开发源码，不是新的公开 Release。
 
 在用于真实生产环境之前，请根据实际业务场景进一步完成：
 

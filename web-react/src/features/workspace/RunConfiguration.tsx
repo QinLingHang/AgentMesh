@@ -18,6 +18,8 @@ export function RunConfiguration({
   setCost,
   quality,
   setQuality,
+  retryOnWorkerLoss,
+  setRetryOnWorkerLoss,
 }: {
   scheduler: Scheduler;
 
@@ -71,6 +73,12 @@ export function RunConfiguration({
 
   setQuality: (
     value: number,
+  ) => void;
+
+  retryOnWorkerLoss: boolean;
+
+  setRetryOnWorkerLoss: (
+    value: boolean,
   ) => void;
 }) {
   return (
@@ -305,6 +313,25 @@ export function RunConfiguration({
               }
             />
           </label>
+
+          {deliveryMode === "durable" && (
+            <label className="failover-retry-toggle">
+              <span>
+                节点故障重试
+              </span>
+
+              <div className="failover-retry-control">
+                <input
+                  type="checkbox"
+                  checked={retryOnWorkerLoss}
+                  onChange={(e) => setRetryOnWorkerLoss(e.target.checked)}
+                />
+                <small>
+                  仅对无副作用或幂等任务开启。Worker 丢失后允许跨节点重新分配，并使用 Fence 防止旧结果写回。
+                </small>
+              </div>
+            </label>
+          )}
         </div>
       </details>
     </div>

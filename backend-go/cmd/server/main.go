@@ -216,8 +216,11 @@ func main() {
 		service.DurableRuntimeConfig{
 			Enabled:                 cfg.DurableRuntime.Enabled,
 			ControlPlaneBaseURL:     cfg.DurableRuntime.ControlPlaneBaseURL,
+			DispatcherID:            cfg.DurableRuntime.DispatcherID,
+			DispatcherLeaseDuration: cfg.DurableRuntime.DispatcherLeaseDuration,
 			PollInterval:            cfg.DurableRuntime.PollInterval,
 			LeaseDuration:           cfg.DurableRuntime.LeaseDuration,
+			ExecutionLeaseDuration:  cfg.DurableRuntime.ExecutionLeaseDuration,
 			WorkerStaleAfter:        cfg.DurableRuntime.WorkerStaleAfter,
 			AcceptanceTimeout:       cfg.DurableRuntime.AcceptanceTimeout,
 			RetryBackoff:            cfg.DurableRuntime.RetryBackoff,

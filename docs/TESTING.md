@@ -95,3 +95,39 @@ npm run test:e2e:v2
 For full database-backed acceptance, both `P2_TEST_MYSQL_DSN` and
 `P3_TEST_MYSQL_DSN` must be configured before Go/P12 execution. A missing DSN is
 an environment blocker and must not be converted into a false PASS.
+
+## 6. V3 Distributed Runtime sprint
+
+V3 targeted acceptance is documented in `docs/v3/ACCEPTANCE.md`.
+
+Convenience runner:
+
+```powershell
+$env:P2_TEST_MYSQL_DSN="user:password@tcp(127.0.0.1:3306)/mysql?parseTime=true&charset=utf8mb4&multiStatements=true"
+$env:P3_TEST_MYSQL_DSN=$env:P2_TEST_MYSQL_DSN
+$env:P3_TEST_PYTHON=(Get-Command python).Source
+
+.\scripts\TEST_V3_DISTRIBUTED_RUNTIME.ps1 -Python $env:P3_TEST_PYTHON
+```
+
+Native commands remain authoritative:
+
+```powershell
+cd runtime-python
+python -m pytest -q tests/test_v3_distributed_runtime.py
+python -m pytest -q
+
+cd ..\backend-go
+go test ./internal/service -run '^TestV3' -count=1 -v
+go test ./... -count=1
+
+cd ..\web-react
+npm test
+npm run build
+npm run test:e2e:v3
+```
+
+The V3 Go tests require an isolated MySQL DSN and must not be accepted as PASS
+when skipped. The browser runner validates the sanitized multi-node topology and
+a deterministic dispatcher/node failover transition; database integration tests
+remain authoritative for lease, fencing, capacity and reassignment semantics.

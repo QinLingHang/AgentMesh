@@ -20,6 +20,7 @@ import type {
   ProjectRuntimeConfig,
   RunResult,
   RuntimeReliabilitySnapshot,
+  RuntimeTopologySnapshot,
   Scheduler,
   SynthesisMode,
   Task,
@@ -1008,6 +1009,11 @@ export const getRuntimeReliability = () =>
     "/api/runtime/reliability",
   );
 
+export const getRuntimeTopology = () =>
+  request<RuntimeTopologySnapshot>(
+    "/api/runtime/topology",
+  );
+
 // =========================================================
 // Conversation Attachments
 // Request-local files/images. These are not knowledge-base ingestion.
@@ -1116,6 +1122,8 @@ export type RunTaskRequest = {
 
   minQuality: number;
 
+  retryOnWorkerLoss?: boolean;
+
   attachmentIds?: number[];
 };
 
@@ -1157,6 +1165,7 @@ export async function runTaskStream(
         maxLatencyMs: input.maxLatencyMs,
         maxCost: input.maxCost,
         minQuality: input.minQuality,
+        retryOnWorkerLoss: input.retryOnWorkerLoss ?? false,
       },
     }),
   });
@@ -1261,6 +1270,9 @@ export const runTask = (
 
           minQuality:
             input.minQuality,
+
+          retryOnWorkerLoss:
+            input.retryOnWorkerLoss ?? false,
         },
       }),
     },

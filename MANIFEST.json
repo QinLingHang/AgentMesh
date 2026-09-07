@@ -1,14 +1,14 @@
 {
   "project": "AgentMesh",
-  "version": "2.0.0-dev",
+  "version": "3.0.0-dev",
   "artifactType": "development-source",
   "status": "development",
   "basedOnRelease": "v1.0.0-rc.2",
   "publishable": false,
-  "generatedAtUtc": "2026-09-07T11:29:33.168742Z",
+  "generatedAtUtc": "2026-09-07T14:24:50Z",
   "manifestExcluded": true,
-  "fileCount": 490,
-  "totalBytes": 3343713,
+  "fileCount": 505,
+  "totalBytes": 3456367,
   "files": [
     {
       "path": ".env.auth-session.example",
@@ -17,8 +17,8 @@
     },
     {
       "path": ".env.production.example",
-      "bytes": 1615,
-      "sha256": "F033A07FA15C9B66A053299C3B6019289AB49BDBA2BBAD3BE099450F335D768B"
+      "bytes": 1759,
+      "sha256": "D2D8A5EE05A586D83E03E2D5B492B58668D6E5BD074937672F903057BBBE3CEE"
     },
     {
       "path": ".gitattributes",
@@ -37,13 +37,13 @@
     },
     {
       "path": "README.md",
-      "bytes": 23951,
-      "sha256": "563B6ACF8A268A40CFF82238A0BEB1B8B4E21AFC614F68FADA9AFD0DC03BB067"
+      "bytes": 24443,
+      "sha256": "9647A0080C80DD37B898A6067B7BD23B124ABA6A58B23A8A4661DC37799FC305"
     },
     {
       "path": "VERSION",
       "bytes": 10,
-      "sha256": "D8CD4DFC22FCF918B45FD7F03E9B74D179F5A54373A85AC987C1FFC4B69F2258"
+      "sha256": "129315E7F4669AD92C4E33DA2F6A92D448656165B4F160898338B9AD9CA70888"
     },
     {
       "path": "backend-go/.dockerignore",
@@ -57,8 +57,8 @@
     },
     {
       "path": "backend-go/.env.example",
-      "bytes": 1400,
-      "sha256": "F3A47295C9D6DB3E415B7295EEB989ABA60184B31031AFF7E00CD9E0F66BCBF1"
+      "bytes": 1496,
+      "sha256": "A97CA08AE71268273AA3CA7397CC21B07B86956C306A3CA7B3C66FEA83DF583A"
     },
     {
       "path": "backend-go/Dockerfile",
@@ -77,8 +77,8 @@
     },
     {
       "path": "backend-go/cmd/server/main.go",
-      "bytes": 7784,
-      "sha256": "7CAA0F7E59E17D53250197B3AE71645F2F3E3F2B876F76256C78E5711E7039F1"
+      "bytes": 7988,
+      "sha256": "72490F4A7A39CEA3CA66CAAC28B27A68D2108416E4C5CCE383478113E08A3DA1"
     },
     {
       "path": "backend-go/go.mod",
@@ -97,8 +97,8 @@
     },
     {
       "path": "backend-go/internal/config/config.go",
-      "bytes": 10629,
-      "sha256": "793C0EDFF986731A4207717D8093A13C09667A03B2F43C17F2108C84970DD77C"
+      "bytes": 11283,
+      "sha256": "C852F77839ECD038CD39F1065D1D7C055CC58AC895CF76B4564582CE996435AF"
     },
     {
       "path": "backend-go/internal/db/attachment_schema.go",
@@ -122,8 +122,8 @@
     },
     {
       "path": "backend-go/internal/db/migrate.go",
-      "bytes": 1176,
-      "sha256": "B0DB9A675561545BA31FBC66184C151312A11EC45BD2E9ADD98D7BE7B8D97486"
+      "bytes": 1250,
+      "sha256": "0348217D600ECFD74F4EF36A153A0F7DA676E76B621AB77F84D207EEC9B6F159"
     },
     {
       "path": "backend-go/internal/db/mysql.go",
@@ -144,6 +144,11 @@
       "path": "backend-go/internal/db/v2_intelligence_schema.go",
       "bytes": 1297,
       "sha256": "291F84F1B0C09A2003BF5C40C19553CD0097131645C5C6422DE197EEB17A0CB0"
+    },
+    {
+      "path": "backend-go/internal/db/v3_distributed_runtime_schema.go",
+      "bytes": 4114,
+      "sha256": "0CBF375C7B21258B22838E48C4149EFB8AEA28B68840A7D73197F81E44A1E019"
     },
     {
       "path": "backend-go/internal/db/workspace_schema.go",
@@ -167,8 +172,8 @@
     },
     {
       "path": "backend-go/internal/handler/durable_runtime.go",
-      "bytes": 2751,
-      "sha256": "3282F1CBF0C30BB021BB276575F0902AC0BF58B6F4311AB8189CD771674A96BD"
+      "bytes": 4161,
+      "sha256": "1D3439F21550DCB30D60BDF5DBB65B6231398BDA75489555286F1BC84110D84B"
     },
     {
       "path": "backend-go/internal/handler/governance.go",
@@ -232,8 +237,8 @@
     },
     {
       "path": "backend-go/internal/model/durable_runtime.go",
-      "bytes": 2399,
-      "sha256": "0CE2152A2288EF810B8D2216608B3084ED073010F1877D3CFB79CB691B2FB5F0"
+      "bytes": 5603,
+      "sha256": "7CA76E45C7917288D4BA06A0A4E837F5EC59C4DE5FC036CE5BD4587B9C8EE5D9"
     },
     {
       "path": "backend-go/internal/model/governance.go",
@@ -252,8 +257,8 @@
     },
     {
       "path": "backend-go/internal/model/models.go",
-      "bytes": 10662,
-      "sha256": "5049D6815C6730084906197F33F85FDF2C67E7C57DC07AE3059F4B6D235D50E6"
+      "bytes": 10944,
+      "sha256": "535DAC985D51027150DD3E610A420AE474D006554F406D70DB01F7A24F50DF1A"
     },
     {
       "path": "backend-go/internal/model/project.go",
@@ -297,8 +302,8 @@
     },
     {
       "path": "backend-go/internal/repository/durable_runtime.go",
-      "bytes": 17624,
-      "sha256": "BF7B87B7578B3AC9D518DA9BEC797D6A12338F2B35A7F450563C84EB2DC94EBB"
+      "bytes": 33904,
+      "sha256": "DED6E3636333B576964BA2C3C7AF02F2F48C179A85F58F477730DB26E2530DBB"
     },
     {
       "path": "backend-go/internal/repository/governance.go",
@@ -337,8 +342,8 @@
     },
     {
       "path": "backend-go/internal/repository/repository.go",
-      "bytes": 10439,
-      "sha256": "C89038334BF5D4B17C191C80229203CCD731583FB34CE94E227E74C8BC3976B1"
+      "bytes": 11157,
+      "sha256": "0333E2EA01FB871DB913B60A521FC51F2C19CA65A4BD408BB6062969775718F6"
     },
     {
       "path": "backend-go/internal/repository/task_delete.go",
@@ -377,8 +382,8 @@
     },
     {
       "path": "backend-go/internal/router/durable_runtime.go",
-      "bytes": 873,
-      "sha256": "F6DE6D0782E250E99018498C284FED59BC66ABF70E8CAA983CF0BC8E5F338452"
+      "bytes": 946,
+      "sha256": "08D4DB827FD5BC86B33579EBBD4A914612C325E597909E45D385246E53EFECCF"
     },
     {
       "path": "backend-go/internal/router/governance.go",
@@ -487,8 +492,8 @@
     },
     {
       "path": "backend-go/internal/runtime/worker_client.go",
-      "bytes": 4603,
-      "sha256": "178A6D9C81708BACF655EAA58EAC9A08C8C712EE817519F539BC690BBAEC4D2A"
+      "bytes": 4732,
+      "sha256": "1200453824557E85EF0D42846E98EAAFBE39DF846FCA8BF4075F5F353AE667BA"
     },
     {
       "path": "backend-go/internal/runtime/worker_client_p8_test.go",
@@ -522,8 +527,8 @@
     },
     {
       "path": "backend-go/internal/service/durable_runtime.go",
-      "bytes": 20741,
-      "sha256": "794D5478DF9FF3CF2FBDEA6676096EA916A015CF4CE29E58D2E2B840B8E2C988"
+      "bytes": 24653,
+      "sha256": "C73FC33E6F6836295FA51E172717F2E08C6F6E2E6C992E8C88B897E1D10FD4E9"
     },
     {
       "path": "backend-go/internal/service/governance.go",
@@ -596,6 +601,11 @@
       "sha256": "072445619C040746E20A541437B27B296A7156051FD341721E8DC785753D21BA"
     },
     {
+      "path": "backend-go/internal/service/v3_distributed_runtime_integration_test.go",
+      "bytes": 10446,
+      "sha256": "8893D9E781FA41706F128B3F910CBF300BE14ECF171C078CAC5F82CB0169ADF8"
+    },
+    {
       "path": "backend-go/internal/service/verification_auth.go",
       "bytes": 6707,
       "sha256": "3A17D63714313F1B252788F683E569454232C76E253931C485B32A4354B10F67"
@@ -661,6 +671,11 @@
       "sha256": "9E92136D132A08CE91E88BFCF7905B30D4F70ECABDBBF392FD048050193F5A57"
     },
     {
+      "path": "docker-compose.v3-ha.yml",
+      "bytes": 2018,
+      "sha256": "120DBCFF0F517BC29BB30E7330DE1751643517145F02D3A8FAF236D4C94C7FA0"
+    },
+    {
       "path": "docker-compose.yml",
       "bytes": 3323,
       "sha256": "2018D01236AC9ED71A9D77F2CD13667DD0BD7AC2C531C2BF1D5AB35B9CA5CAD1"
@@ -677,13 +692,13 @@
     },
     {
       "path": "docs/NEXT_ROADMAP.md",
-      "bytes": 828,
-      "sha256": "3973777569CC14F66F4955572444C3E9A5F287D4DF66D40BD336CE7222DDA54A"
+      "bytes": 1784,
+      "sha256": "8EFCEF4785559DE12841E9D180ECE7AF71B8BF7C354419027B2EA5452E843BB8"
     },
     {
       "path": "docs/TESTING.md",
-      "bytes": 2857,
-      "sha256": "6CDDF36AD9194C2E7FB5CCF0A901B4D1B3EC2C38EED32173FFD1096AFAA8308D"
+      "bytes": 3909,
+      "sha256": "DAC22D122D4F2B0E137708C46917376547059307CCA20DC50FB12D0CEDD40ADC"
     },
     {
       "path": "docs/memory-p3/API_CONTRACT_P3_1.md",
@@ -812,43 +827,78 @@
     },
     {
       "path": "docs/v2/ACCEPTANCE.md",
-      "bytes": 7916,
-      "sha256": "39E9033C4BAB7CED6C73B0DFAF998F8DABD508561664C3DAAC3C9859020802B4"
+      "bytes": 8075,
+      "sha256": "6993D52921D712C74C7A589CBD5C5CB709F8072C212223DD4ECD292201AD6CC9"
     },
     {
       "path": "docs/v2/ARCHITECTURE.md",
-      "bytes": 1841,
-      "sha256": "CC2D14F84AB40DAF960B5165884188B3FDBF210F7190732FD719780D5ECD420A"
+      "bytes": 1885,
+      "sha256": "3B57370157A917A9A3E2862B2D48C914DB63B3593BB824800815C73079919C73"
     },
     {
       "path": "docs/v2/COST_OBSERVABILITY.md",
-      "bytes": 1994,
-      "sha256": "E5E9B75478606B8442A332565D43698117AAFE43D7F93973072397A990D9285F"
+      "bytes": 2064,
+      "sha256": "51E97521819795859162DA228363EFD55B1FA4E8C1E45193ECFE904C4CA364BB"
     },
     {
       "path": "docs/v2/EVALUATION.md",
-      "bytes": 2007,
-      "sha256": "1CA8B22033A9E9FD5B60F93DA12F9C77C58B4C33BE84B3136A72B836E7FF5BF2"
+      "bytes": 2076,
+      "sha256": "9E53C6A81BEBAD4D5596D16FC1ECE2763291A6BF45A2CA08BEE4A98ACE3AB686"
     },
     {
       "path": "docs/v2/MULTIMODAL_RAG.md",
-      "bytes": 4352,
-      "sha256": "810F71FF1C92FA9055BA218F4FE020AA59D65639E4CD8A367740D6AF2FE9D309"
+      "bytes": 4449,
+      "sha256": "EBE25A97BE8010115B043BD90D6829B74B02767E60CCDCDFDC6BD98D5B23F138"
+    },
+    {
+      "path": "docs/v3/ACCEPTANCE.md",
+      "bytes": 1787,
+      "sha256": "CEC8F9C2E9421DA161E089CF74668CC0902200CDE5153B6EA6975AA152BDA62B"
+    },
+    {
+      "path": "docs/v3/ARCHITECTURE.md",
+      "bytes": 4366,
+      "sha256": "57C3EDC6E55B1C5759AE08C7F055C6CC11266E8DABBA8671DCA817000675D072"
+    },
+    {
+      "path": "docs/v3/FAILOVER.md",
+      "bytes": 1608,
+      "sha256": "B05E3E939B1066BBA74A22C262409AA412570EBBD9C6D8E40FDCCED2801DA87F"
+    },
+    {
+      "path": "docs/v3/OBSERVABILITY.md",
+      "bytes": 1371,
+      "sha256": "89EFF64D12FF60F1796A7911FF04FCAE61A358BC99757F0C29DE76EDC359286C"
+    },
+    {
+      "path": "docs/v3/OPERATIONS.md",
+      "bytes": 2546,
+      "sha256": "5BDD72E6EEC3092B034CA0328C2CC956BA255C87A0F00308DF13BE363FC306E8"
     },
     {
       "path": "infra/gateway/10-select-agentmesh-config.sh",
-      "bytes": 554,
-      "sha256": "51911CCC2C04A85B58DBF4C76265C17DBF106724DE6257CDAD5C394259267002"
+      "bytes": 1006,
+      "sha256": "11513EDF59D183F655D4495104BF419CE7CE6BEF6A66E1CD8D4FCE1854225BBA"
     },
     {
       "path": "infra/gateway/Dockerfile",
-      "bytes": 359,
-      "sha256": "CDAC8AF80553B2F22BA0759493CCD6AAB187E039A77610A58EDE3DAE9F295746"
+      "bytes": 453,
+      "sha256": "048AB112A7E4F6B842BD62CF26BAF1CBFA0200226618D95F6C0B6A46A6578129"
+    },
+    {
+      "path": "infra/gateway/http-ha.conf",
+      "bytes": 1449,
+      "sha256": "186B762FB93264D33A22B276811D7B5414C2746D9356006738F64C0A005D1A78"
     },
     {
       "path": "infra/gateway/http.conf",
       "bytes": 1216,
       "sha256": "51737EA22CDDB99C61146081FC848B68143ACB87959530438F7D1A39206DE32A"
+    },
+    {
+      "path": "infra/gateway/https-ha.conf",
+      "bytes": 2005,
+      "sha256": "D35BF4CA1347741D78DB08DC401DB5369F290B9624F3B70A73A55C96E9F43E1F"
     },
     {
       "path": "infra/gateway/https.conf",
@@ -882,8 +932,8 @@
     },
     {
       "path": "runtime-python/.env.example",
-      "bytes": 1640,
-      "sha256": "CF0D8EF6885F284734B5F64143380331AF657B7E36F5507C2543BB860C5A1C3D"
+      "bytes": 1756,
+      "sha256": "6E1ABF2368BCF2852358066ADEAF38BC48B5232EA19CB2CD17C67903A315520C"
     },
     {
       "path": "runtime-python/Dockerfile",
@@ -942,8 +992,8 @@
     },
     {
       "path": "runtime-python/app/config.py",
-      "bytes": 7071,
-      "sha256": "E4E23840D6872FCBDC3A05D94B54C0C091A6EBF311B9F3A2A2FCB8FB16EADF80"
+      "bytes": 7217,
+      "sha256": "9D8851B191D8962F970EEF237592D0631AAFAFAEC00BDD638C3D333B4E9BDBAC"
     },
     {
       "path": "runtime-python/app/distributed/__init__.py",
@@ -952,8 +1002,8 @@
     },
     {
       "path": "runtime-python/app/distributed/execution_manager.py",
-      "bytes": 9831,
-      "sha256": "F6B58D5A44D202F574C6AB9A935B8658F646EF3B28A5109399FB6CF06EC9A8A1"
+      "bytes": 11531,
+      "sha256": "7F2E0F17638E2B8B0DFBE078ED0E31ED76DCAB56497C3FC01A6A81C032FA49C5"
     },
     {
       "path": "runtime-python/app/eval/__init__.py",
@@ -1032,8 +1082,8 @@
     },
     {
       "path": "runtime-python/app/main.py",
-      "bytes": 14894,
-      "sha256": "281D2CB8320810CE14DDB56BD96189027CBA9EC86A5199A4C033165C8CB45978"
+      "bytes": 16424,
+      "sha256": "422E408D8A024C897F20EEBA2E78D9922D474A6CA97E4ABFE6068F028FBEA623"
     },
     {
       "path": "runtime-python/app/mcp/__init__.py",
@@ -1277,8 +1327,8 @@
     },
     {
       "path": "runtime-python/app/schemas.py",
-      "bytes": 15956,
-      "sha256": "2B6229AE23E450284EEC71E227EF1986352081750CB2D16D6CE906EF1EB08A27"
+      "bytes": 16061,
+      "sha256": "68BEE714169C8CF918B659DC104B3B29E041034F9999E3236A58A3D69DC4231F"
     },
     {
       "path": "runtime-python/app/services/__init__.py",
@@ -1472,8 +1522,8 @@
     },
     {
       "path": "runtime-python/requirements.txt",
-      "bytes": 329,
-      "sha256": "82D342C816416D159591EBB1EF6D2C91FCFAE5D2BA5E0C5914DBB7DE17960A91"
+      "bytes": 347,
+      "sha256": "5B8AB6003C67FE37CC56E3786D3D4AC30BC6806146958731AC85AC15CBAF7480"
     },
     {
       "path": "runtime-python/scripts/run_v2_eval.py",
@@ -1811,6 +1861,11 @@
       "sha256": "ED7BE48E8A906BE4271DFDF2263329F729E86B5F1E2C1C5023786FB8B5316EB8"
     },
     {
+      "path": "runtime-python/tests/test_v3_distributed_runtime.py",
+      "bytes": 6493,
+      "sha256": "4D55A852197F101C03FDA8F08D6F3084531F22DD9F2B4438E35587A15888E91F"
+    },
+    {
       "path": "scripts/SMOKE_TEST.ps1",
       "bytes": 2834,
       "sha256": "6193F6F79592DF83FB7D271A0C787E793668D7C7B1222B5B23DB5B6B78368283"
@@ -1819,6 +1874,11 @@
       "path": "scripts/TENANT_ISOLATION_TEST.ps1",
       "bytes": 1513,
       "sha256": "D5F6162F83A234F3BC1DE17BF14CCB5F2D6F39ECCD7833966A6AF9E40FD2A135"
+    },
+    {
+      "path": "scripts/TEST_V3_DISTRIBUTED_RUNTIME.ps1",
+      "bytes": 1484,
+      "sha256": "702B9A2FE5FA80152F48A0C29CA39D7A6D3039C852AB5D35C0F5D5C41E227475"
     },
     {
       "path": "scripts/ops/backup-production.ps1",
@@ -1936,6 +1996,11 @@
       "sha256": "0A16265A40D12FEFEF94FC59BAA4773C0BB0648C30D9D5BFE3105647B3853724"
     },
     {
+      "path": "web-react/e2e/v3-distributed-runtime-browser-e2e.mjs",
+      "bytes": 24819,
+      "sha256": "E0DD7D2A5FC82BD9B3DCB979F3C649AE527B4D22A5653853448A825B16F5CF60"
+    },
+    {
       "path": "web-react/index.html",
       "bytes": 319,
       "sha256": "56BFFDBB402FADA099ACB4C3488B06A2389B004CAAFC623F0FE2F9FA3B0BBE90"
@@ -1948,12 +2013,12 @@
     {
       "path": "web-react/package-lock.json",
       "bytes": 117027,
-      "sha256": "30456C1382127F8EA9123D1B99423C11304C63ABE7C4A9B9C378A97D7BA015A8"
+      "sha256": "31EC3D491AC64F42234E3BEA9528054C8AA3236FA1D6C9932E38620546A70498"
     },
     {
       "path": "web-react/package.json",
-      "bytes": 886,
-      "sha256": "F3C601E8980B0F2DA302B72D2E2D1E9A0C385090FC6B1EF8E784EA2D32A56DF7"
+      "bytes": 956,
+      "sha256": "45A77D437F4E8F8CBC6DD138A397B34783C0412FBBCA88EEB75CE575FDCA8CC0"
     },
     {
       "path": "web-react/src/App.tsx",
@@ -1962,8 +2027,8 @@
     },
     {
       "path": "web-react/src/api.ts",
-      "bytes": 32635,
-      "sha256": "95F31C9C8F142F97FB9A248D18384CDE38D4EC58D54651047753D1E36D144780"
+      "bytes": 32942,
+      "sha256": "BCACC9C315E6CFFF40D3376F5F9A96C8900B2EBA93E1937B9D371429D8FA3B89"
     },
     {
       "path": "web-react/src/app.css",
@@ -2097,8 +2162,8 @@
     },
     {
       "path": "web-react/src/features/run-details/ReliabilityTracePanel.tsx",
-      "bytes": 2938,
-      "sha256": "395730C16C43B76F9CFA08EDCAACD0D9AC518C66DE5A4584A89393929E7152D5"
+      "bytes": 3764,
+      "sha256": "4D4C25884E46268692E4640841A8CFE131AA673A8B15B25AA7D58BF86E8426F9"
     },
     {
       "path": "web-react/src/features/run-details/RoutingTracePanel.tsx",
@@ -2146,9 +2211,14 @@
       "sha256": "4312A3CD5BF37FD59D0DF2DA060729AD20D538A50A0F9DEEB893C90E2385B1BF"
     },
     {
+      "path": "web-react/src/features/tasks/DistributedRuntimeOverview.tsx",
+      "bytes": 3741,
+      "sha256": "ADCAFEAAFACD0E4DF38F6A0063CB4360AB35EA4423B2246DD14E97D3E6436B95"
+    },
+    {
       "path": "web-react/src/features/tasks/Tasks.tsx",
-      "bytes": 10916,
-      "sha256": "8709F14225BE447730A5B9CDD2BE9FB8A186AF1802C7119EB96691DEC6F00ED1"
+      "bytes": 11441,
+      "sha256": "59BF1960CE60EA67718988D113F422A5F625BAABEC5A6F76443B13C1FE525099"
     },
     {
       "path": "web-react/src/features/workspace/AttachmentStrip.tsx",
@@ -2197,13 +2267,13 @@
     },
     {
       "path": "web-react/src/features/workspace/RunConfiguration.tsx",
-      "bytes": 6002,
-      "sha256": "07A6914BD9C17E0E686308C90D5A39741FE54583301F2386B81FDF1E3748A53F"
+      "bytes": 6818,
+      "sha256": "E01B4B21ADB7E4DEA926D08D7463B2B3F124B57B4201FF70CDDACAD6C210CE5D"
     },
     {
       "path": "web-react/src/features/workspace/RunSettingsDrawer.tsx",
-      "bytes": 3428,
-      "sha256": "D40DBC2C53AC2D658CB9CFC7A8F1E0240C334AA2769B078292CEB7C3D216E8D3"
+      "bytes": 3655,
+      "sha256": "A2B9800D066BDAB5C8EA9099F7135E9C49BE2608B22C6728D4AB2A770C535D33"
     },
     {
       "path": "web-react/src/features/workspace/SessionRail.tsx",
@@ -2212,8 +2282,8 @@
     },
     {
       "path": "web-react/src/features/workspace/Workspace.tsx",
-      "bytes": 29350,
-      "sha256": "2B592E32FE45B0EF381945F8A9395FBADA3EEBBEE1DC4A0ACA416357285409FD"
+      "bytes": 29609,
+      "sha256": "78A4E90877AB4419250EBB06D480B9F39295E94718B76C3C958A87CA9238A549"
     },
     {
       "path": "web-react/src/features/workspace/WorkspaceWelcome.tsx",
@@ -2327,8 +2397,8 @@
     },
     {
       "path": "web-react/src/styles/tasks.css",
-      "bytes": 6248,
-      "sha256": "4AAE58054041A60284E753A997C0A4EB52BD73B8272E49F31DFFEF19E8E5B4F6"
+      "bytes": 9701,
+      "sha256": "83C11208C3F706781ED05C39804CABD5AE2921C06DB71E89AD9743037DC65776"
     },
     {
       "path": "web-react/src/styles/theme-v4-1.css",
@@ -2377,8 +2447,8 @@
     },
     {
       "path": "web-react/src/types.ts",
-      "bytes": 14826,
-      "sha256": "CEB67C36BD1E2EEBCEB641ACEDAC6FA3B265E918CED3AFBC2D37E748BDFC5545"
+      "bytes": 15867,
+      "sha256": "81F0AD44E0702EB528B60C92813D023FC3D5DB9B38B2EDDDE24AB9B73AE82D78"
     },
     {
       "path": "web-react/src/utils/format.ts",
@@ -2434,6 +2504,11 @@
       "path": "web-react/tests/v2-intelligence-contract.test.mjs",
       "bytes": 4100,
       "sha256": "9072A81CE16837FEA75D7F234A5E824096217BCF6B8CD33DEE96EBC9D107ED6D"
+    },
+    {
+      "path": "web-react/tests/v3-distributed-runtime-contract.test.mjs",
+      "bytes": 2603,
+      "sha256": "5D4FF879DAEAB0142D0323A12F3894DB88BB9810E6FFE4198865D3D3042DD5BE"
     },
     {
       "path": "web-react/tests/v4-2-product-interaction-contract.test.mjs",

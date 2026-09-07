@@ -2,6 +2,8 @@ FROM nginx:1.27-alpine
 
 COPY http.conf /etc/agentmesh/http.conf
 COPY https.conf /etc/agentmesh/https.conf
+COPY http-ha.conf /etc/agentmesh/http-ha.conf
+COPY https-ha.conf /etc/agentmesh/https-ha.conf
 COPY 10-select-agentmesh-config.sh /docker-entrypoint.d/10-select-agentmesh-config.sh
 RUN chmod +x /docker-entrypoint.d/10-select-agentmesh-config.sh
 

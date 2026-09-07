@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"example.com/agentmesh-control-plane/internal/model"
 	"example.com/agentmesh-control-plane/internal/service"
@@ -64,12 +65,34 @@ func (h *DurableRuntimeHandler) Reliability(c *gin.Context) {
 	ok(c, snapshot)
 }
 
+func (h *DurableRuntimeHandler) Topology(c *gin.Context) {
+	topology, err := h.s.Topology(c)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, topology)
+}
+
+type workerExecutionLeaseReq struct {
+	JobID       int64  `json:"jobId"`
+	ExecutionID string `json:"executionId"`
+	LeaseToken  string `json:"leaseToken"`
+	FenceEpoch  int64  `json:"fenceEpoch"`
+}
+
 type workerHeartbeatReq struct {
-	WorkerID         string `json:"workerId" binding:"required"`
-	Endpoint         string `json:"endpoint" binding:"required"`
-	Capacity         int    `json:"capacity"`
-	ActiveExecutions int    `json:"activeExecutions"`
-	Draining         bool   `json:"draining"`
+	WorkerID         string                    `json:"workerId" binding:"required"`
+	NodeID           string                    `json:"nodeId"`
+	Zone             string                    `json:"zone"`
+	Version          string                    `json:"version"`
+	StartedAt        *time.Time                `json:"startedAt"`
+	Endpoint         string                    `json:"endpoint" binding:"required"`
+	Capacity         int                       `json:"capacity"`
+	NodeCapacity     int                       `json:"nodeCapacity"`
+	ActiveExecutions int                       `json:"activeExecutions"`
+	Draining         bool                      `json:"draining"`
+	ExecutionLeases  []workerExecutionLeaseReq `json:"executionLeases"`
 }
 
 func (h *DurableRuntimeHandler) Heartbeat(c *gin.Context) {
@@ -78,13 +101,25 @@ func (h *DurableRuntimeHandler) Heartbeat(c *gin.Context) {
 		fail(c, http.StatusBadRequest, 40043, "Worker heartbeat 参数不合法")
 		return
 	}
+	leases := make([]model.RuntimeExecutionLeaseRef, 0, len(req.ExecutionLeases))
+	for _, item := range req.ExecutionLeases {
+		leases = append(leases, model.RuntimeExecutionLeaseRef{
+			JobID: item.JobID, ExecutionID: strings.TrimSpace(item.ExecutionID),
+			LeaseToken: strings.TrimSpace(item.LeaseToken), FenceEpoch: item.FenceEpoch,
+		})
+	}
 	err := h.s.Heartbeat(c, model.RuntimeWorker{
 		WorkerID:         strings.TrimSpace(req.WorkerID),
+		NodeID:           strings.TrimSpace(req.NodeID),
+		Zone:             strings.TrimSpace(req.Zone),
+		Version:          strings.TrimSpace(req.Version),
+		StartedAt:        req.StartedAt,
 		Endpoint:         strings.TrimSpace(req.Endpoint),
 		Capacity:         req.Capacity,
+		NodeCapacity:     req.NodeCapacity,
 		ActiveExecutions: req.ActiveExecutions,
 		Draining:         req.Draining,
-	})
+	}, leases)
 	if err != nil {
 		domain(c, err)
 		return
