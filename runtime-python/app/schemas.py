@@ -571,6 +571,51 @@ class ObservabilitySummary(
         alias="modelCostKnown",
     )
 
+    model_provider: str = Field(
+        default="",
+        alias="modelProvider",
+    )
+
+    model_name: str = Field(
+        default="",
+        alias="modelName",
+    )
+
+    retrieval_mode: str = Field(
+        default="",
+        alias="retrievalMode",
+    )
+
+    rag_latency_ms: int = Field(
+        default=0,
+        alias="ragLatencyMs",
+    )
+
+    rag_raw_hits: int = Field(
+        default=0,
+        alias="ragRawHits",
+    )
+
+    rag_hits: int = Field(
+        default=0,
+        alias="ragHits",
+    )
+
+    rag_context_hits: int = Field(
+        default=0,
+        alias="ragContextHits",
+    )
+
+    rag_text_candidates: int = Field(
+        default=0,
+        alias="ragTextCandidates",
+    )
+
+    rag_visual_candidates: int = Field(
+        default=0,
+        alias="ragVisualCandidates",
+    )
+
     tool_successes: int = Field(
         default=0,
         alias="toolSuccesses",
@@ -620,6 +665,23 @@ class RunScorecard(
     )
 
     groundedness: float = 0.0
+
+    correctness: float = 0.0
+
+    citation_quality: float = Field(
+        default=0.0,
+        alias="citationQuality",
+    )
+
+    task_completion: float = Field(
+        default=0.0,
+        alias="taskCompletion",
+    )
+
+    judge_reason: str = Field(
+        default="",
+        alias="judgeReason",
+    )
 
     tool_reliability: float = Field(
         default=0.0,
@@ -746,6 +808,41 @@ class RuntimeCitation(
         int
         | None
     ) = None
+
+    page_number: (
+        int
+        | None
+    ) = Field(
+        default=None,
+        alias="pageNumber",
+        exclude_if=lambda value: value is None,
+    )
+
+    asset_id: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        alias="assetId",
+        exclude_if=lambda value: value is None,
+    )
+
+    modality: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    visual_type: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        alias="visualType",
+        exclude_if=lambda value: value is None,
+    )
 
 class RuntimeResponse(
     BaseModel

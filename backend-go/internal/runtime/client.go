@@ -111,6 +111,24 @@ type ObservabilitySummary struct {
 
 	ModelCostKnown bool `json:"modelCostKnown"`
 
+	ModelProvider string `json:"modelProvider"`
+
+	ModelName string `json:"modelName"`
+
+	RetrievalMode string `json:"retrievalMode"`
+
+	RAGLatencyMS int64 `json:"ragLatencyMs"`
+
+	RAGRawHits int `json:"ragRawHits"`
+
+	RAGHits int `json:"ragHits"`
+
+	RAGContextHits int `json:"ragContextHits"`
+
+	RAGTextCandidates int `json:"ragTextCandidates"`
+
+	RAGVisualCandidates int `json:"ragVisualCandidates"`
+
 	ToolSuccesses int `json:"toolSuccesses"`
 
 	ToolFailures int `json:"toolFailures"`
@@ -132,6 +150,14 @@ type RunScorecard struct {
 	AnswerQuality float64 `json:"answerQuality"`
 
 	Groundedness float64 `json:"groundedness"`
+
+	Correctness float64 `json:"correctness"`
+
+	CitationQuality float64 `json:"citationQuality"`
+
+	TaskCompletion float64 `json:"taskCompletion"`
+
+	JudgeReason string `json:"judgeReason"`
 
 	ToolReliability float64 `json:"toolReliability"`
 
@@ -251,6 +277,14 @@ type RuntimeCitation struct {
 	Start *int `json:"start"`
 
 	End *int `json:"end"`
+
+	PageNumber *int `json:"pageNumber"`
+
+	AssetID *string `json:"assetId"`
+
+	Modality *string `json:"modality"`
+
+	VisualType *string `json:"visualType"`
 }
 
 // ============================================================

@@ -479,11 +479,19 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	}
 	response := callback.Response
 	response.Trace = append([]map[string]any{durableReliabilityTrace(job, callback.WorkerID, "completed")}, response.Trace...)
-	if s.taskService.governance != nil && s.taskService.projectRuntime != nil && task.ConversationID != nil {
+
+	var projectID *int64
+	if s.taskService.projectRuntime != nil && task.ConversationID != nil {
 		if projectCtx, resolveErr := s.taskService.projectRuntime.ResolveForConversation(ctx, job.UserID, *task.ConversationID); resolveErr == nil && projectCtx != nil {
-			s.taskService.governance.RecordUsage(ctx, projectCtx.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+			id := projectCtx.ProjectID
+			projectID = &id
+			if s.taskService.governance != nil {
+				s.taskService.governance.RecordUsage(ctx, projectCtx.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+			}
 		}
 	}
+	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability, response.EstimatedCost)
+
 	runtimeStatus := normalizeRuntimeStatus(response.Status)
 
 	if runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED" {

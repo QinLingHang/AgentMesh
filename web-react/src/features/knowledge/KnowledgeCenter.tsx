@@ -39,6 +39,10 @@ const ALLOWED_EXTENSIONS =
     "txt",
     "md",
     "markdown",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
   ]);
 
 type KnowledgeTab =
@@ -99,6 +103,32 @@ function isPending(
     status !== "READY" &&
     status !== "ERROR"
   );
+}
+
+function visualStatusLabel(
+  status?: string,
+) {
+  switch (
+    String(status ?? "")
+      .trim()
+      .toLowerCase()
+  ) {
+    case "completed":
+      return "视觉完成";
+    case "partial":
+      return "视觉部分完成";
+    case "failed":
+      return "视觉降级";
+    case "disabled":
+      return "视觉未启用";
+    case "empty":
+      return "无视觉证据";
+    case "not_applicable":
+    case "":
+      return "";
+    default:
+      return `视觉${status}`;
+  }
 }
 
 function statusLabel(
@@ -173,7 +203,7 @@ function validateFile(
       ),
     )
   ) {
-    return "暂时只支持 PDF、DOCX、TXT、Markdown。";
+    return "暂时只支持 PDF、DOCX、TXT、Markdown、PNG、JPEG、WEBP。";
   }
 
   if (file.size <= 0) {
@@ -234,7 +264,7 @@ function friendlyError(
     if (
       error.status === 415
     ) {
-      return "暂时只支持 PDF、DOCX、TXT、Markdown。";
+      return "暂时只支持 PDF、DOCX、TXT、Markdown、PNG、JPEG、WEBP。";
     }
 
     if (
@@ -1658,6 +1688,14 @@ export function KnowledgeCenter({
                             </strong>
 
                             <small>.{file.extension}</small>
+
+                            <small className="knowledge-v2-evidence-summary">
+                              Text {file.textChunkCount ?? file.chunkCount ?? 0}
+                              {` · Visual ${file.visualEvidenceCount ?? 0}`}
+                              {(file.pageCount ?? 0) > 0 ? ` · ${file.pageCount} 页` : ""}
+                              {visualStatusLabel(file.visualStatus) ? ` · ${visualStatusLabel(file.visualStatus)}` : ""}
+                              {file.visualErrorMessage ? ` · ${file.visualErrorMessage}` : ""}
+                            </small>
                           </div>
                         </div>
                       </td>
@@ -1892,7 +1930,7 @@ export function KnowledgeCenter({
               className="project-file-input"
               type="file"
               multiple
-              accept=".pdf,.docx,.txt,.md,.markdown"
+              accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp"
               disabled={uploading}
               onChange={(event) =>
                 chooseFiles(

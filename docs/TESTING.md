@@ -17,7 +17,7 @@ DSN. The tests create and drop uniquely named test databases; they do not use
 the database named in the DSN.
 
 ```powershell
-$env:P2_TEST_MYSQL_DSN="user:password@tcp(127.0.0.1:3306)/mysql?parseTime=true&charset=utf8mb4"
+$env:P2_TEST_MYSQL_DSN="user:password@tcp(127.0.0.1:3306)/mysql?parseTime=true&charset=utf8mb4&multiStatements=true"
 $env:P3_TEST_MYSQL_DSN=$env:P2_TEST_MYSQL_DSN
 $env:P3_TEST_PYTHON=(Get-Command python).Source
 
@@ -73,3 +73,25 @@ Memory integration tests execute rather than skip.
 No P2/P3 wrapper calls another P-stage wrapper. Historical phase runners were
 removed after P3 closure; capability tests remain in the Go, Python, and React
 codebases.
+
+## 5. V2 Intelligence sprint
+
+V2 multimodal RAG, advanced evaluation, cost accounting, and observability
+acceptance is documented in `docs/v2/ACCEPTANCE.md`. The normal codebase-native
+Python, Go, and React suites remain authoritative; V2 adds targeted coverage rather
+than replacing earlier regressions.
+
+Deterministic V2-specific entry points:
+
+```powershell
+cd runtime-python
+python scripts/run_v2_eval.py
+
+cd ..\web-react
+npm run build
+npm run test:e2e:v2
+```
+
+For full database-backed acceptance, both `P2_TEST_MYSQL_DSN` and
+`P3_TEST_MYSQL_DSN` must be configured before Go/P12 execution. A missing DSN is
+an environment blocker and must not be converted into a false PASS.

@@ -509,6 +509,18 @@ def _build_evidence_identity_lines(
             )
         )
 
+    if evidence.page_number is not None:
+        lines.append("page_number=" + str(evidence.page_number))
+
+    if evidence.modality is not None:
+        lines.append("modality=" + evidence.modality)
+
+    if evidence.visual_type is not None:
+        lines.append("visual_type=" + evidence.visual_type)
+
+    if evidence.asset_id is not None:
+        lines.append("asset_id=" + evidence.asset_id)
+
     return lines
 
 

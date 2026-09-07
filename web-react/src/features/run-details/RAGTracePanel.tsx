@@ -73,6 +73,45 @@ function textValue(
   return fallback;
 }
 
+type EvidenceRow = {
+  id?: string;
+  source?: string;
+  score?: number;
+  modality?: string;
+  pageNumber?: number | null;
+  visualType?: string | null;
+  assetId?: string | null;
+};
+
+function evidenceRows(
+  value: unknown,
+): EvidenceRow[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (item): item is EvidenceRow =>
+      typeof item === "object" &&
+      item !== null,
+  );
+}
+
+function retrievalModeLabel(
+  value: unknown,
+) {
+  switch (String(value ?? "").toLowerCase()) {
+    case "visual":
+      return "VISUAL";
+    case "hybrid":
+      return "HYBRID";
+    case "text":
+      return "TEXT";
+    default:
+      return "—";
+  }
+}
+
 export function RAGTracePanel({
   result,
 }: {
@@ -115,6 +154,11 @@ export function RAGTracePanel({
     ),
   );
 
+  const selectedEvidence =
+    evidenceRows(
+      retrieval.documents,
+    );
+
   if (ragEvents.length === 0) {
     return (
       <div className="empty-state run-detail-empty">
@@ -126,6 +170,25 @@ export function RAGTracePanel({
   return (
     <div>
       <div className="rag-summary-grid">
+        <div>
+          <span>Retrieval Mode</span>
+          <strong>
+            {retrievalModeLabel(
+              retrieval.retrievalMode ??
+                result.observability.retrievalMode,
+            )}
+          </strong>
+          <small>
+            Text {numberValue(
+              retrieval.textCandidates,
+              result.observability.ragTextCandidates,
+            )} · Visual {numberValue(
+              retrieval.visualCandidates,
+              result.observability.ragVisualCandidates,
+            )}
+          </small>
+        </div>
+
         <div>
           <span>
             Agentic Rounds
@@ -156,7 +219,9 @@ export function RAGTracePanel({
           </strong>
 
           <small>
-            Context {numberValue(
+            Raw {numberValue(
+              retrieval.rawHits,
+            )} · Context {numberValue(
               retrieval.contextHits,
             )}
           </small>
@@ -200,6 +265,33 @@ export function RAGTracePanel({
         </div>
       </div>
 
+      {selectedEvidence.length > 0 && (
+        <section className="detail-section run-detail-section-tight">
+          <div className="section-title">
+            <div>
+              <h3>已选多模态证据</h3>
+              <p>展示本次检索最终进入回答上下文的文本、页面与视觉证据。</p>
+            </div>
+          </div>
+
+          <div className="run-v2-evidence-list">
+            {selectedEvidence.map((item, index) => (
+              <article className="run-v2-evidence-card" key={`${item.id ?? item.assetId ?? "evidence"}-${index}`}>
+                <div>
+                  <strong>{item.source || item.id || `Evidence ${index + 1}`}</strong>
+                  <span>{String(item.modality || "text").toUpperCase()}</span>
+                </div>
+                <small>
+                  {item.pageNumber != null ? `第 ${item.pageNumber} 页 · ` : ""}
+                  {item.visualType ? `${item.visualType} · ` : ""}
+                  score={typeof item.score === "number" ? item.score.toFixed(3) : "—"}
+                </small>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
+
       <section className="detail-section run-detail-section-tight">
         <div className="section-title">
           <div>
@@ -208,7 +300,7 @@ export function RAGTracePanel({
             </h3>
 
             <p>
-              v2.2A 先按领域筛出 RAG Trace；后续会继续结构化 Query Rewrite、Rerank 与 Evidence Grade。
+              记录 Query Intelligence、TEXT / VISUAL / HYBRID 检索、Grounding 与 Citation 的完整执行轨迹。
             </p>
           </div>
         </div>

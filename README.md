@@ -4,8 +4,9 @@
 > 基于 **Go + Python + React + TypeScript** 构建，覆盖 Agent Runtime、Multi-Agent、RAG、Memory、Tool、MCP、BYOK、RBAC、可观测性、分布式执行与生产部署。
 
 **当前公开版本：** `v1.0.0-rc.2`  
+**当前开发版本：** `2.0.0-dev`（V2 Intelligence & Multimodal Sprint，未发布）  
 **开源协议：** Apache License 2.0  
-**项目状态：** Release Candidate
+**项目状态：** V2 开发中；在计划能力全部完成并通过全量验收前不发布新的 Release
 
 ---
 
@@ -149,6 +150,10 @@ AgentMesh 提供知识库能力，用于将用户或项目知识接入 Agent Run
 - Citation Projection
 - Citation Validation
 - Grounded Answer Guard
+- Multi-modal Knowledge（V2 development）
+- Visual Evidence（V2 development）
+- TEXT / VISUAL / HYBRID Retrieval（V2 development）
+- Vision Provider / VLM Routing（V2 development）
 
 RAG 并不是每次请求都无条件执行。Runtime 会根据任务特征判断是否真的需要知识检索。
 
@@ -958,13 +963,13 @@ SHA-256 Validation
 
 ---
 
-## Release Integrity
+## Source Integrity
 
 ### 29. MANIFEST
 
-Release Source 中包含 `MANIFEST.json`。
+源码快照中包含 `MANIFEST.json`。
 
-MANIFEST 用于记录公开源码文件的：
+MANIFEST 用于记录源码文件的：
 
 ```text
 Relative Path
@@ -972,7 +977,7 @@ File Size
 SHA-256
 ```
 
-用于验证源码 Archive 解压后的文件是否与发布内容保持一致。
+对于当前 `2.0.0-dev` 开发快照，它仅用于验证 **development source handoff** 的文件完整性，并不代表新的公开 Release，也不会改变已冻结的 `v1.0.0-rc.2` Tag、ZIP 或其 SHA-256。最终正式发布时会重新生成对应正式版本的 Release Manifest。
 
 ---
 
@@ -1037,60 +1042,52 @@ docs/NEXT_ROADMAP.md
 
 ## Roadmap
 
-### 32. 后续计划
+### 32. 当前开发路线
 
-**Runtime**
+AgentMesh 已暂停继续发布小版本。当前公开的 `v1.0.0-rc.2` 保持冻结，后续开发在未发布分支持续推进，待计划能力整体完成、全量回归和云端验收通过后再统一发布正式版本。
 
-- Worker Horizontal Scaling
-- Runtime Scheduling
-- Advanced Retry Strategy
-- Advanced Agent Planning
-- Multi-Agent Optimization
-
-**RAG**
+**V2 — Intelligence & Multimodal Sprint（当前）**
 
 - Multi-modal RAG
-- Advanced Hybrid Retrieval
-- Retrieval Evaluation
-- Knowledge Lifecycle
+- PDF / Image Knowledge
+- Vision Runtime
+- TEXT / VISUAL / HYBRID Retrieval
+- Multi-modal Citation
+- Advanced Evaluation
+- LLM-as-a-Judge
+- Regression Dataset
+- Token / Cost Accounting
+- Advanced Observability
 
-**Agent**
+当前 V2 开发源码已进入整体验收准备阶段，但在 Python / Go / React / Browser E2E / Privacy 等强制 Gate 全部取得真实 PASS 前，不标记为正式完成版本。
 
-- Agent Marketplace
-- Agent Template
-- Agent Versioning
-- Agent Collaboration Strategy
+**V3 — Distributed Runtime Sprint**
 
-**Tool / MCP**
-
-- MCP Ecosystem
-- Plugin Ecosystem
-- External Tool Marketplace
-- Tool Permission Policy
-
-**Evaluation**
-
-- Offline Evaluation
-- Online Evaluation
-- Agent Benchmark
-- Regression Dashboard
-
-**Observability**
-
-- Metrics
-- Trace
-- Runtime Dashboard
-- Cost Analysis
-- Model Usage Analysis
-
-**Platform**
-
-- Public API
-- SDK
-- Cloud Deployment
-- Production Monitoring
-- High Availability
+- Worker Horizontal Scaling
 - Multi-node Runtime
+- Capacity-aware Scheduling
+- Failover / Recovery
+- High Availability
+- Distributed Observability
+
+**V4 — Platform Ecosystem Sprint**
+
+- Public API / API Key
+- Python SDK
+- Agent Marketplace
+- Agent Versioning / Installation
+- MCP / Plugin Registry
+- Permission Governance
+
+**Final Production Closure**
+
+- Cloud Multi-node Deployment
+- HTTPS / Domain
+- Real Browser E2E
+- Security / Privacy / Recovery
+- Load / Capacity Validation
+- Clean Source Packaging
+- Final Release
 
 ---
 
@@ -1190,7 +1187,7 @@ AgentMesh 基于 **Apache License 2.0** 开源。
 
 ### 35. 使用说明
 
-AgentMesh 当前公开版本仍为 Release Candidate。
+AgentMesh 当前公开版本仍为 `v1.0.0-rc.2` Release Candidate；`2.0.0-dev` 仅代表未发布开发源码，不是新的公开 Release。
 
 在用于真实生产环境之前，请根据实际业务场景进一步完成：
 

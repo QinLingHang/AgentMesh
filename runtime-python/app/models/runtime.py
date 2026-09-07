@@ -89,6 +89,42 @@ class ResolvedModelRuntime:
             )
 
 
+
+
+def resolve_project_model_runtime(
+    project_model: ProjectModelRuntime,
+    *,
+    require_explicit_vision: bool = False,
+) -> ResolvedModelRuntime:
+    """Build a request-local BYOK runtime without mutating RuntimeContext.
+
+    Normal task execution keeps the P9-compatible fallback where ``modelName`` may
+    also be a multimodal model. Knowledge ingestion can opt into
+    ``require_explicit_vision=True`` so image bytes are never silently sent to a
+    text-only model when ``visionModelName`` was not configured.
+    """
+    provider = OpenAICompatibleModelProvider(
+        api_key=project_model.api_key.get_secret_value(),
+        base_url=project_model.base_url,
+        trust_env=False,
+    )
+    return ResolvedModelRuntime(
+        runtime_id="project-byok",
+        gateway=ModelGateway(provider, timeout=30.0, max_retries=1),
+        gateway_provider=provider.name,
+        declared_provider=project_model.provider,
+        model=project_model.model_name,
+        vision_model=(
+            project_model.vision_model_name
+            if require_explicit_vision
+            else (project_model.vision_model_name or project_model.model_name)
+        ),
+        plugin=provider,
+        router=None,
+        route_decision=None,
+    )
+
+
 class ModelRuntimeResolver:
     def __init__(self, context: RuntimeContext) -> None:
         self._context = context
@@ -109,22 +145,7 @@ class ModelRuntimeResolver:
         # P9 Project BYOK is request-local. It never mutates RuntimeContext and
         # therefore cannot leak across projects or later requests.
         if project_model is not None:
-            provider = OpenAICompatibleModelProvider(
-                api_key=project_model.api_key.get_secret_value(),
-                base_url=project_model.base_url,
-                trust_env=False,
-            )
-            return ResolvedModelRuntime(
-                runtime_id="project-byok",
-                gateway=ModelGateway(provider, timeout=30.0, max_retries=1),
-                gateway_provider=provider.name,
-                declared_provider=project_model.provider,
-                model=project_model.model_name,
-                vision_model=(project_model.vision_model_name or project_model.model_name),
-                plugin=provider,
-                router=None,
-                route_decision=None,
-            )
+            return resolve_project_model_runtime(project_model)
 
         if adaptive and constraints is not None and profile is not None:
             try:

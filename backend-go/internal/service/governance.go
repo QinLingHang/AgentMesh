@@ -44,6 +44,9 @@ type governanceRepository interface {
 	GetProjectModelProvider(context.Context, int64) (*model.ProjectModelProvider, error)
 	AppendAudit(context.Context, model.AuditEvent) error
 	ListAudit(context.Context, int64, int) ([]model.AuditEvent, error)
+	RecordRunCost(context.Context, model.RunCostRecord) error
+	RunCostByTask(context.Context, int64, int64) (*model.RunCostRecord, error)
+	CostSummary(context.Context, int64, *int64, model.CostQuery) (model.CostSummary, error)
 	CreateOrganization(context.Context, int64, string) (*model.Organization, error)
 	ListOrganizations(context.Context, int64) ([]model.Organization, error)
 	OrganizationRole(context.Context, int64, int64) (string, error)
@@ -390,6 +393,62 @@ func (s *GovernanceService) RecordUsage(ctx context.Context, projectID, tokens i
 	_ = s.repo.RecordProjectUsage(ctx, projectID, tokens, cost, toolActions)
 }
 
+func (s *GovernanceService) RecordRunCost(ctx context.Context, record model.RunCostRecord) {
+	if record.TaskID <= 0 || record.UserID <= 0 {
+		return
+	}
+	if record.CostStatus == "" {
+		if record.EstimatedCost > 0 {
+			record.CostStatus = "estimated"
+		} else {
+			record.CostStatus = "unavailable"
+		}
+	}
+	_ = s.repo.RecordRunCost(ctx, record)
+}
+
+func (s *GovernanceService) RunCost(ctx context.Context, uid, taskID int64) (*model.RunCostRecord, error) {
+	if uid <= 0 || taskID <= 0 {
+		return nil, ErrInvalidInput
+	}
+	item, err := s.repo.RunCostByTask(ctx, uid, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		return nil, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *GovernanceService) CostSummary(
+	ctx context.Context,
+	uid int64,
+	projectID *int64,
+	query model.CostQuery,
+) (model.CostSummary, error) {
+	if uid <= 0 {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	query.Provider = strings.TrimSpace(query.Provider)
+	query.ModelName = strings.TrimSpace(query.ModelName)
+	if len(query.Provider) > 64 || len(query.ModelName) > 191 {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	if query.From != nil && query.To != nil && !query.From.Before(*query.To) {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	if projectID != nil {
+		if *projectID <= 0 {
+			return model.CostSummary{}, ErrInvalidInput
+		}
+		if _, err := s.RequireRole(ctx, uid, *projectID, "VIEWER"); err != nil {
+			return model.CostSummary{}, err
+		}
+	}
+	return s.repo.CostSummary(ctx, uid, projectID, query)
+}
+
 func secretFingerprint(value string) string {
 	h := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(h[:8])
@@ -410,7 +469,7 @@ func (s *GovernanceService) ResolveProjectModelRuntime(ctx context.Context, uid,
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeclient.ProjectModelRuntime{Provider: p.Provider, BaseURL: p.BaseURL, ModelName: p.ModelName, VisionModelName: p.ModelName, APIKey: key}, nil
+	return &runtimeclient.ProjectModelRuntime{Provider: p.Provider, BaseURL: p.BaseURL, ModelName: p.ModelName, APIKey: key}, nil
 }
 
 func userModelAAD(uid int64) []byte {
@@ -438,9 +497,9 @@ func (s *GovernanceService) UpsertUserModelProvider(ctx context.Context, uid int
 	if provider == "" || len(provider) > 40 || modelName == "" || len(modelName) > 120 || len(visionModelName) > 120 || validateProviderURL(baseURL) != nil {
 		return nil, ErrInvalidInput
 	}
-	if visionModelName == "" {
-		visionModelName = modelName
-	}
+	// Keep an empty vision model explicit. Knowledge-image ingestion is fail-closed
+	// and will not silently send image bytes to the text model. Normal task execution
+	// retains its legacy request-local fallback in the Python runtime for backward compatibility.
 
 	existing, err := s.repo.GetUserModelProvider(ctx, uid)
 	if err != nil {

@@ -49,7 +49,10 @@ test("P11 includes a zero-dependency real-browser E2E harness", () => {
   assert.match(e2e, /assertPage\(cdp, "治理与安全", "治理与安全"\)/);
   assert.match(e2e, /document\.querySelectorAll\(\'main h2\'\)/);
   assert.match(e2e, /Team collaboration section/);
-  assert.match(e2e, /assertPage\(cdp, "工作台", "工作台", "\.workspace-title"\)/);
+  assert.match(e2e, /assertPage\(cdp, "工作台", "工作台", "\.workspace-breadcrumb span"\)/);
+  assert.match(e2e, /clickButtonExpression\("高级安全与模型设置"\)/);
+  assert.match(e2e, /clickButtonExpression\("审计记录"\)/);
+  assert.match(e2e, /audit-card \.audit-actor/);
   assert.match(e2e, /friendly 429 error/);
 });
 
@@ -84,6 +87,9 @@ test("P12 session restore harness uses real Go/MySQL, real Vite, both loopback h
   assert.match(e2e, /project-member-submit/);
   assert.match(e2e, /project-team-confirmed/);
   assert.match(e2e, /runFixture\("verify"/);
+  assert.match(e2e, /withTimeout/);
+  assert.match(e2e, /taskkill/);
+  assert.match(e2e, /process\.exit\(0\)/);
   assert.match(fixture, /organization_members/);
   assert.match(fixture, /organization_projects/);
   assert.equal(pkg.scripts["test:e2e:p12-session"], "node e2e/p12-dev-session-restore.mjs");

@@ -8,7 +8,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from fastapi.responses import StreamingResponse
 
 from app.config import settings
@@ -27,7 +27,10 @@ from app.knowledge import (
 )
 from app.knowledge.indexer import KnowledgeIndexInput
 from app.mcp import MCPDiscoverRequest, MCPManager
-from app.schemas import InteractiveStreamRequest, RuntimeRequest, RuntimeResponse
+from app.multimodal.ingestion import safe_knowledge_error
+from app.multimodal.vision import DeterministicVisionAnalyzer, ModelVisionAnalyzer
+from app.models.runtime import resolve_project_model_runtime
+from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
 
@@ -48,7 +51,19 @@ async def lifespan(app: FastAPI):
     # Keep the concrete Milvus/Hybrid retriever for ingestion.
     # Runtime retrieval is wrapped with request-local KnowledgeBase scope.
     base_retriever, _ = install_scoped_retriever(engine)
-    knowledge_indexer = KnowledgeIndexer(base_retriever)
+    default_model_runtime = registry.context.get("model.runtime.default")
+    default_provider = str(getattr(default_model_runtime, "provider", "")).strip().lower()
+    configured_vision_model = str(getattr(default_model_runtime, "vision_model", "") or "").strip()
+    if default_provider == "mock":
+        vision_analyzer = DeterministicVisionAnalyzer()
+    elif default_model_runtime is not None and configured_vision_model:
+        vision_analyzer = ModelVisionAnalyzer(default_model_runtime)
+    else:
+        # Text knowledge remains fully available when the deployment has no
+        # vision-capable model configured. Image-only knowledge will fail with
+        # an explicit ingestion error instead of being sent to a text-only model.
+        vision_analyzer = None
+    knowledge_indexer = KnowledgeIndexer(base_retriever, vision_analyzer=vision_analyzer)
     knowledge_scope_client = KnowledgeScopeClient(
         internal_token=settings.internal_token,
     )
@@ -323,6 +338,7 @@ async def index_knowledge(
     extension: str = Form(...),
     checksum_sha256: str = Form("", alias="checksumSha256"),
     project_id: int | None = Form(None, alias="projectId"),
+    project_model_json: str = Form("", alias="projectModel"),
     x_internal_token: str = Header(default=""),
 ):
     verify_internal(x_internal_token)
@@ -345,15 +361,41 @@ async def index_knowledge(
         checksum_sha256=checksum_sha256,
     )
 
+    request_vision_analyzer = None
+    if project_model_json.strip():
+        try:
+            project_model = ProjectModelRuntime.model_validate_json(project_model_json)
+        except ValidationError as exc:
+            # The secret-bearing payload is never included in the response/log.
+            raise HTTPException(status_code=400, detail="invalid project model runtime") from exc
+        request_vision_analyzer = ModelVisionAnalyzer(
+            resolve_project_model_runtime(
+                project_model,
+                require_explicit_vision=True,
+            )
+        )
+
     try:
-        count = await knowledge_indexer.index(request, content)
+        result = await knowledge_indexer.index_detailed(
+            request,
+            content,
+            vision_analyzer_override=request_vision_analyzer,
+        )
         return {
-            "chunkCount": count,
+            "chunkCount": result.stats.total_documents,
+            "textChunkCount": result.stats.text_chunks,
+            "visualEvidenceCount": result.stats.visual_evidence,
+            "pageCount": result.stats.page_count,
+            "visualStatus": result.stats.visual_status,
+            "visualError": result.stats.visual_error,
             "knowledgeFileId": knowledge_file_id,
             "knowledgeBaseId": knowledge_base_id,
         }
     except Exception as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # The Go control plane persists this error in the knowledge file lifecycle.
+        # Never surface raw provider exception text because it can contain request
+        # URLs, Authorization headers, or API keys.
+        raise HTTPException(status_code=422, detail=safe_knowledge_error(exc)) from exc
 
 
 class KnowledgeDeleteRequest(BaseModel):

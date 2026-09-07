@@ -2,6 +2,8 @@ import type {
   Agent,
   Conversation,
   ConversationAttachment,
+  CostSummary,
+  RunCostRecord,
   DeliveryMode,
   ExecutionMode,
   KnowledgeBase,
@@ -1432,6 +1434,36 @@ export async function deleteUserModelProvider() {
 // =========================================================
 export async function getProjectGovernance(projectId: number) {
   return request<import("./types").GovernanceOverview>(`/api/projects/${projectId}/governance`);
+}
+
+export type CostSummaryQuery = {
+  from?: string;
+  to?: string;
+  provider?: string;
+  model?: string;
+};
+
+function costSummaryParams(query?: CostSummaryQuery) {
+  const params = new URLSearchParams();
+  if (query?.from) params.set("from", query.from);
+  if (query?.to) params.set("to", query.to);
+  if (query?.provider) params.set("provider", query.provider);
+  if (query?.model) params.set("model", query.model);
+  return params.toString();
+}
+
+export async function getUserCostSummary(query?: CostSummaryQuery) {
+  const params = costSummaryParams(query);
+  return request<CostSummary>(`/api/costs/summary${params ? `?${params}` : ""}`);
+}
+
+export async function getProjectCostSummary(projectId: number, query?: CostSummaryQuery) {
+  const params = costSummaryParams(query);
+  return request<CostSummary>(`/api/projects/${projectId}/costs${params ? `?${params}` : ""}`);
+}
+
+export async function getRunCost(taskId: number) {
+  return request<RunCostRecord>(`/api/tasks/${taskId}/cost`);
 }
 export async function addProjectMember(projectId: number, email: string, role: string) {
   return request<import("./types").ProjectMember>(`/api/projects/${projectId}/members`, {

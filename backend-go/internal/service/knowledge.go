@@ -136,7 +136,7 @@ type knowledgeRepository interface {
 type knowledgeIndexRepository interface {
 	PrepareKnowledgeFileReindex(context.Context, int64, int64) (bool, error)
 	MarkKnowledgeFileIndexing(context.Context, int64, int64) error
-	CompleteKnowledgeFileIndex(context.Context, int64, int64, int) error
+	CompleteKnowledgeFileIndex(context.Context, int64, int64, model.KnowledgeIndexResult) error
 	FailKnowledgeFileIndex(context.Context, int64, int64, string) error
 	ResolveRuntimeKnowledgeScope(context.Context, int64, *int64) (*model.RuntimeKnowledgeScope, error)
 }
@@ -184,6 +184,15 @@ func (s *KnowledgeService) MaxUploadBytes() int64 {
 	return s.maxUploadBytes
 }
 
+func knowledgeFileNeedsVision(extension string) bool {
+	switch strings.TrimPrefix(strings.ToLower(strings.TrimSpace(extension)), ".") {
+	case "pdf", "png", "jpg", "jpeg", "webp":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeKnowledgeExtension(
 	name string,
 ) (string, error) {
@@ -194,7 +203,7 @@ func normalizeKnowledgeExtension(
 	)
 
 	switch extension {
-	case ".pdf", ".docx", ".txt", ".md", ".markdown":
+	case ".pdf", ".docx", ".txt", ".md", ".markdown", ".png", ".jpg", ".jpeg", ".webp":
 		return strings.TrimPrefix(extension, "."), nil
 	default:
 		return "", ErrKnowledgeUnsupportedType
@@ -769,7 +778,19 @@ func (s *KnowledgeService) indexFile(
 	}
 	defer source.Close()
 
-	result, err := s.runtime.IndexKnowledge(ctx, *file, source)
+	var projectModel *runtimeclient.ProjectModelRuntime
+	if s.governance != nil && knowledgeFileNeedsVision(file.Extension) {
+		// BYOK plaintext is only needed by the internal Vision path. Avoid carrying
+		// a user's model secret through text-only ingestion where it has no role.
+		resolved, resolveErr := s.governance.ResolveRequestModelRuntime(ctx, uid, file.ProjectID)
+		if resolveErr == nil {
+			projectModel = resolved
+		} else if !errors.Is(resolveErr, ErrModelProviderNotConfigured) {
+			return fail(resolveErr)
+		}
+	}
+
+	result, err := s.runtime.IndexKnowledge(ctx, *file, source, projectModel)
 	if err != nil {
 		return fail(err)
 	}
@@ -777,7 +798,15 @@ func (s *KnowledgeService) indexFile(
 		return fail(errors.New("knowledge runtime returned zero chunks"))
 	}
 
-	if err = indexRepo.CompleteKnowledgeFileIndex(ctx, uid, fileID, result.ChunkCount); err != nil {
+	persistedResult := model.KnowledgeIndexResult{
+		ChunkCount:          result.ChunkCount,
+		TextChunkCount:      result.TextChunkCount,
+		VisualEvidenceCount: result.VisualEvidenceCount,
+		PageCount:           result.PageCount,
+		VisualStatus:        result.VisualStatus,
+		VisualError:         result.VisualError,
+	}
+	if err = indexRepo.CompleteKnowledgeFileIndex(ctx, uid, fileID, persistedResult); err != nil {
 		return err
 	}
 

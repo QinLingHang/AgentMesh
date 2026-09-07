@@ -15,13 +15,19 @@ import (
 )
 
 type KnowledgeIndexResponse struct {
-	ChunkCount int `json:"chunkCount"`
+	ChunkCount          int    `json:"chunkCount"`
+	TextChunkCount      int    `json:"textChunkCount"`
+	VisualEvidenceCount int    `json:"visualEvidenceCount"`
+	PageCount           int    `json:"pageCount"`
+	VisualStatus        string `json:"visualStatus"`
+	VisualError         string `json:"visualError"`
 }
 
 func (c *Client) IndexKnowledge(
 	ctx context.Context,
 	file model.KnowledgeFile,
 	source io.Reader,
+	projectModels ...*ProjectModelRuntime,
 ) (*KnowledgeIndexResponse, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -36,6 +42,13 @@ func (c *Client) IndexKnowledge(
 	}
 	if file.ProjectID != nil {
 		fields["projectId"] = strconv.FormatInt(*file.ProjectID, 10)
+	}
+	if len(projectModels) > 0 && projectModels[0] != nil {
+		payload, marshalErr := json.Marshal(projectModels[0])
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		fields["projectModel"] = string(payload)
 	}
 
 	for key, value := range fields {

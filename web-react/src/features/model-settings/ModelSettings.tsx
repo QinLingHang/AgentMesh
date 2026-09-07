@@ -54,7 +54,7 @@ export function ModelSettings() {
       setProvider(item.provider);
       setBaseUrl(item.baseUrl);
       setModelName(item.modelName);
-      setVisionModelName(item.visionModelName || item.modelName);
+      setVisionModelName(item.visionModelName);
       setEnabled(item.enabled);
     } else {
       const defaults = presets.qwen;
@@ -181,8 +181,8 @@ export function ModelSettings() {
             <input value={modelName} onChange={(e) => setModelName(e.target.value)} placeholder="qwen-plus" />
           </label>
           <label>
-            <span>视觉模型</span>
-            <input value={visionModelName} onChange={(e) => setVisionModelName(e.target.value)} placeholder="qwen-vl-plus" />
+            <span>视觉模型（可选）</span>
+            <input value={visionModelName} onChange={(e) => setVisionModelName(e.target.value)} placeholder="qwen-vl-plus；留空则不启用视觉知识解析" />
           </label>
           <label className="model-api-key-field">
             <span>接口密钥</span>

@@ -131,6 +131,11 @@ export type KnowledgeFile = {
   storageKey: string;
   status: KnowledgeFileStatus | string;
   chunkCount: number;
+  textChunkCount: number;
+  visualEvidenceCount: number;
+  pageCount: number;
+  visualStatus: string;
+  visualErrorMessage?: string | null;
   errorMessage: string | null;
   indexedAt: string | null;
   createdAt: string;
@@ -160,6 +165,10 @@ export type RuntimeCitation = {
   chunkIndex: number | null;
   start: number | null;
   end: number | null;
+  pageNumber: number | null;
+  assetId: string | null;
+  modality: string | null;
+  visualType: string | null;
 };
 
 export type MessageAttachmentMetadata = {
@@ -417,6 +426,8 @@ export type AgentFeedback = {
 
 export type ObservabilitySummary = {
   modelCalls: number;
+  modelProvider: string;
+  modelName: string;
 
   modelInputTokens: number;
   modelOutputTokens: number;
@@ -445,6 +456,14 @@ export type ObservabilitySummary = {
   modelCostKnown: boolean;
   toolSuccesses: number;
   toolFailures: number;
+
+  retrievalMode: string;
+  ragLatencyMs: number;
+  ragRawHits: number;
+  ragHits: number;
+  ragContextHits: number;
+  ragTextCandidates: number;
+  ragVisualCandidates: number;
 };
 
 export type RunScorecard = {
@@ -454,6 +473,9 @@ export type RunScorecard = {
   taskSuccess: number;
   answerQuality: number;
   groundedness: number;
+  correctness: number;
+  citationQuality: number;
+  taskCompletion: number;
   toolReliability: number;
   ragQuality: number;
   memoryContribution: number;
@@ -463,6 +485,7 @@ export type RunScorecard = {
   modelEstimatedCost: number;
   modelTokens: number;
   failureCategory: string;
+  judgeReason: string;
   violations: string[];
   signals: Record<string, unknown>;
 };
@@ -677,6 +700,42 @@ export type AuditEvent = {
   metadata?: Record<string, unknown>;
   createdAt: string;
 };
+export type RunCostRecord = {
+  taskId: number;
+  userId: number;
+  projectId?: number | null;
+  provider: string;
+  modelName: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  costStatus: "actual" | "estimated" | "unavailable" | string;
+  createdAt: string;
+  updatedAt?: string | null;
+};
+
+export type CostBreakdown = {
+  provider: string;
+  modelName: string;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+};
+
+export type CostSummary = {
+  runCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  knownCostRuns: number;
+  unknownCostRuns: number;
+  breakdown: CostBreakdown[];
+};
+
 export type GovernanceOverview = {
   role: ProjectRole;
   members: ProjectMember[];
