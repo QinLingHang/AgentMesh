@@ -134,3 +134,7 @@ infra/gateway/tls/*.crt
 *.sqlite
 *.sqlite3
 
+.fix*-evidence/
+CODEX_V4_1_*ACCEPTANCE.md
+CODEX_V4_1_*DIAGNOSTIC.md
+desktop-bridge/data/*.jsonl
