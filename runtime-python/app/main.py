@@ -451,4 +451,7 @@ async def delete_knowledge_index(
         )
         return {"deleted": True}
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        # Deletion failures must be visible to the Control Plane, but raw Milvus
+        # errors may contain deployment details. Reuse the redacted knowledge
+        # error contract instead of returning a false 200 or raw provider text.
+        raise HTTPException(status_code=502, detail=safe_knowledge_error(exc)) from exc

@@ -120,6 +120,14 @@ class InternalAgentPlugin(
                     retry_backoff_seconds=(
                         settings.tool_retry_backoff_seconds
                     ),
+                    vision_model=getattr(
+                        model,
+                        "vision_model",
+                        None,
+                    ),
+                    desktop_max_iterations=(
+                        settings.desktop_max_tool_iterations
+                    ),
                 )
                 .run(
                     prompt,

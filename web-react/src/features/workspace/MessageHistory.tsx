@@ -61,6 +61,8 @@ function AttachmentChips({ items }: { items: MessageAttachmentMetadata[] }) {
 
 export function MessageHistory({
   messages,
+  messagesLoading = false,
+  messagesLoadError = "",
   tasks,
   latestRun,
   openDetails,
@@ -72,6 +74,8 @@ export function MessageHistory({
   streamingPhase = "",
 }: {
   messages: Message[];
+  messagesLoading?: boolean;
+  messagesLoadError?: string;
   tasks: Task[];
   latestRun: RunResult | null;
   openDetails: (result: RunResult) => void;
@@ -84,6 +88,43 @@ export function MessageHistory({
 }) {
   const lastAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
 
+  if (messagesLoading) {
+    return (
+      <div className="conversation-flow" data-testid="message-history-loading" role="status" aria-live="polite">
+        <article className="agent-result agent-result-working">
+          <header>
+            <div>
+              <span className="result-mark">AM</span>
+              <div>
+                <strong>正在加载会话记录…</strong>
+                <small>正在读取这个会话的最新消息</small>
+              </div>
+            </div>
+            <span className="result-state-pill running"><i />加载中</span>
+          </header>
+        </article>
+      </div>
+    );
+  }
+
+  if (messagesLoadError) {
+    return (
+      <div className="conversation-flow" data-testid="message-history-error" role="alert">
+        <article className="agent-result">
+          <header>
+            <div>
+              <span className="result-mark">!</span>
+              <div>
+                <strong>会话记录暂时无法加载</strong>
+                <small>{messagesLoadError}</small>
+              </div>
+            </div>
+          </header>
+        </article>
+      </div>
+    );
+  }
+
   if (messages.length === 0 && !working && !pendingPrompt) {
     return <WorkspaceWelcome onSelect={onSelectPrompt} />;
   }
@@ -93,7 +134,12 @@ export function MessageHistory({
       {messages.slice(-20).map((message) => {
         if (message.role === "user") {
           return (
-            <div className="user-message-row" key={message.id}>
+            <div
+              className="user-message-row"
+              data-testid="message-user"
+              data-message-id={message.id}
+              key={message.id}
+            >
               <div>
                 <span className="message-label">你</span>
                 <div className="user-message">{message.content}</div>
@@ -111,7 +157,12 @@ export function MessageHistory({
         const citations = liveCitations.length > 0 ? liveCitations : persistedCitations;
 
         return (
-          <article className="agent-result" key={message.id}>
+          <article
+            className="agent-result"
+            data-testid="message-assistant"
+            data-message-id={message.id}
+            key={message.id}
+          >
             <header>
               <div>
                 <span className="result-mark">AM</span>
@@ -135,7 +186,10 @@ export function MessageHistory({
       })}
 
       {pendingPrompt && !messages.some((message) => message.role === "user" && message.content === pendingPrompt) && (
-        <div className="user-message-row optimistic-message">
+        <div
+          className="user-message-row optimistic-message"
+          data-testid="message-user-optimistic"
+        >
           <div>
             <span className="message-label">你</span>
             <div className="user-message">{pendingPrompt}</div>

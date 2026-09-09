@@ -663,7 +663,7 @@ async function run() {
     await waitFor(cdp, `document.body.innerText.includes("已选择 1 个文件")`, "staged synthetic image");
     await clickButton(cdp, "开始上传");
     await waitFor(cdp, `document.body.innerText.includes("v2-architecture.png")`, "uploaded knowledge filename");
-    await waitFor(cdp, `document.body.innerText.includes("Visual 2") && document.body.innerText.includes("视觉完成")`, "visual evidence ingestion state");
+    await waitFor(cdp, `(() => { const summary = document.querySelector(".knowledge-v2-evidence-summary")?.textContent ?? ""; return summary.includes("图片 2 张") && summary.includes("视觉完成"); })()`, "visual evidence ingestion state");
 
     // 2. Execute a deterministic HYBRID task through the real Workspace flow.
     await clickButton(cdp, "工作台");

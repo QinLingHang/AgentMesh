@@ -72,6 +72,10 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	modelSelectionJSON, err := json.Marshal(task.ModelSelection)
+	if err != nil {
+		return nil, nil, err
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -85,11 +89,11 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks(
 			user_id, conversation_id, request_id, task_text, scheduler, planner,
-			execution_mode, synthesis_mode, delivery_mode, constraints_json, status
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
+			execution_mode, synthesis_mode, model_selection_json, delivery_mode, constraints_json, status
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
 	`, task.UserID, task.ConversationID, task.RequestID, task.TaskText,
 		task.Scheduler, task.Planner, task.ExecutionMode, task.SynthesisMode,
-		string(constraintsJSON))
+		string(modelSelectionJSON), string(constraintsJSON))
 	if err != nil {
 		return nil, nil, err
 	}

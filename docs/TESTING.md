@@ -131,3 +131,30 @@ The V3 Go tests require an isolated MySQL DSN and must not be accepted as PASS
 when skipped. The browser runner validates the sanitized multi-node topology and
 a deterministic dispatcher/node failover transition; database integration tests
 remain authoritative for lease, fencing, capacity and reassignment semantics.
+
+
+## 7. V4 Platform Ecosystem sprint
+
+V4 targeted acceptance is documented in `docs/v4/ACCEPTANCE.md`.
+
+Native commands:
+
+```powershell
+cd backend-go
+go test ./internal/service -run '^TestV4' -count=1 -v
+
+cd ..\sdk\python
+python -m unittest discover -s tests -p "test_*.py" -v
+
+cd ..\typescript
+npm ci
+npm test
+
+cd ..\..\web-react
+node --test tests/v4-platform-ecosystem-contract.test.mjs
+npm test
+npm run build
+npm run test:e2e:v4
+```
+
+The Go V4 integration suite requires a working MySQL DSN and must not be accepted when skipped. The SDK tests use local deterministic HTTP fixtures and do not require a model provider. Public API acceptance must preserve project binding, scope enforcement, idempotency, raw-key privacy and Marketplace permission boundaries.

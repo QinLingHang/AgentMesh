@@ -187,11 +187,20 @@ type RunScorecard struct {
 // trusted internal Go -> Python channel and is never returned to browsers.
 // ============================================================
 type ProjectModelRuntime struct {
+	ServiceID       int64  `json:"serviceId,omitempty"`
+	ServiceName     string `json:"serviceName,omitempty"`
 	Provider        string `json:"provider"`
 	BaseURL         string `json:"baseUrl"`
 	ModelName       string `json:"modelName"`
 	VisionModelName string `json:"visionModelName,omitempty"`
 	APIKey          string `json:"apiKey"`
+	AutoRoute       bool   `json:"autoRoute,omitempty"`
+	IsDefault       bool   `json:"isDefault,omitempty"`
+}
+
+type ModelSelection struct {
+	Mode      string `json:"mode"`
+	ServiceID *int64 `json:"serviceId,omitempty"`
 }
 
 // ============================================================
@@ -220,6 +229,11 @@ type ExecuteRequest struct {
 
 	Task string `json:"task"`
 
+	// Recent authoritative conversation history from the Go control plane.
+	// This bridges ordinary interactive-stream turns and full Agent Runtime
+	// turns so routing-path changes do not split short-term context.
+	History []InteractiveMessage `json:"history,omitempty"`
+
 	Scheduler string `json:"scheduler"`
 
 	Planner string `json:"planner,omitempty"`
@@ -239,6 +253,10 @@ type ExecuteRequest struct {
 	Continuation *Continuation `json:"continuation,omitempty"`
 
 	ProjectModel *ProjectModelRuntime `json:"projectModel,omitempty"`
+
+	ModelPool []ProjectModelRuntime `json:"modelPool,omitempty"`
+
+	ModelSelection ModelSelection `json:"modelSelection,omitempty"`
 
 	// AttachmentIDs are persisted only in the durable queue envelope. They are
 	// resolved again under the current user/conversation boundary immediately
@@ -297,13 +315,17 @@ type InteractiveMessage struct {
 }
 
 type InteractiveStreamRequest struct {
-	UserID         int64                `json:"user_id"`
-	RequestID      string               `json:"request_id"`
-	ConversationID *int64               `json:"conversationId,omitempty"`
-	Task           string               `json:"task"`
-	History        []InteractiveMessage `json:"history,omitempty"`
-	ProjectModel   *ProjectModelRuntime `json:"projectModel,omitempty"`
-	Attachments    []RuntimeAttachment  `json:"attachments,omitempty"`
+	UserID         int64                 `json:"user_id"`
+	RequestID      string                `json:"request_id"`
+	ConversationID *int64                `json:"conversationId,omitempty"`
+	Task           string                `json:"task"`
+	History        []InteractiveMessage  `json:"history,omitempty"`
+	ProjectModel   *ProjectModelRuntime  `json:"projectModel,omitempty"`
+	ModelPool      []ProjectModelRuntime `json:"modelPool,omitempty"`
+	ModelSelection ModelSelection        `json:"modelSelection,omitempty"`
+	Scheduler      string                `json:"scheduler,omitempty"`
+	Constraints    model.TaskConstraints `json:"constraints,omitempty"`
+	Attachments    []RuntimeAttachment   `json:"attachments,omitempty"`
 }
 
 type InteractiveStreamEvent struct {
@@ -314,6 +336,9 @@ type InteractiveStreamEvent struct {
 	Model         string           `json:"model,omitempty"`
 	Provider      string           `json:"provider,omitempty"`
 	Mode          string           `json:"mode,omitempty"`
+	Reason        string           `json:"reason,omitempty"`
+	ServiceID     int64            `json:"serviceId,omitempty"`
+	ServiceName   string           `json:"serviceName,omitempty"`
 	InputTokens   int              `json:"input_tokens,omitempty"`
 	OutputTokens  int              `json:"output_tokens,omitempty"`
 	TotalTokens   int              `json:"total_tokens,omitempty"`

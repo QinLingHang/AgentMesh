@@ -1,6 +1,9 @@
 import type { Agent } from "../../types";
 import { Icon } from "../../components/common/Icon";
-import { formatMoney, formatPercent } from "../../utils/format";
+import {
+  formatMoney,
+  formatPercent,
+} from "../../utils/format";
 
 export function AgentDrawer({
   agent,
@@ -24,17 +27,12 @@ export function AgentDrawer({
           <div className="drawer-agent">
             <span className="drawer-avatar">
               {agent.name
-                .slice(
-                  0,
-                  2,
-                )
+                .slice(0, 2)
                 .toUpperCase()}
             </span>
 
             <div>
-              <h2>
-                {agent.name}
-              </h2>
+              <h2>{agent.name}</h2>
 
               <p>
                 {agent.provider} ·{" "}
@@ -46,6 +44,8 @@ export function AgentDrawer({
           <button
             className="icon-button"
             onClick={close}
+            aria-label="关闭智能体详情"
+            title="关闭"
           >
             <Icon
               name="close"
@@ -73,21 +73,15 @@ export function AgentDrawer({
 
             <div className="drawer-kv">
               <div>
-                <span>
-                  服务地址
-                </span>
+                <span>服务地址</span>
 
                 <code>
-                  {
-                    agent.endpoint
-                  }
+                  {agent.endpoint}
                 </code>
               </div>
 
               <div>
-                <span>
-                  模型
-                </span>
+                <span>模型</span>
 
                 <strong>
                   {agent.modelName ||
@@ -96,9 +90,7 @@ export function AgentDrawer({
               </div>
 
               <div>
-                <span>
-                  当前负载
-                </span>
+                <span>当前负载</span>
 
                 <strong>
                   {agent.currentLoad.toFixed(
@@ -116,9 +108,7 @@ export function AgentDrawer({
 
             <div className="drawer-metrics">
               <div>
-                <span>
-                  质量
-                </span>
+                <span>质量</span>
 
                 <strong>
                   {agent.qualityScore.toFixed(
@@ -128,9 +118,7 @@ export function AgentDrawer({
               </div>
 
               <div>
-                <span>
-                  Success
-                </span>
+                <span>成功率</span>
 
                 <strong>
                   {formatPercent(
@@ -140,22 +128,16 @@ export function AgentDrawer({
               </div>
 
               <div>
-                <span>
-                  响应耗时
-                </span>
+                <span>响应耗时</span>
 
                 <strong>
-                  {
-                    agent.avgLatencyMs
-                  }{" "}
+                  {agent.avgLatencyMs}{" "}
                   ms
                 </strong>
               </div>
 
               <div>
-                <span>
-                  Cost
-                </span>
+                <span>平均成本</span>
 
                 <strong>
                   {formatMoney(
@@ -168,16 +150,14 @@ export function AgentDrawer({
 
           <section>
             <span className="drawer-label">
-              Capability Profile
+              能力画像
             </span>
 
             {agent.capabilityProfiles
               ?.length ? (
               <div className="capability-profile-list">
                 {agent.capabilityProfiles.map(
-                  (
-                    profile,
-                  ) => (
+                  (profile) => (
                     <article
                       key={
                         profile.capability
@@ -194,13 +174,13 @@ export function AgentDrawer({
                           {
                             profile.sampleCount
                           }{" "}
-                          samples
+                          个样本
                         </span>
                       </header>
 
                       <div>
                         <span>
-                          Quality
+                          质量
                           <b>
                             {profile.qualityScore.toFixed(
                               3,
@@ -209,7 +189,7 @@ export function AgentDrawer({
                         </span>
 
                         <span>
-                          Success
+                          成功率
                           <b>
                             {formatPercent(
                               profile.successRate,
@@ -218,7 +198,7 @@ export function AgentDrawer({
                         </span>
 
                         <span>
-                          Latency
+                          响应耗时
                           <b>
                             {
                               profile.avgLatencyMs
@@ -228,7 +208,7 @@ export function AgentDrawer({
                         </span>
 
                         <span>
-                          Cost
+                          平均成本
                           <b>
                             {formatMoney(
                               profile.avgCost,
@@ -242,8 +222,7 @@ export function AgentDrawer({
               </div>
             ) : (
               <div className="drawer-empty">
-                暂无长期 Capability
-                Experience
+                暂无长期能力经验
               </div>
             )}
           </section>
@@ -252,8 +231,3 @@ export function AgentDrawer({
     </div>
   );
 }
-
-// =========================================================
-// Agents
-// =========================================================
-

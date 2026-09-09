@@ -388,6 +388,8 @@ type Task struct {
 
 	SynthesisMode string `json:"synthesisMode"`
 
+	ModelSelection ModelSelection `json:"modelSelection"`
+
 	// direct keeps the historical synchronous request path. durable is P8's
 	// queued/leased worker path and is persisted with the task.
 	DeliveryMode string `json:"deliveryMode"`

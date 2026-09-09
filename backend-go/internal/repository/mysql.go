@@ -751,6 +751,9 @@ func (r *MySQL) ListMessages(
 		return nil, err
 	}
 
+	// List the most recent N messages, but return them in chronological
+	// order.  `ORDER BY id ASC LIMIT N` returns the oldest N rows and caused
+	// long conversations to feed stale context into follow-up turns.
 	rows, err := r.db.QueryContext(
 		ctx,
 		`
@@ -763,10 +766,22 @@ func (r *MySQL) ListMessages(
 			request_id,
 			metadata_json,
 			created_at
-		FROM messages
-		WHERE conversation_id = ?
+		FROM (
+			SELECT
+				id,
+				conversation_id,
+				role,
+				content,
+				status,
+				request_id,
+				metadata_json,
+				created_at
+			FROM messages
+			WHERE conversation_id = ?
+			ORDER BY id DESC
+			LIMIT ?
+		) AS recent_messages
 		ORDER BY id ASC
-		LIMIT ?
 		`,
 		conversationID,
 		limit,
@@ -1609,6 +1624,7 @@ const taskColumns = `
 	planner,
 	execution_mode,
 	synthesis_mode,
+	model_selection_json,
 	delivery_mode,
 	constraints_json,
 	status,
@@ -1645,6 +1661,8 @@ func scanTask(
 
 	var constraintsJSON []byte
 
+	var modelSelectionJSON []byte
+
 	var selectedJSON []byte
 
 	var traceJSON []byte
@@ -1663,6 +1681,7 @@ func scanTask(
 		&task.Planner,
 		&task.ExecutionMode,
 		&task.SynthesisMode,
+		&modelSelectionJSON,
 		&task.DeliveryMode,
 		&constraintsJSON,
 		&task.Status,
@@ -1721,6 +1740,15 @@ func scanTask(
 		value := errorMessage.String
 
 		task.ErrorMessage = &value
+	}
+
+	// =====================================================
+	// Model Selection
+	// =====================================================
+
+	task.ModelSelection = model.ModelSelection{Mode: "auto"}
+	if len(modelSelectionJSON) > 0 {
+		_ = json.Unmarshal(modelSelectionJSON, &task.ModelSelection)
 	}
 
 	// =====================================================
@@ -1917,6 +1945,11 @@ func (r *MySQL) CreateTask(
 		return nil, err
 	}
 
+	modelSelectionJSON, err := json.Marshal(task.ModelSelection)
+	if err != nil {
+		return nil, err
+	}
+
 	res, err := r.db.ExecContext(
 		ctx,
 		`
@@ -1929,11 +1962,13 @@ func (r *MySQL) CreateTask(
 			planner,
 			execution_mode,
 			synthesis_mode,
+			model_selection_json,
 			delivery_mode,
 			constraints_json,
 			status
 		)
 		VALUES(
+			?,
 			?,
 			?,
 			?,
@@ -1955,6 +1990,7 @@ func (r *MySQL) CreateTask(
 		task.Planner,
 		task.ExecutionMode,
 		task.SynthesisMode,
+		string(modelSelectionJSON),
 		"direct",
 		string(
 			constraintsJSON,

@@ -209,6 +209,16 @@ func main() {
 	taskS.SetGovernanceService(governanceS)
 	taskS.SetAttachmentService(attachmentS)
 
+	ecosystemS := service.NewEcosystemService(
+		store,
+		governanceS,
+		convS,
+		projectS,
+		taskS,
+		agentS,
+		mcpS,
+	)
+
 	durableRuntimeS := service.NewDurableRuntimeService(
 		store,
 		taskS,
@@ -283,6 +293,9 @@ func main() {
 
 	governanceH := handler.NewGovernanceHandler(governanceS)
 
+	ecosystemH := handler.NewEcosystemHandler(ecosystemS)
+	publicAPIH := handler.NewPublicAPIHandler(ecosystemS)
+
 	taskH := handler.NewTaskHandler(
 		taskS,
 	)
@@ -320,6 +333,10 @@ func main() {
 			MCPServerHandler: mcpH,
 
 			GovernanceHandler: governanceH,
+
+			EcosystemHandler: ecosystemH,
+
+			PublicAPIHandler: publicAPIH,
 
 			JWT: jwt,
 

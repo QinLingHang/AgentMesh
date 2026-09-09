@@ -27,7 +27,7 @@ The public `v1.0.0-rc.2` release remains frozen. Development continues on unrele
 
 V2 completed independent automated acceptance before being merged into `develop`.
 
-## V3 — Distributed Runtime / Multi-node / HA — CURRENT
+## V3 — Distributed Runtime / Multi-node / HA — CLOSED
 
 - Worker Horizontal Scaling
 - Multi-node Runtime
@@ -41,14 +41,20 @@ V2 completed independent automated acceptance before being merged into `develop`
 - Distributed Runtime topology and metrics
 - Multi-node failover acceptance
 
-## V4 — Platform Ecosystem
+V3 completed independent automated acceptance before being merged into `develop`.
 
-- Public API / API Key
-- Python SDK
+## V4 — Platform Ecosystem — CURRENT
+
+- Public API / Project-scoped Service Account
+- Scope / revoke / expiration / API usage
+- Durable Idempotency-Key semantics
+- Python + TypeScript SDK
 - Agent Marketplace
 - Agent Versioning / Installation
 - MCP / Plugin Registry
-- Permission Governance
+- Manifest / Endpoint / Permission Governance
+- Publisher / Import / Export
+- Ecosystem Browser / SDK acceptance
 
 ## Final Production Closure
 

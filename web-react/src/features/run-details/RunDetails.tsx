@@ -16,6 +16,8 @@ import { ToolMCPTracePanel } from "./ToolMCPTracePanel";
 import { EvalScorecardPanel } from "./EvalScorecardPanel";
 import { RoutingTracePanel } from "./RoutingTracePanel";
 import { ReliabilityTracePanel } from "./ReliabilityTracePanel";
+import { DesktopTracePanel } from "./DesktopTracePanel";
+import { CapabilityDiscoveryPanel } from "./CapabilityDiscoveryPanel";
 
 export function RunDetails({
   result,
@@ -33,6 +35,8 @@ export function RunDetails({
 
   return (
     <div
+      data-testid="run-details"
+      data-run-id={result.task.requestId}
       className={`run-details-page ${
         display === "drawer"
           ? "run-details-drawer-mode"
@@ -62,6 +66,12 @@ export function RunDetails({
           />
         )}
 
+        {active === "capability" && (
+          <CapabilityDiscoveryPanel
+            trace={result.trace}
+          />
+        )}
+
         {active === "rag" && (
           <RAGTracePanel
             result={result}
@@ -82,6 +92,12 @@ export function RunDetails({
 
         {active === "tool-mcp" && (
           <ToolMCPTracePanel
+            trace={result.trace}
+          />
+        )}
+
+        {active === "desktop" && (
+          <DesktopTracePanel
             trace={result.trace}
           />
         )}

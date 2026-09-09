@@ -33,3 +33,11 @@ test("Run Details Tool & MCP observability includes approval events", () => {
   assert.match(panel, /event\.kind === "approval"/);
   assert.match(panel, /human approval/);
 });
+
+test("Workspace treats persisted task state as authoritative over stale approval snapshots", () => {
+  const workspace = read("src/features/workspace/Workspace.tsx");
+  assert.match(workspace, /persistedLatestRunTask/);
+  assert.match(workspace, /persistedWaitingTask \?\?\s*latestWaitingTask/s);
+  assert.match(workspace, /setLatestRunState\(null\)/);
+  assert.match(workspace, /已刷新最新任务状态/);
+});

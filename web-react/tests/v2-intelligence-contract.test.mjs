@@ -68,7 +68,7 @@ test("V2 deterministic browser acceptance is wired and P11 uses current Chinese 
   const p12e2e = read("e2e/p12-dev-session-restore.mjs");
 
   assert.equal(pkg.scripts["test:e2e:v2"], "node e2e/v2-intelligence-browser-e2e.mjs");
-  for (const token of ["v2-architecture.png", "Visual 2", "HYBRID", "已选多模态证据", "引用质量", "MODEL COST"]) {
+  for (const token of ["v2-architecture.png", "图片 2 张", "HYBRID", "已选多模态证据", "引用质量", "MODEL COST"]) {
     assert.match(v2e2e, new RegExp(token));
   }
   assert.match(p11e2e, /assertPage\(cdp, "能力中心", "让 AgentMesh 做得更多"\)/);

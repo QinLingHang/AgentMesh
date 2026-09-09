@@ -1,7 +1,7 @@
 {
   "name": "agentmesh-web",
   "private": true,
-  "version": "3.0.0-dev",
+  "version": "4.0.0-dev",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,7 +13,9 @@
     "test:e2e:v2": "node e2e/v2-intelligence-browser-e2e.mjs",
     "test:p11:bundle": "node e2e/p11-bundle-gate.mjs",
     "test:p11": "npm run build && npm run test:p11:bundle && npm run test:e2e:p11",
-    "test:e2e:v3": "node e2e/v3-distributed-runtime-browser-e2e.mjs"
+    "test:e2e:v3": "node e2e/v3-distributed-runtime-browser-e2e.mjs",
+    "test:e2e:v4": "node e2e/v4-platform-ecosystem-browser-e2e.mjs",
+    "test:e2e:v4-1": "node e2e/v4-1-browser-e2e.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.7.0",

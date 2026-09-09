@@ -33,6 +33,7 @@ export function RunDetailsHeader({
             <button
               aria-label="关闭运行详情"
               className="icon-button"
+              data-testid="run-details-close"
               onClick={onBack}
               type="button"
             >

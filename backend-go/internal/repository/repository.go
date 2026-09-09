@@ -152,6 +152,63 @@ type MessageRepository interface {
 	) ([]model.Message, error)
 }
 
+// TaskCompletionWrite and TaskSuspensionWrite describe authoritative task-state
+// transitions that may be finalized atomically with an assistant message.
+// They intentionally live in the repository package so MySQL can commit both
+// records in one transaction without coupling the repository to service types.
+type TaskCompletionWrite struct {
+	UserID         int64
+	TaskID         int64
+	ConversationID int64
+	Result         string
+	Selected       []string
+	Trace          []map[string]any
+	DAG            map[string]any
+	LatencyMS      int64
+	EstimatedCost  float64
+}
+
+type TaskSuspensionWrite struct {
+	UserID         int64
+	TaskID         int64
+	ConversationID int64
+	Status         string
+	Result         string
+	Continuation   *model.TaskContinuation
+	Selected       []string
+	Trace          []map[string]any
+	DAG            map[string]any
+	LatencyMS      int64
+	EstimatedCost  float64
+}
+
+type AssistantMessageWrite struct {
+	UserID         int64
+	ConversationID int64
+	Content        string
+	Status         string
+	RequestID      string
+	Metadata       map[string]any
+}
+
+// TaskMessageFinalizer is an optional stronger repository contract used by
+// production MySQL. Implementations commit the task transition and assistant
+// history together so callers cannot observe COMPLETED/SUSPENDED without the
+// corresponding authoritative assistant message.
+type TaskMessageFinalizer interface {
+	CompleteTaskWithAssistantMessage(
+		context.Context,
+		TaskCompletionWrite,
+		AssistantMessageWrite,
+	) (*model.Message, error)
+
+	SuspendTaskWithAssistantMessage(
+		context.Context,
+		TaskSuspensionWrite,
+		AssistantMessageWrite,
+	) (*model.Message, error)
+}
+
 // =========================================================
 // Conversation Attachment Repository
 // =========================================================

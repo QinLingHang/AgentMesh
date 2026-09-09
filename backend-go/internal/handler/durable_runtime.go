@@ -33,6 +33,7 @@ func (h *DurableRuntimeHandler) Run(c *gin.Context) {
 		Planner:        req.Planner,
 		ExecutionMode:  req.ExecutionMode,
 		SynthesisMode:  req.SynthesisMode,
+		ModelSelection: req.ModelSelection,
 		AttachmentIDs:  req.AttachmentIDs,
 		Constraints:    req.Constraints,
 	})

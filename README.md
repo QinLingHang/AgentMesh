@@ -4,9 +4,9 @@
 > 基于 **Go + Python + React + TypeScript** 构建，覆盖 Agent Runtime、Multi-Agent、RAG、Memory、Tool、MCP、BYOK、RBAC、可观测性、分布式执行与生产部署。
 
 **当前公开版本：** `v1.0.0-rc.2`  
-**当前开发版本：** `3.0.0-dev`（V3 Distributed Runtime / Multi-node / HA Sprint，未发布）
+**当前开发版本：** `4.0.0-dev`（V4 Platform Ecosystem Sprint，未发布）
 **开源协议：** Apache License 2.0  
-**项目状态：** V2 已完成并通过独立验收；当前进入 V3 分布式 Runtime 大版本开发，在全部计划能力和最终云端验收完成前不发布新的 Release
+**项目状态：** V2、V3 已完成并通过独立验收；当前进入 V4 Platform Ecosystem 大版本开发，在全部计划能力和最终云端验收完成前不发布新的 Release
 
 ---
 
@@ -442,9 +442,61 @@ V3 在该基础上进一步提供多节点 Worker、节点级容量约束、Disp
 
 ---
 
+## Platform Ecosystem
+
+### 11. Public API / SDK / Marketplace
+
+V4 将 AgentMesh 扩展为可被外部应用和开发者生态接入的平台。
+
+目前开发能力包括：
+
+- Project-scoped Service Account
+- One-time API Key reveal
+- Scope / revoke / expiration governance
+- `/openapi/v1` Public API
+- `Idempotency-Key` durable replay protection
+- Python Official SDK
+- TypeScript Official SDK
+- Agent / MCP / Plugin Marketplace Registry
+- Package Versioning / Publish
+- Package Import / Export
+- Project Installation / Enable / Disable / Uninstall
+- High-risk Permission ADMIN gate
+- Marketplace endpoint / manifest validation
+- API usage observability
+
+典型外部调用链：
+
+```text
+External App / CI
+      ↓
+Service Account API Key
+      ↓
+/openapi/v1
+      ↓
+Scope + Project Boundary + Idempotency
+      ↓
+Existing AgentMesh Task / Runtime / BYOK / Governance
+```
+
+Marketplace 安装不会绕过现有治理边界：Agent / MCP Package 会实体化为当前 Project Owner 的现有资源；V4 Plugin 采用 Registry 语义，不直接执行任意第三方上传代码。
+
+详细规范：
+
+```text
+docs/v4/ARCHITECTURE.md
+docs/v4/PUBLIC_API.md
+docs/v4/openapi.yaml
+docs/v4/MARKETPLACE.md
+docs/v4/SECURITY.md
+sdk/
+```
+
+---
+
 ## Evaluation
 
-### 11. Agent Evaluation
+### 12. Agent Evaluation
 
 AgentMesh 内置 Agent Evaluation 能力。
 
@@ -469,7 +521,7 @@ runtime-python/evals/
 
 ## Observability
 
-### 12. Run Details
+### 13. Run Details
 
 AgentMesh 将“最终回答”和“执行过程”分离。
 
@@ -495,7 +547,7 @@ Workspace 主要用于正常任务交互，而详细执行信息进入独立的 
 
 ## 前端
 
-### 13. React + TypeScript
+### 14. React + TypeScript
 
 前端采用：
 
@@ -1061,7 +1113,7 @@ AgentMesh 已暂停继续发布小版本。当前公开的 `v1.0.0-rc.2` 保持�
 
 V2 已完成 Python / Go / React / Browser E2E / MySQL Isolation / Privacy 等独立自动化验收并正式关单。
 
-**V3 — Distributed Runtime / Multi-node / HA Sprint（当前）**
+**V3 — Distributed Runtime / Multi-node / HA Sprint（已完成）**
 
 - Worker Horizontal Scaling
 - Multi-node Runtime
@@ -1074,14 +1126,19 @@ V2 已完成 Python / Go / React / Browser E2E / MySQL Isolation / Privacy 等�
 - Control-plane Request HA Overlay
 - Distributed Observability / Runtime Topology Dashboard
 
-**V4 — Platform Ecosystem Sprint**
+V3 已完成 Python / Go / React / Browser E2E / HA Compose / Security / Source Hygiene 等独立自动化验收并正式关单。
 
-- Public API / API Key
-- Python SDK
-- Agent Marketplace
-- Agent Versioning / Installation
+**V4 — Platform Ecosystem Sprint（当前）**
+
+- Public API / Project-scoped Service Account / API Key
+- Scope / Revocation / Expiration / Usage
+- Durable Idempotency
+- Python + TypeScript Official SDK
+- Agent Marketplace / Versioning / Installation
 - MCP / Plugin Registry
-- Permission Governance
+- Manifest / Endpoint / Permission Governance
+- Publisher / Import / Export
+- Ecosystem Browser E2E
 
 **Final Production Closure**
 

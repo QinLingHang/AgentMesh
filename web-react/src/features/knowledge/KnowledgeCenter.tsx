@@ -1689,13 +1689,19 @@ export function KnowledgeCenter({
 
                             <small>.{file.extension}</small>
 
-                            <small className="knowledge-v2-evidence-summary">
-                              Text {file.textChunkCount ?? file.chunkCount ?? 0}
-                              {` · Visual ${file.visualEvidenceCount ?? 0}`}
-                              {(file.pageCount ?? 0) > 0 ? ` · ${file.pageCount} 页` : ""}
-                              {visualStatusLabel(file.visualStatus) ? ` · ${visualStatusLabel(file.visualStatus)}` : ""}
-                              {file.visualErrorMessage ? ` · ${file.visualErrorMessage}` : ""}
-                            </small>
+                              <small className="knowledge-v2-evidence-summary">
+                                {`文本 ${file.textChunkCount ?? file.chunkCount ?? 0} 段`}
+                                {` · 图片 ${file.visualEvidenceCount ?? 0} 张`}
+                                {(file.pageCount ?? 0) > 0
+                                  ? ` · ${file.pageCount} 页`
+                                  : ""}
+                                {visualStatusLabel(file.visualStatus)
+                                  ? ` · ${visualStatusLabel(file.visualStatus)}`
+                                  : ""}
+                                {file.visualErrorMessage
+                                  ? " · 图片内容暂未解析"
+                                  : ""}
+                              </small>
                           </div>
                         </div>
                       </td>

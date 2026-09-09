@@ -136,6 +136,14 @@ def build_agent_context(
                     + "\n".join(memory_parts)
                 )
             )
+            sections.append(
+                (
+                    "[Conversation Continuity Policy]\n"
+                    "- Treat short follow-ups such as 继续/可以/好的/然后呢/展开 as referring to the most recent turn unless the user clearly changes topic.\n"
+                    "- Prefer the newest user/assistant exchange over older conversation topics.\n"
+                    "- Do not invent a new topic merely because the current task is short or underspecified."
+                )
+            )
 
     # =====================================================
     # User-global Long-term Memory

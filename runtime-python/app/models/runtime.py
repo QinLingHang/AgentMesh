@@ -8,7 +8,7 @@ from app.models import ModelInputAttachment, ModelMessage, ModelRequest, ModelRe
 from app.models.gateway import ModelEventHandler, ModelGateway
 from app.optimization import AdaptiveModelRouter, ModelRouteDecision
 from app.models.providers import OpenAICompatibleModelProvider
-from app.schemas import AgentProfile, TaskConstraints, TaskProfile, ProjectModelRuntime
+from app.schemas import AgentProfile, ModelSelection, TaskConstraints, TaskProfile, ProjectModelRuntime
 
 
 class ModelRuntimeResolutionError(RuntimeError):
@@ -24,6 +24,9 @@ class ResolvedModelRuntime:
     model: str
     vision_model: str | None
     plugin: Any
+    service_id: int | None = None
+    service_name: str | None = None
+    selection_mode: str = "declared"
     router: AdaptiveModelRouter | None = None
     route_decision: ModelRouteDecision | None = None
     last_response: ModelResponse | None = field(default=None, init=False)
@@ -90,6 +93,41 @@ class ResolvedModelRuntime:
 
 
 
+@dataclass(slots=True)
+class RequestLocalModelCandidate:
+    runtime_id: str
+    gateway: ModelGateway
+    provider: str
+    model: str
+    vision_model: str | None
+    service_id: int | None
+    service_name: str | None
+    routing_is_default: bool = False
+    routing_quality_score: float = 0.8
+    routing_avg_latency_ms: int = 1000
+    routing_avg_cost: float = 0.0
+    routing_success_rate: float = 1.0
+    routing_sample_count: int = 0
+
+
+def _request_local_candidate(item: ProjectModelRuntime) -> RequestLocalModelCandidate:
+    provider = OpenAICompatibleModelProvider(
+        api_key=item.api_key.get_secret_value(),
+        base_url=item.base_url,
+        trust_env=False,
+    )
+    runtime_id = f"user-service-{item.service_id}" if item.service_id else "request-byok"
+    return RequestLocalModelCandidate(
+        runtime_id=runtime_id,
+        gateway=ModelGateway(provider, timeout=30.0, max_retries=1),
+        provider=item.provider,
+        model=item.model_name,
+        vision_model=(item.vision_model_name or "").strip() or None,
+        service_id=item.service_id,
+        service_name=item.service_name,
+        routing_is_default=item.is_default,
+    )
+
 
 def resolve_project_model_runtime(
     project_model: ProjectModelRuntime,
@@ -138,14 +176,77 @@ class ModelRuntimeResolver:
         constraints: TaskConstraints | None = None,
         profile: TaskProfile | None = None,
         project_model: ProjectModelRuntime | None = None,
+        model_pool: list[ProjectModelRuntime] | None = None,
+        model_selection: ModelSelection | None = None,
+        has_images: bool = False,
     ) -> ResolvedModelRuntime:
         requested_runtime = agent.model_runtime.strip().lower() or "default"
         route_decision: ModelRouteDecision | None = None
+        selection = model_selection or ModelSelection()
+
+        # Personal BYOK model services are request-local and take precedence over
+        # the shared Project fallback. The pool never mutates RuntimeContext.
+        if model_pool:
+            candidates = [_request_local_candidate(item) for item in model_pool]
+            if has_images:
+                visual = [item for item in candidates if item.vision_model]
+                if not visual:
+                    raise ModelRuntimeResolutionError(
+                        "the selected model service does not provide a vision model"
+                    )
+                candidates = visual
+
+            by_id = {item.runtime_id: item for item in candidates}
+            if selection.mode == "manual":
+                if selection.service_id is None:
+                    raise ModelRuntimeResolutionError("manual model selection requires serviceId")
+                runtime_id = f"user-service-{selection.service_id}"
+                if runtime_id not in by_id:
+                    raise ModelRuntimeResolutionError("selected model service is unavailable")
+                if constraints is not None and profile is not None:
+                    route_decision = self.model_router.route_candidates(
+                        runtimes=[(runtime_id, by_id[runtime_id])],
+                        preferred_runtime=runtime_id,
+                        profile=profile,
+                        constraints=constraints,
+                    )
+            else:
+                if constraints is None or profile is None:
+                    # The caller normally supplies both. A deterministic default
+                    # keeps request-local BYOK usable in isolated tests.
+                    chosen = next((item for item in candidates if item.routing_is_default), candidates[0])
+                    runtime_id = chosen.runtime_id
+                else:
+                    route_decision = self.model_router.route_candidates(
+                        runtimes=[(item.runtime_id, item) for item in candidates],
+                        preferred_runtime="adaptive",
+                        profile=profile,
+                        constraints=constraints,
+                    )
+                    runtime_id = route_decision.selected_runtime_id
+
+            selected = by_id[runtime_id]
+            return ResolvedModelRuntime(
+                runtime_id=runtime_id,
+                gateway=selected.gateway,
+                gateway_provider=selected.gateway.provider.name,
+                declared_provider=selected.provider,
+                model=selected.model,
+                vision_model=selected.vision_model,
+                plugin=selected,
+                service_id=selected.service_id,
+                service_name=selected.service_name,
+                selection_mode=selection.mode,
+                router=self.model_router,
+                route_decision=route_decision,
+            )
 
         # P9 Project BYOK is request-local. It never mutates RuntimeContext and
         # therefore cannot leak across projects or later requests.
         if project_model is not None:
-            return resolve_project_model_runtime(project_model)
+            resolved = resolve_project_model_runtime(project_model)
+            resolved.selection_mode = "project_fallback"
+            return resolved
 
         if adaptive and constraints is not None and profile is not None:
             try:
@@ -155,7 +256,7 @@ class ModelRuntimeResolver:
                     constraints=constraints,
                 )
                 runtime_id = route_decision.selected_runtime_id
-            except Exception as exc:
+            except Exception:
                 # Routing must not create a new single point of failure. If the
                 # agent/runtime was previously valid, fall back to its declared
                 # route and let the normal resolver produce the canonical error
@@ -197,6 +298,7 @@ class ModelRuntimeResolver:
                 or None
             ),
             plugin=base_runtime,
+            selection_mode=(route_decision.mode if route_decision is not None else "declared"),
             router=self.model_router if adaptive else None,
             route_decision=route_decision,
         )

@@ -41,6 +41,10 @@ type Dependencies struct {
 
 	GovernanceHandler *handler.GovernanceHandler
 
+	EcosystemHandler *handler.EcosystemHandler
+
+	PublicAPIHandler *handler.PublicAPIHandler
+
 	JWT *security.JWTManager
 
 	DB *sql.DB
@@ -108,6 +112,8 @@ func New(
 	)
 
 	registerInternalDurableRuntimeRoutes(internal, deps)
+
+	registerPublicAPIRoutes(r, deps)
 
 	api := r.Group(
 		"/api",
@@ -191,6 +197,8 @@ func New(
 	registerDurableRuntimeRoutes(protected, deps)
 
 	registerGovernanceRoutes(protected, deps)
+
+	registerEcosystemRoutes(protected, deps)
 
 	// Task history deletion is not rate-limited as task execution.
 	// It still passes JWT tenant authentication.

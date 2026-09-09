@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -808,6 +811,10 @@ func (s *ToolService) Create(
 		return nil, ErrInvalidInput
 	}
 
+	if isReservedDesktopToolName(tool.Name) {
+		return nil, ErrInvalidInput
+	}
+
 	if tool.RiskLevel != "low" &&
 		tool.RiskLevel != "medium" &&
 		tool.RiskLevel != "high" {
@@ -870,11 +877,26 @@ func (s *ToolService) Update(
 	id int64,
 	tool model.Tool,
 ) (*model.Tool, error) {
-	tool = normalizeTool(
-		tool,
-	)
+	existing, lookupErr := s.repo.ToolByID(ctx, uid, id)
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if existing == nil {
+		return nil, ErrNotFound
+	}
+
+	if definition, reserved := desktopDefinitionByName(existing.Name); reserved {
+		definition.Enabled = tool.Enabled
+		tool = normalizeTool(definition)
+	} else {
+		tool = normalizeTool(tool)
+	}
 
 	if tool.Name == "" {
+		return nil, ErrInvalidInput
+	}
+
+	if isReservedDesktopToolName(tool.Name) && !isReservedDesktopToolName(existing.Name) {
 		return nil, ErrInvalidInput
 	}
 
@@ -904,6 +926,20 @@ func (s *ToolService) Delete(
 	uid int64,
 	id int64,
 ) error {
+	existing, lookupErr := s.repo.ToolByID(ctx, uid, id)
+	if lookupErr != nil {
+		return lookupErr
+	}
+	if existing == nil {
+		return ErrNotFound
+	}
+	if isReservedDesktopToolName(existing.Name) {
+		// Official desktop tools are security-governed platform capabilities.
+		// Users may disable them, but deleting the canonical contract would make
+		// subsequent approval/fingerprint behavior ambiguous.
+		return ErrInvalidInput
+	}
+
 	ok, err := s.repo.DeleteTool(
 		ctx,
 		uid,
@@ -1358,6 +1394,126 @@ func (s *TaskService) SetAttachmentService(attachments *AttachmentService) {
 	s.attachments = attachments
 }
 
+const taskFinalizationTimeout = 5 * time.Second
+
+func conversationIDValue(id *int64) int64 {
+	if id == nil {
+		return 0
+	}
+	return *id
+}
+
+func taskFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	// Once Runtime has produced an authoritative result, final task/history
+	// persistence must not depend on the browser keeping the HTTP stream open.
+	// A bounded detached context prevents a conversation switch or client-side
+	// navigation from creating a COMPLETED task with missing assistant history.
+	return context.WithTimeout(context.WithoutCancel(ctx), taskFinalizationTimeout)
+}
+
+func (s *TaskService) completeTaskWithAssistant(
+	ctx context.Context,
+	task repository.TaskCompletionWrite,
+	message *repository.AssistantMessageWrite,
+) error {
+	finalizeCtx, cancel := taskFinalizationContext(ctx)
+	defer cancel()
+
+	if message != nil {
+		if finalizer, ok := s.tasks.(repository.TaskMessageFinalizer); ok {
+			_, err := finalizer.CompleteTaskWithAssistantMessage(finalizeCtx, task, *message)
+			if err != nil {
+				return fmt.Errorf("finalize completed task and assistant history: %w", err)
+			}
+			return nil
+		}
+	}
+
+	if err := s.tasks.CompleteTask(
+		finalizeCtx,
+		task.UserID,
+		task.TaskID,
+		task.Result,
+		task.Selected,
+		task.Trace,
+		task.DAG,
+		task.LatencyMS,
+		task.EstimatedCost,
+	); err != nil {
+		return err
+	}
+
+	if message != nil {
+		if _, err := s.messages.CreateMessage(
+			finalizeCtx,
+			message.UserID,
+			message.ConversationID,
+			"assistant",
+			message.Content,
+			message.Status,
+			message.RequestID,
+			message.Metadata,
+		); err != nil {
+			return fmt.Errorf("persist assistant history after task completion: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *TaskService) suspendTaskWithAssistant(
+	ctx context.Context,
+	task repository.TaskSuspensionWrite,
+	message *repository.AssistantMessageWrite,
+) error {
+	finalizeCtx, cancel := taskFinalizationContext(ctx)
+	defer cancel()
+
+	if message != nil {
+		if finalizer, ok := s.tasks.(repository.TaskMessageFinalizer); ok {
+			_, err := finalizer.SuspendTaskWithAssistantMessage(finalizeCtx, task, *message)
+			if err != nil {
+				return fmt.Errorf("finalize suspended task and assistant history: %w", err)
+			}
+			return nil
+		}
+
+	}
+
+	if err := s.tasks.SuspendTask(
+		finalizeCtx,
+		task.UserID,
+		task.TaskID,
+		task.Status,
+		task.Result,
+		task.Continuation,
+		task.Selected,
+		task.Trace,
+		task.DAG,
+		task.LatencyMS,
+		task.EstimatedCost,
+	); err != nil {
+		return err
+	}
+
+	if message != nil {
+		if _, err := s.messages.CreateMessage(
+			finalizeCtx,
+			message.UserID,
+			message.ConversationID,
+			"assistant",
+			message.Content,
+			message.Status,
+			message.RequestID,
+			message.Metadata,
+		); err != nil {
+			return fmt.Errorf("persist assistant history after task suspension: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (s *TaskService) recordRunCost(
 	ctx context.Context,
 	uid int64,
@@ -1405,6 +1561,28 @@ func (s *TaskService) resolveRequestModelRuntime(
 	return s.governance.ResolveRequestModelRuntime(ctx, uid, projectID)
 }
 
+func (s *TaskService) resolveRequestModelRuntimePool(
+	ctx context.Context,
+	uid int64,
+	projectContext *model.ProjectRuntimeContext,
+	selection model.ModelSelection,
+) ([]runtimeclient.ProjectModelRuntime, *runtimeclient.ProjectModelRuntime, model.ModelSelection, error) {
+	if s.governance == nil {
+		normalized := selection
+		if strings.TrimSpace(normalized.Mode) == "" {
+			normalized.Mode = "auto"
+		}
+		return nil, nil, normalized, nil
+	}
+
+	var projectID *int64
+	if projectContext != nil && projectContext.ProjectID > 0 {
+		id := projectContext.ProjectID
+		projectID = &id
+	}
+	return s.governance.ResolveRequestModelRuntimePool(ctx, uid, projectID, selection)
+}
+
 // =========================================================
 // Run Task Input
 //
@@ -1422,36 +1600,149 @@ type RunTaskInput struct {
 
 	SynthesisMode string
 
+	ModelSelection model.ModelSelection
+
 	AttachmentIDs []int64
 
 	Constraints model.TaskConstraints
 }
 
-// ShouldUseInteractiveFastPath keeps ordinary chat and request-local file/image
-// analysis off the expensive multi-agent orchestration path. Requests that
-// explicitly need Project Knowledge, tools/MCP, durable memory or external
-// side effects continue through the full Agent Runtime.
-func ShouldUseInteractiveFastPath(task string, attachmentIDs []int64) bool {
-	if len(attachmentIDs) > 0 {
+func isContinuationTurn(task string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(task))
+	if normalized == "" {
+		return false
+	}
+
+	trimmed := strings.Trim(normalized, " \t\r\n，。！？!?；;：:、,.~～…")
+	compact := strings.NewReplacer(
+		" ", "", "\t", "", "\r", "", "\n", "",
+		"，", "", "。", "", "！", "", "？", "", "!", "", "?", "",
+		"；", "", ";", "", "：", "", ":", "", "、", "", ",", "", ".", "",
+		"~", "", "～", "", "…", "",
+	).Replace(trimmed)
+	if compact == "" {
+		return false
+	}
+
+	// Bare option replies such as “1”, “2”, “A” or “B” are inherently
+	// dependent on the immediately preceding assistant turn. Treat them as
+	// continuation turns so they cannot become context-blind new topics.
+	if len([]rune(compact)) == 1 {
+		r := []rune(compact)[0]
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'd') {
+			return true
+		}
+	}
+
+	exact := map[string]struct{}{
+		"继续": {}, "继续吧": {}, "继续讲": {}, "接着": {}, "接着说": {},
+		"可以": {}, "好的": {}, "好": {}, "行": {}, "没问题": {},
+		"然后呢": {}, "下一步": {}, "下一步呢": {}, "展开": {}, "展开讲讲": {},
+		"详细点": {}, "再说说": {}, "再来": {}, "对": {}, "对的": {},
+		"是": {}, "是的": {}, "continue": {}, "goon": {}, "yes": {}, "ok": {}, "okay": {},
+	}
+	if _, ok := exact[compact]; ok {
 		return true
 	}
 
+	if len([]rune(compact)) > 14 {
+		return false
+	}
+	prefixes := []string{
+		"继续", "那继续", "好继续", "好的继续", "可以继续",
+		"接着", "那接着", "然后", "下一步", "展开", "再说", "再来",
+		"continue", "goon",
+	}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(compact, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// ShouldUseInteractiveFastPath keeps ordinary chat and request-local file/image
+// analysis off the expensive multi-agent orchestration path. Requests that
+// may need Project Knowledge, Tool/MCP/Skill discovery, durable memory or
+// external side effects continue through the full Agent Runtime even when the
+// user does not name a capability explicitly.
+func ShouldUseInteractiveFastPath(task string, attachmentIDs []int64) bool {
 	text := strings.ToLower(strings.TrimSpace(task))
 	if text == "" {
 		return false
 	}
 
+	// Short continuation turns are intentionally routed through the full
+	// Runtime. They depend almost entirely on the immediately preceding turn
+	// and may need to continue a Tool/MCP/Skill/Knowledge workflow. Treating
+	// “可以/继续/好的” as a brand-new fast-path chat turn can silently switch
+	// topics or drop an agentic capability context.
+	if isContinuationTurn(text) {
+		return false
+	}
+
 	agenticSignals := []string{
-		"知识库", "项目知识", "项目资料", "当前项目", "本项目", "根据资料", "根据文档",
+		// Project Knowledge / Memory
+		"知识库", "项目知识", "项目资料", "项目文档", "项目文件", "当前项目", "本项目", "这个项目",
+		"我们项目", "根据资料", "根据文档", "从文档", "agentmesh", "roadmap", "代码库", "repository",
+		"你记得", "还记得", "记得我", "我的偏好", "记住", "忘记",
+		"project knowledge", "knowledge base", "remember", "my preference", "forget",
+
+		// Personal / GLOBAL Knowledge. The Runtime discovery layer decides
+		// whether retrieval is actually relevant, but these cues must reach the
+		// full Runtime first; otherwise FastPath can never discover the user's
+		// uploaded/global knowledge.
+		"我的简历", "我简历", "这份简历", "那份简历", "简历", "履历",
+		"我的资料", "我的文档", "我的文件", "个人资料", "我上传", "上传的", "之前上传",
+		"my resume", "my cv", "uploaded document", "uploaded file", "my document",
+
+		// Tool / MCP / external integrations
 		"调用工具", "使用工具", "执行工具", "mcp", "查询订单", "订单状态", "物流", "退款", "支付",
-		"发邮件", "发送邮件", "创建记录", "删除记录", "写入", "你记得", "还记得", "记得我",
-		"我的偏好", "记住", "忘记", "project knowledge", "knowledge base", "use tool", "call tool",
-		"order status", "shipping", "refund", "send email", "remember", "my preference", "forget",
+		"发邮件", "发送邮件", "邮箱", "天气", "创建记录", "删除记录", "写入",
+		"github", "gitlab", "jira", "slack", "notion", "gmail", "outlook", "飞书", "钉钉", "企业微信",
+		"pull request", "issue", "use tool", "call tool", "order status", "shipping", "refund", "send email",
+
+		// Generic capability intent. Custom HTTP tools cannot be known to the
+		// Control Plane fast-path classifier ahead of time, so action/data verbs
+		// route into full Runtime where the request-scoped capability resolver can
+		// rank the actual catalog. Explanatory chat such as “什么是/有什么区别” has
+		// none of these verbs and keeps true-token streaming.
+		"查询", "查一下", "查找", "搜索", "检索", "获取", "读取", "列出", "统计", "计算",
+		"帮我查", "帮我看", "看看", "查看", "检查",
+		"同步", "更新", "提交", "发布", "创建", "新建", "删除", "发送", "执行", "运行", "打开",
+		"现在几点", "当前时间", "实时", "最新",
+		"query", "lookup", "search", "fetch", "get ", "list ", "read ", "calculate", "compute",
+		"sync", "update", "submit", "publish", "create", "delete", "send", "execute", "run ", "open ",
+
+		// Desktop Agent. These phrases must reach the full Runtime so the
+		// capability resolver can discover local.* autonomously.
+		"本机", "本地文件", "本地目录", "桌面", "文件夹", "目录", "路径", "磁盘",
+		"打开软件", "打开应用", "启动应用", "启动软件", "vscode", "chrome", "edge", "浏览器", "记事本",
+		"命令行", "终端", "powershell", "pwsh", "shell", "cmd", "截图", "屏幕", "窗口",
+		"鼠标", "键盘", "点击", "双击", "右键", "拖拽", "快捷键",
+		"local.fs.", "local.app.", "local.tool.", "local.terminal.", "local.ui.",
+		"desktop", "local file", "local folder", "command line", "terminal", "screenshot", "window", "mouse", "keyboard",
+
+		// Skill / work execution
+		"代码审查", "审查代码", "代码评审", "分析项目", "调试项目", "运行测试", "生成测试",
+		"code review", "review code", "debug project", "run tests",
 	}
 	for _, signal := range agenticSignals {
 		if strings.Contains(text, signal) {
 			return false
 		}
+	}
+
+	// Explicit filesystem paths are agentic even when the user does not use a
+	// keyword such as “本机” or “调用工具”.
+	if strings.Contains(text, ":\\") || strings.Contains(text, ":/") {
+		return false
+	}
+
+	// Request-local attachments keep the low-latency multimodal path only when
+	// the task itself did not express any agentic/capability intent above.
+	if len(attachmentIDs) > 0 {
+		return true
 	}
 
 	// Very large prompts usually represent explicit work rather than chat. The
@@ -1478,9 +1769,16 @@ func boundedInteractiveHistory(messages []model.Message) []runtimeclient.Interac
 			limit = budget
 		}
 		if len(runes) > limit {
-			runes = runes[:limit]
+			// The tail of an assistant answer often contains the exact follow-up
+			// choices (“1/2/3”, “要不要继续…”) that the next short user turn
+			// refers to. Keep both the beginning and the newest tail instead of
+			// truncating the tail away.
+			head := limit / 3
+			tail := limit - head
+			content = string(runes[:head]) + " …[中间省略]… " + string(runes[len(runes)-tail:])
+		} else {
+			content = string(runes)
 		}
-		content = string(runes)
 		budget -= len(runes)
 		result = append(result, runtimeclient.InteractiveMessage{Role: role, Content: content})
 	}
@@ -1565,10 +1863,11 @@ func (s *TaskService) RunInteractiveStream(
 		}
 	}
 
-	projectModel, err := s.resolveRequestModelRuntime(ctx, uid, projectRuntimeContext)
+	modelPool, projectModel, normalizedSelection, err := s.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, in.ModelSelection)
 	if err != nil {
 		return nil, err
 	}
+	in.ModelSelection = normalizedSelection
 
 	requestID := uuid.NewString()
 	if in.ConversationID != nil {
@@ -1586,6 +1885,7 @@ func (s *TaskService) RunInteractiveStream(
 	task, err := s.tasks.CreateTask(ctx, model.Task{
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID, TaskText: in.Task,
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
+		ModelSelection: in.ModelSelection,
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
@@ -1601,12 +1901,18 @@ func (s *TaskService) RunInteractiveStream(
 	started := time.Now()
 	answer := strings.Builder{}
 	var done runtimeclient.InteractiveStreamEvent
+	var modelRoute runtimeclient.InteractiveStreamEvent
 	streamErr := s.runtime.StreamInteractive(ctx, runtimeclient.InteractiveStreamRequest{
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID, Task: in.Task,
-		History: history, ProjectModel: projectModel, Attachments: runtimeAttachments,
+		History: history, ProjectModel: projectModel, ModelPool: modelPool,
+		ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+		Scheduler:      in.Scheduler, Constraints: in.Constraints, Attachments: runtimeAttachments,
 	}, func(event runtimeclient.InteractiveStreamEvent) error {
 		if event.Type == "delta" {
 			answer.WriteString(event.Delta)
+		}
+		if event.Type == "model_route" {
+			modelRoute = event
 		}
 		if event.Type == "done" {
 			done = event
@@ -1637,25 +1943,40 @@ func (s *TaskService) RunInteractiveStream(
 		elapsed = done.LatencyMS
 	}
 	selectedAgents := []string{"InteractiveFastPath"}
-	trace := []map[string]any{{
-		"kind": "model", "title": "Interactive Stream", "status": "completed",
-		"detail": "direct token streaming", "elapsedMs": elapsed,
-	}}
+	routeDetail, _ := json.Marshal(map[string]any{
+		"mode":        modelRoute.Mode,
+		"reason":      modelRoute.Reason,
+		"provider":    modelRoute.Provider,
+		"model":       modelRoute.Model,
+		"serviceId":   modelRoute.ServiceID,
+		"serviceName": modelRoute.ServiceName,
+	})
+	trace := []map[string]any{
+		{
+			"kind": "model_route", "title": "Model Route", "status": "completed",
+			"detail": string(routeDetail),
+		},
+		{
+			"kind": "model", "title": "Interactive Stream", "status": "completed",
+			"detail": "direct token streaming", "elapsedMs": elapsed,
+		},
+	}
 	dag := map[string]any{
 		"nodes": []map[string]any{{"id": "interactive-model", "label": "Interactive Model", "kind": "model", "status": "completed"}},
 		"edges": []map[string]any{},
 	}
-	if err := s.tasks.CompleteTask(ctx, uid, task.ID, finalAnswer, selectedAgents, trace, dag, elapsed, cost); err != nil {
-		if errors.Is(err, repository.ErrInvalidTaskState) {
-			return nil, ErrConflict
-		}
-		return nil, err
+	resolvedProvider := done.Provider
+	if strings.TrimSpace(modelRoute.Provider) != "" {
+		resolvedProvider = modelRoute.Provider
 	}
-
+	resolvedModel := done.Model
+	if strings.TrimSpace(modelRoute.Model) != "" {
+		resolvedModel = modelRoute.Model
+	}
 	observability := runtimeclient.ObservabilitySummary{
 		ModelCalls: 1, ModelInputTokens: done.InputTokens, ModelOutputTokens: done.OutputTokens,
 		ModelTotalTokens: done.TotalTokens, ModelLatencyMS: elapsed,
-		ModelProvider: done.Provider, ModelName: done.Model,
+		ModelProvider: resolvedProvider, ModelName: resolvedModel,
 		AgentAttempts: 1, AgentSuccesses: 1, DAGCompletedNodes: 1,
 	}
 	if done.EstimatedCost != nil {
@@ -1663,14 +1984,28 @@ func (s *TaskService) RunInteractiveStream(
 		observability.ModelCostKnown = true
 	}
 
+	var assistantMessage *repository.AssistantMessageWrite
 	if in.ConversationID != nil {
-		_, _ = s.messages.CreateMessage(ctx, uid, *in.ConversationID, "assistant", finalAnswer, "COMPLETED", requestID, map[string]any{
-			"taskId": task.ID, "runtimePhase": "interactive_stream", "status": "COMPLETED",
-			"selectedAgents": selectedAgents, "trace": trace, "dag": dag,
-			"scheduler": in.Scheduler, "planner": in.Planner,
-			"executionMode": in.ExecutionMode, "synthesisMode": in.SynthesisMode,
-			"observability": observability, "citations": []runtimeclient.RuntimeCitation{},
-		})
+		assistantMessage = &repository.AssistantMessageWrite{
+			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: finalAnswer, Status: "COMPLETED", RequestID: requestID,
+			Metadata: map[string]any{
+				"taskId": task.ID, "runtimePhase": "interactive_stream", "status": "COMPLETED",
+				"selectedAgents": selectedAgents, "trace": trace, "dag": dag,
+				"scheduler": in.Scheduler, "planner": in.Planner,
+				"executionMode": in.ExecutionMode, "synthesisMode": in.SynthesisMode,
+				"observability": observability, "citations": []runtimeclient.RuntimeCitation{},
+			},
+		}
+	}
+
+	if err := s.completeTaskWithAssistant(ctx, repository.TaskCompletionWrite{
+		UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(in.ConversationID), Result: finalAnswer, Selected: selectedAgents, Trace: trace, DAG: dag,
+		LatencyMS: elapsed, EstimatedCost: cost,
+	}, assistantMessage); err != nil {
+		if errors.Is(err, repository.ErrInvalidTaskState) {
+			return nil, ErrConflict
+		}
+		return nil, err
 	}
 	var costProjectID *int64
 	if s.governance != nil && projectRuntimeContext != nil {
@@ -2158,9 +2493,31 @@ func (s *TaskService) Run(
 	// an unconfigured account gets a clean configuration error instead of a
 	// failed task record.
 	// =====================================================
-	projectModel, err := s.resolveRequestModelRuntime(ctx, uid, projectRuntimeContext)
+	modelPool, projectModel, normalizedSelection, err := s.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, in.ModelSelection)
 	if err != nil {
 		return nil, err
+	}
+	in.ModelSelection = normalizedSelection
+
+	// =====================================================
+	// 4.2 Authoritative recent conversation history
+	//
+	// The Go/MySQL conversation log contains turns produced by both the
+	// low-latency interactive path and the full Agent Runtime.  Send the same
+	// recent context into full Runtime requests so a routing-path change cannot
+	// split short-term conversation memory.  Load before persisting this turn so
+	// `req.task` is not duplicated inside history.
+	// =====================================================
+	var history []runtimeclient.InteractiveMessage
+	if in.ConversationID != nil {
+		previous, historyErr := s.messages.ListMessages(ctx, uid, *in.ConversationID, 12)
+		if errors.Is(historyErr, repository.ErrNotOwned) {
+			return nil, ErrNotFound
+		}
+		if historyErr != nil {
+			return nil, historyErr
+		}
+		history = boundedInteractiveHistory(previous)
 	}
 
 	// =====================================================
@@ -2222,6 +2579,8 @@ func (s *TaskService) Run(
 			ExecutionMode: in.ExecutionMode,
 
 			SynthesisMode: in.SynthesisMode,
+
+			ModelSelection: in.ModelSelection,
 		},
 		in.Constraints,
 	)
@@ -2296,6 +2655,8 @@ func (s *TaskService) Run(
 
 			Task: in.Task,
 
+			History: history,
+
 			Scheduler: in.Scheduler,
 
 			Planner: in.Planner,
@@ -2315,6 +2676,10 @@ func (s *TaskService) Run(
 			Continuation: nil,
 
 			ProjectModel: projectModel,
+
+			ModelPool: modelPool,
+
+			ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
 
 			Attachments: runtimeAttachments,
 		},
@@ -2388,18 +2753,24 @@ func (s *TaskService) Run(
 				response.Continuation,
 			)
 
-		if err = s.tasks.SuspendTask(
+		var assistantMessage *repository.AssistantMessageWrite
+		if in.ConversationID != nil {
+			assistantMessage = &repository.AssistantMessageWrite{
+				UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: response.Answer, Status: runtimeStatus, RequestID: requestID,
+				Metadata: map[string]any{
+					"taskId": task.ID, "runtimePhase": "suspended", "status": runtimeStatus,
+				},
+			}
+		}
+
+		if err = s.suspendTaskWithAssistant(
 			ctx,
-			uid,
-			task.ID,
-			runtimeStatus,
-			response.Answer,
-			continuation,
-			response.SelectedAgents,
-			response.Trace,
-			response.DAG,
-			response.ElapsedMS,
-			response.EstimatedCost,
+			repository.TaskSuspensionWrite{
+				UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(in.ConversationID), Status: runtimeStatus, Result: response.Answer, Continuation: continuation,
+				Selected: response.SelectedAgents, Trace: response.Trace, DAG: response.DAG,
+				LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+			},
+			assistantMessage,
 		); err != nil {
 			if errors.Is(
 				err,
@@ -2441,31 +2812,6 @@ func (s *TaskService) Run(
 			task = refreshed
 		}
 
-		// -------------------------------------------------
-		// Conversation History
-		//
-
-		if in.ConversationID != nil {
-			_, _ = s.messages.CreateMessage(
-				ctx,
-				uid,
-				*in.ConversationID,
-				"assistant",
-				response.Answer,
-				runtimeStatus,
-				requestID,
-				map[string]any{
-					"taskId": task.ID,
-
-					"runtimePhase": "suspended",
-
-					"status": runtimeStatus,
-				},
-			)
-		}
-
-		// -------------------------------------------------
-
 		return buildRunTaskResult(
 			task,
 			response,
@@ -2502,16 +2848,36 @@ func (s *TaskService) Run(
 	// 12. RUNNING -> COMPLETED
 	// =====================================================
 
-	if err = s.tasks.CompleteTask(
+	var assistantMessage *repository.AssistantMessageWrite
+	if in.ConversationID != nil {
+		assistantMessage = &repository.AssistantMessageWrite{
+			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: requestID,
+			Metadata: map[string]any{
+				"taskId":         task.ID,
+				"runtimePhase":   "completed",
+				"trace":          response.Trace,
+				"dag":            response.DAG,
+				"selectedAgents": response.SelectedAgents,
+				"taskProfile":    response.TaskProfile,
+				"scheduler":      in.Scheduler,
+				"planner":        in.Planner,
+				"executionMode":  in.ExecutionMode,
+				"synthesisMode":  in.SynthesisMode,
+				"observability":  response.Observability,
+				"scorecard":      response.Scorecard,
+				"agentFeedback":  response.AgentFeedback,
+				"citations":      normalizeRuntimeCitations(response.Citations),
+			},
+		}
+	}
+
+	if err = s.completeTaskWithAssistant(
 		ctx,
-		uid,
-		task.ID,
-		response.Answer,
-		response.SelectedAgents,
-		response.Trace,
-		response.DAG,
-		response.ElapsedMS,
-		response.EstimatedCost,
+		repository.TaskCompletionWrite{
+			UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(in.ConversationID), Result: response.Answer, Selected: response.SelectedAgents,
+			Trace: response.Trace, DAG: response.DAG, LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+		},
+		assistantMessage,
 	); err != nil {
 		if errors.Is(
 			err,
@@ -2533,54 +2899,10 @@ func (s *TaskService) Run(
 		task.RequestID,
 		response.AgentFeedback,
 	); err != nil {
-		return nil, err
-	}
-
-	// =====================================================
-	// 14. Persist Assistant Message
-	// =====================================================
-
-	if in.ConversationID != nil {
-		_, _ = s.messages.CreateMessage(
-			ctx,
-			uid,
-			*in.ConversationID,
-			"assistant",
-			response.Answer,
-			"COMPLETED",
-			requestID,
-			map[string]any{
-				"taskId": task.ID,
-
-				"runtimePhase": "completed",
-
-				"trace": response.Trace,
-
-				"dag": response.DAG,
-
-				"selectedAgents": response.SelectedAgents,
-
-				"taskProfile": response.TaskProfile,
-
-				"scheduler": in.Scheduler,
-
-				"planner": in.Planner,
-
-				"executionMode": in.ExecutionMode,
-
-				"synthesisMode": in.SynthesisMode,
-
-				"observability": response.Observability,
-
-				"scorecard": response.Scorecard,
-
-				"agentFeedback": response.AgentFeedback,
-
-				"citations": normalizeRuntimeCitations(
-					response.Citations,
-				),
-			},
-		)
+		// Feedback is auxiliary telemetry. Once task state and assistant history
+		// have committed atomically, a feedback write must not turn the user's
+		// successful task into an apparent execution failure.
+		log.Printf("agent feedback persistence failed after task finalization: %v", err)
 	}
 
 	// =====================================================
@@ -2909,11 +3231,12 @@ func (s *TaskService) Resume(
 		}
 	}
 
-	projectModel, err := s.resolveRequestModelRuntime(ctx, uid, projectRuntimeContext)
+	modelPool, projectModel, normalizedSelection, err := s.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, task.ModelSelection)
 	if err != nil {
 		restoreSuspension()
 		return nil, err
 	}
+	task.ModelSelection = normalizedSelection
 
 	// =====================================================
 	// 8. Python Runtime Resume
@@ -2957,6 +3280,10 @@ func (s *TaskService) Resume(
 			),
 
 			ProjectModel: projectModel,
+
+			ModelPool: modelPool,
+
+			ModelSelection: runtimeclient.ModelSelection{Mode: task.ModelSelection.Mode, ServiceID: task.ModelSelection.ServiceID},
 		},
 	)
 
@@ -3023,18 +3350,24 @@ func (s *TaskService) Resume(
 				response.Continuation,
 			)
 
-		if err = s.tasks.SuspendTask(
+		var assistantMessage *repository.AssistantMessageWrite
+		if task.ConversationID != nil {
+			assistantMessage = &repository.AssistantMessageWrite{
+				UserID: uid, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: runtimeStatus, RequestID: task.RequestID,
+				Metadata: map[string]any{
+					"taskId": task.ID, "runtimePhase": "suspended", "status": runtimeStatus,
+				},
+			}
+		}
+
+		if err = s.suspendTaskWithAssistant(
 			ctx,
-			uid,
-			task.ID,
-			runtimeStatus,
-			response.Answer,
-			continuation,
-			response.SelectedAgents,
-			response.Trace,
-			response.DAG,
-			response.ElapsedMS,
-			response.EstimatedCost,
+			repository.TaskSuspensionWrite{
+				UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(task.ConversationID), Status: runtimeStatus, Result: response.Answer, Continuation: continuation,
+				Selected: response.SelectedAgents, Trace: response.Trace, DAG: response.DAG,
+				LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+			},
+			assistantMessage,
 		); err != nil {
 			if errors.Is(
 				err,
@@ -3074,26 +3407,6 @@ func (s *TaskService) Resume(
 			task = refreshed
 		}
 
-		if task.ConversationID != nil {
-			_, _ =
-				s.messages.CreateMessage(
-					ctx,
-					uid,
-					*task.ConversationID,
-					"assistant",
-					response.Answer,
-					runtimeStatus,
-					task.RequestID,
-					map[string]any{
-						"taskId": task.ID,
-
-						"runtimePhase": "suspended",
-
-						"status": runtimeStatus,
-					},
-				)
-		}
-
 		return buildRunTaskResult(
 			task,
 			response,
@@ -3130,16 +3443,32 @@ func (s *TaskService) Resume(
 	// 11. RUNNING -> COMPLETED
 	//
 
-	if err = s.tasks.CompleteTask(
+	var assistantMessage *repository.AssistantMessageWrite
+	if task.ConversationID != nil {
+		assistantMessage = &repository.AssistantMessageWrite{
+			UserID: uid, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: task.RequestID,
+			Metadata: map[string]any{
+				"taskId":         task.ID,
+				"runtimePhase":   "resume_completed",
+				"trace":          response.Trace,
+				"dag":            response.DAG,
+				"selectedAgents": response.SelectedAgents,
+				"taskProfile":    response.TaskProfile,
+				"observability":  response.Observability,
+				"scorecard":      response.Scorecard,
+				"agentFeedback":  response.AgentFeedback,
+				"citations":      normalizeRuntimeCitations(response.Citations),
+			},
+		}
+	}
+
+	if err = s.completeTaskWithAssistant(
 		ctx,
-		uid,
-		task.ID,
-		response.Answer,
-		response.SelectedAgents,
-		response.Trace,
-		response.DAG,
-		response.ElapsedMS,
-		response.EstimatedCost,
+		repository.TaskCompletionWrite{
+			UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(task.ConversationID), Result: response.Answer, Selected: response.SelectedAgents,
+			Trace: response.Trace, DAG: response.DAG, LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+		},
+		assistantMessage,
 	); err != nil {
 		if errors.Is(
 			err,
@@ -3162,47 +3491,7 @@ func (s *TaskService) Resume(
 			task.RequestID,
 			response.AgentFeedback,
 		); err != nil {
-		return nil, err
-	}
-
-	// =====================================================
-	// 13. Assistant Message
-	// =====================================================
-
-	if task.ConversationID != nil {
-		_, _ =
-			s.messages.CreateMessage(
-				ctx,
-				uid,
-				*task.ConversationID,
-				"assistant",
-				response.Answer,
-				"COMPLETED",
-				task.RequestID,
-				map[string]any{
-					"taskId": task.ID,
-
-					"runtimePhase": "resume_completed",
-
-					"trace": response.Trace,
-
-					"dag": response.DAG,
-
-					"selectedAgents": response.SelectedAgents,
-
-					"taskProfile": response.TaskProfile,
-
-					"observability": response.Observability,
-
-					"scorecard": response.Scorecard,
-
-					"agentFeedback": response.AgentFeedback,
-
-					"citations": normalizeRuntimeCitations(
-						response.Citations,
-					),
-				},
-			)
+		log.Printf("agent feedback persistence failed after resumed task finalization: %v", err)
 	}
 
 	// =====================================================

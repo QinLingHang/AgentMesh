@@ -109,6 +109,8 @@ function ConversationRow({
     >
       <button
         className="session-item"
+        data-testid={`conversation-item-${conversation.id}`}
+        data-conversation-id={conversation.id}
         onClick={onOpen}
         type="button"
       >
@@ -724,6 +726,7 @@ export function SessionRail({
 
       <button
         className="session-create-button"
+        data-testid="conversation-create"
         onClick={() =>
           void create()
         }

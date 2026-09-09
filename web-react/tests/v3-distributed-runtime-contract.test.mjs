@@ -16,8 +16,8 @@ test("V3 task page exposes multi-node topology without internal endpoints", () =
   assert.match(tasks, /getRuntimeTopology/);
   assert.match(tasks, /DistributedRuntimeOverview/);
   assert.match(overview, /多节点执行拓扑/);
-  assert.match(overview, /Dispatcher/);
-  assert.match(overview, /Runtime Worker 调度状态/);
+  assert.match(overview, /调度器/);
+  assert.match(overview, /工作节点调度状态/);
   assert.doesNotMatch(overview, /\.endpoint\b/);
   assert.match(api, /\/api\/runtime\/topology/);
   assert.match(types, /RuntimeTopologySnapshot/);
@@ -62,6 +62,6 @@ test("V3 dedicated browser acceptance runner is wired", () => {
   assert.match(e2e, /V3 Deterministic Distributed Runtime Browser E2E: PASS/);
   assert.match(e2e, /node-a/);
   assert.match(e2e, /node-b/);
-  assert.match(e2e, /Epoch 8/);
+  assert.match(e2e, /调度纪元 8/);
   assert.match(e2e, /OFFLINE/);
 });

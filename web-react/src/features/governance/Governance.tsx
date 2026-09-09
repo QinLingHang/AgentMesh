@@ -61,8 +61,25 @@ export function Governance({ projects }: { projects: Project[] }) {
   const [auditOpen, setAuditOpen] = useState(false);
 
   useEffect(() => {
-    if (!projectId || projects.some((project) => project.id === projectId)) return;
-    setProjectId(projects[0]?.id ?? null);
+    // Governance can mount before App finishes the async /api/projects restore
+    // after F5. Reconcile the local selection whenever the project list changes
+    // instead of treating a null initial selection as permanently valid.
+    if (projects.length === 0) {
+      if (projectId !== null) {
+        setProjectId(null);
+      }
+      return;
+    }
+
+    const currentId = projectId == null ? null : Number(projectId);
+    const currentStillExists =
+      currentId != null &&
+      projects.some((project) => Number(project.id) === currentId);
+
+    if (!currentStillExists) {
+      const firstProjectId = Number(projects[0].id);
+      setProjectId(firstProjectId);
+    }
   }, [projects, projectId]);
 
   useEffect(() => {
@@ -72,7 +89,13 @@ export function Governance({ projects }: { projects: Project[] }) {
   }, [projectId]);
 
   const canAdmin = data?.role === "OWNER" || data?.role === "ADMIN";
-  const selectedProject = useMemo(() => projects.find((project) => project.id === projectId) ?? null, [projects, projectId]);
+  const selectedProject = useMemo(
+    () =>
+      projectId == null
+        ? null
+        : projects.find((project) => Number(project.id) === Number(projectId)) ?? null,
+    [projects, projectId],
+  );
   const selectedOrganization = useMemo(
     () => organizations.find((organization) => organization.id === organizationId) ?? null,
     [organizations, organizationId],
@@ -226,7 +249,11 @@ export function Governance({ projects }: { projects: Project[] }) {
         </div>
         <label className="calm-project-picker">
           <span>当前项目</span>
-          <select value={projectId ?? ""} onChange={(e) => setProjectId(Number(e.target.value) || null)}>
+          <select
+            data-testid="governance-project-picker"
+            value={projectId ?? ""}
+            onChange={(e) => setProjectId(Number(e.target.value) || null)}
+          >
             {projects.map((project) => (
               <option key={project.id} value={project.id}>
                 {project.name}

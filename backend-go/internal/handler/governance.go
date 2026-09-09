@@ -251,6 +251,61 @@ func (h *GovernanceHandler) DeleteUserModelProvider(c *gin.Context) {
 	ok(c, nil)
 }
 
+func (h *GovernanceHandler) ListUserModelServices(c *gin.Context) {
+	items, err := h.s.ListUserModelServices(c, uid(c))
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, items)
+}
+
+func (h *GovernanceHandler) CreateUserModelService(c *gin.Context) {
+	var req model.UserModelServiceInput
+	if c.ShouldBindJSON(&req) != nil {
+		fail(c, http.StatusBadRequest, 40104, "模型服务参数不合法")
+		return
+	}
+	item, err := h.s.CreateUserModelService(c, uid(c), req)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, item)
+}
+
+func (h *GovernanceHandler) UpdateUserModelService(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("serviceId"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(c, http.StatusBadRequest, 40105, "模型服务 ID 不合法")
+		return
+	}
+	var req model.UserModelServiceInput
+	if c.ShouldBindJSON(&req) != nil {
+		fail(c, http.StatusBadRequest, 40104, "模型服务参数不合法")
+		return
+	}
+	item, err := h.s.UpdateUserModelService(c, uid(c), id, req)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, item)
+}
+
+func (h *GovernanceHandler) DeleteUserModelService(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("serviceId"), 10, 64)
+	if err != nil || id <= 0 {
+		fail(c, http.StatusBadRequest, 40105, "模型服务 ID 不合法")
+		return
+	}
+	if err := h.s.DeleteUserModelService(c, uid(c), id); err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, nil)
+}
+
 func parseOptionalTime(c *gin.Context, key string) (*time.Time, bool) {
 	raw := c.Query(key)
 	if raw == "" {

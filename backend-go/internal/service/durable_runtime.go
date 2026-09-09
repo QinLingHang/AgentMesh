@@ -217,9 +217,11 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	}
 
 	if s.taskService.governance != nil {
-		if _, modelErr := s.taskService.resolveRequestModelRuntime(ctx, uid, projectRuntimeContext); modelErr != nil {
+		_, _, normalizedSelection, modelErr := s.taskService.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, in.ModelSelection)
+		if modelErr != nil {
 			return nil, modelErr
 		}
+		in.ModelSelection = normalizedSelection
 	}
 
 	snapshot, err := s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
@@ -268,7 +270,8 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
 		Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		Constraints: in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
+		ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+		Constraints:    in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
 	}
 	requestJSON, err := json.Marshal(req)
 	if err != nil {
@@ -279,7 +282,8 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID,
 		TaskText: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		DeliveryMode: "durable",
+		ModelSelection: in.ModelSelection,
+		DeliveryMode:   "durable",
 	}, in.Constraints, requestJSON, uuid.NewString(), time.Now().UTC().Add(s.cfg.JobDeadline), s.cfg.MaxAttempts)
 	if err != nil {
 		return nil, err
@@ -389,6 +393,31 @@ func (s *DurableRuntimeService) dispatchOne(
 		return
 	}
 
+	// Rehydrate recent conversation context at dispatch time instead of
+	// persisting it inside the durable queue payload.  The queued user message
+	// has already been stored in MySQL, so exclude that current request from
+	// history to avoid duplicating req.Task.
+	if req.ConversationID != nil {
+		recent, historyErr := s.taskService.messages.ListMessages(
+			ctx, job.UserID, *req.ConversationID, 12,
+		)
+		if historyErr != nil {
+			_ = s.repo.FailRuntimeJob(ctx, job.ID, "conversation history unavailable")
+			return
+		}
+		filtered := recent[:0]
+		for _, message := range recent {
+			isCurrent := message.RequestID != nil &&
+				*message.RequestID == req.RequestID &&
+				strings.EqualFold(strings.TrimSpace(message.Role), "user")
+			if isCurrent {
+				continue
+			}
+			filtered = append(filtered, message)
+		}
+		req.History = boundedInteractiveHistory(filtered)
+	}
+
 	if len(req.AttachmentIDs) > 0 {
 		if req.ConversationID == nil || s.taskService.attachments == nil {
 			_ = s.repo.FailRuntimeJob(ctx, job.ID, "runtime attachments unavailable")
@@ -424,12 +453,15 @@ func (s *DurableRuntimeService) dispatchOne(
 	}
 	agents, tools, mcps = filterProjectRuntimeResources(projectContext, agents, tools, mcps)
 	if s.taskService.governance != nil {
-		projectModel, modelErr := s.taskService.resolveRequestModelRuntime(ctx, job.UserID, projectContext)
+		selection := model.ModelSelection{Mode: req.ModelSelection.Mode, ServiceID: req.ModelSelection.ServiceID}
+		modelPool, projectModel, normalizedSelection, modelErr := s.taskService.resolveRequestModelRuntimePool(ctx, job.UserID, projectContext, selection)
 		if modelErr != nil {
 			_ = s.repo.FailRuntimeJob(ctx, job.ID, "model provider unavailable")
 			return
 		}
 		req.ProjectModel = projectModel
+		req.ModelPool = modelPool
+		req.ModelSelection = runtimeclient.ModelSelection{Mode: normalizedSelection.Mode, ServiceID: normalizedSelection.ServiceID}
 	}
 	if len(agents) == 0 {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "project runtime has no enabled agents")
@@ -582,20 +614,26 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 			return errors.New("runtime suspended without continuation")
 		}
 		continuation := runtimeContinuationToModel(response.Continuation)
-		if err := s.taskService.tasks.SuspendTask(ctx, job.UserID, job.TaskID, runtimeStatus, response.Answer, continuation,
-			response.SelectedAgents, response.Trace, response.DAG, response.ElapsedMS, response.EstimatedCost); err != nil {
-			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime suspension")
-			return err
-		}
+		var assistantMessage *repository.AssistantMessageWrite
 		if task.ConversationID != nil {
-			_, _ = s.taskService.messages.CreateMessage(ctx, job.UserID, *task.ConversationID, "assistant", response.Answer,
-				runtimeStatus, task.RequestID, map[string]any{
+			assistantMessage = &repository.AssistantMessageWrite{
+				UserID: job.UserID, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: runtimeStatus, RequestID: task.RequestID,
+				Metadata: map[string]any{
 					"taskId": task.ID, "runtimePhase": "durable_suspended", "deliveryMode": "durable",
 					"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
 					"taskProfile": response.TaskProfile, "observability": response.Observability,
 					"scorecard": response.Scorecard, "agentFeedback": response.AgentFeedback,
 					"citations": normalizeRuntimeCitations(response.Citations),
-				})
+				},
+			}
+		}
+		if err := s.taskService.suspendTaskWithAssistant(ctx, repository.TaskSuspensionWrite{
+			UserID: job.UserID, TaskID: job.TaskID, ConversationID: conversationIDValue(task.ConversationID), Status: runtimeStatus, Result: response.Answer, Continuation: continuation,
+			Selected: response.SelectedAgents, Trace: response.Trace, DAG: response.DAG,
+			LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+		}, assistantMessage); err != nil {
+			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime suspension and assistant history")
+			return err
 		}
 		return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
 	}
@@ -603,26 +641,31 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	if runtimeStatus != "COMPLETED" {
 		return s.repo.FailRuntimeJob(ctx, jobID, "unsupported runtime status")
 	}
-	if err := s.taskService.tasks.CompleteTask(ctx, job.UserID, job.TaskID, response.Answer, response.SelectedAgents,
-		response.Trace, response.DAG, response.ElapsedMS, response.EstimatedCost); err != nil {
-		_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime completion")
-		return err
-	}
-	if err := s.taskService.agents.RecordAgentFeedback(ctx, job.UserID, task.RequestID, response.AgentFeedback); err != nil {
-		// Evaluation feedback persistence is important but cannot turn an already
-		// completed user task into an execution replay.
-		log.Printf("p8 agent feedback persistence failed: %v", err)
-	}
+	var assistantMessage *repository.AssistantMessageWrite
 	if task.ConversationID != nil {
-		_, _ = s.taskService.messages.CreateMessage(ctx, job.UserID, *task.ConversationID, "assistant", response.Answer,
-			"COMPLETED", task.RequestID, map[string]any{
+		assistantMessage = &repository.AssistantMessageWrite{
+			UserID: job.UserID, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: task.RequestID,
+			Metadata: map[string]any{
 				"taskId": task.ID, "runtimePhase": "durable_completed", "deliveryMode": "durable",
 				"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
 				"taskProfile": response.TaskProfile, "scheduler": task.Scheduler, "planner": task.Planner,
 				"executionMode": task.ExecutionMode, "synthesisMode": task.SynthesisMode,
 				"observability": response.Observability, "scorecard": response.Scorecard,
 				"agentFeedback": response.AgentFeedback, "citations": normalizeRuntimeCitations(response.Citations),
-			})
+			},
+		}
+	}
+	if err := s.taskService.completeTaskWithAssistant(ctx, repository.TaskCompletionWrite{
+		UserID: job.UserID, TaskID: job.TaskID, ConversationID: conversationIDValue(task.ConversationID), Result: response.Answer, Selected: response.SelectedAgents,
+		Trace: response.Trace, DAG: response.DAG, LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+	}, assistantMessage); err != nil {
+		_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime completion and assistant history")
+		return err
+	}
+	if err := s.taskService.agents.RecordAgentFeedback(ctx, job.UserID, task.RequestID, response.AgentFeedback); err != nil {
+		// Evaluation feedback persistence is important but cannot turn an already
+		// completed user task into an execution replay.
+		log.Printf("p8 agent feedback persistence failed: %v", err)
 	}
 	return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
 }

@@ -700,8 +700,8 @@ async function run() {
     // snapshot on the second topology request: node-a becomes OFFLINE and the
     // dispatcher epoch increases from 7 to 8.
     await waitFor(cdp, `document.body.innerText.includes("1 个节点在线")`, "node failover reflected in UI", 8000);
-    await waitFor(cdp, `document.body.innerText.includes("Epoch 8")`, "dispatcher failover epoch", 8000);
-    await waitFor(cdp, `document.body.innerText.includes("OFFLINE")`, "offline node status", 8000);
+    await waitFor(cdp, `document.body.innerText.includes("调度纪元 8")`, "dispatcher failover epoch", 8000);
+    await waitFor(cdp, `document.body.innerText.includes("离线")`, "offline node status", 8000);
 
     console.log("V3 Deterministic Distributed Runtime Browser E2E: PASS");
 

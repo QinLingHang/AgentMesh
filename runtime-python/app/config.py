@@ -80,6 +80,18 @@ class Settings(
     max_reschedule_attempts: int = 2
 
     # =====================================================
+    # Local Desktop Bridge
+    # =====================================================
+
+    # Disabled by default. The Desktop Bridge is a separate loopback-only
+    # process that enforces authorized local roots independently of the Agent.
+    desktop_bridge_enabled: bool = False
+    desktop_bridge_base_url: str = "http://127.0.0.1:9583"
+    desktop_bridge_token: str = ""
+    desktop_bridge_timeout_seconds: float = 8.0
+    desktop_max_tool_iterations: int = 20
+
+    # =====================================================
     # P8 Distributed Runtime Worker
     # =====================================================
 

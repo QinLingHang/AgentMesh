@@ -250,6 +250,25 @@ func ensureRuntimeSchema(
 	}
 
 	// =====================================================
+	// 4.1 Task-level model selection snapshot
+	// =====================================================
+
+	if err := ensureColumn(
+		ctx,
+		db,
+		"tasks",
+		"model_selection_json",
+		`
+		ALTER TABLE tasks
+		ADD COLUMN model_selection_json
+			JSON NULL
+			AFTER synthesis_mode
+		`,
+	); err != nil {
+		return err
+	}
+
+	// =====================================================
 	// 5. Runtime Continuation
 	//
 	// 只存在于：

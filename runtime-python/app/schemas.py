@@ -234,11 +234,22 @@ class RuntimeContinuation(
 class ProjectModelRuntime(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    service_id: int | None = Field(default=None, alias="serviceId")
+    service_name: str | None = Field(default=None, alias="serviceName")
     provider: str = "openai-compatible"
     base_url: str = Field(alias="baseUrl")
     model_name: str = Field(alias="modelName")
     vision_model_name: str | None = Field(default=None, alias="visionModelName")
     api_key: SecretStr = Field(alias="apiKey")
+    auto_route: bool = Field(default=True, alias="autoRoute")
+    is_default: bool = Field(default=False, alias="isDefault")
+
+
+class ModelSelection(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["auto", "manual"] = "auto"
+    service_id: int | None = Field(default=None, alias="serviceId")
 
 class RuntimeAttachment(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -265,6 +276,10 @@ class InteractiveStreamRequest(BaseModel):
     task: str = Field(min_length=1, max_length=20000)
     history: list[InteractiveMessage] = Field(default_factory=list, max_length=10)
     project_model: ProjectModelRuntime | None = Field(default=None, alias="projectModel")
+    model_pool: list[ProjectModelRuntime] = Field(default_factory=list, alias="modelPool", max_length=32)
+    model_selection: ModelSelection = Field(default_factory=ModelSelection, alias="modelSelection")
+    scheduler: Literal["fixed", "capability", "greedy", "adaptive"] = "adaptive"
+    constraints: TaskConstraints = Field(default_factory=TaskConstraints)
     attachments: list[RuntimeAttachment] = Field(default_factory=list, max_length=6)
 
 
@@ -293,9 +308,27 @@ class RuntimeRequest(
         alias="projectModel",
     )
 
+    model_pool: list[ProjectModelRuntime] = Field(
+        default_factory=list,
+        alias="modelPool",
+        max_length=32,
+    )
+
+    model_selection: ModelSelection = Field(
+        default_factory=ModelSelection,
+        alias="modelSelection",
+    )
+
     task: str = Field(
         min_length=1,
         max_length=20000,
+    )
+
+    # Recent authoritative conversation history supplied by the Go control
+    # plane.  It spans both interactive-stream and full-runtime turns.
+    history: list[InteractiveMessage] = Field(
+        default_factory=list,
+        max_length=12,
     )
 
     scheduler: Literal[

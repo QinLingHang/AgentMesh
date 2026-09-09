@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   listAgents,
   listConversations,
@@ -8,8 +8,8 @@ import {
   listProjects,
   listTasks,
   listTools,
+  seedDesktopTools,
   deleteTask,
-  createConversation,
   cancelTask,
   createProject,
   updateProject,
@@ -39,7 +39,11 @@ import type { IconName } from "./components/common/Icon";
 import { Auth } from "./features/auth/Auth";
 import { Workspace } from "./features/workspace/Workspace";
 import type { LatestRunState } from "./features/workspace/Workspace";
-import { AppErrorBoundary, PanelLoading } from "./components/common/AppErrorBoundary";
+import {
+  AppErrorBoundary,
+  PanelLoading,
+} from "./components/common/AppErrorBoundary";
+
 import "./styles/index.css";
 import "./styles/ui-v3.css";
 import "./styles/theme-v4.css";
@@ -50,22 +54,51 @@ import "./styles/theme-v4-5-user-byok.css";
 import "./styles/theme-v4-6-chinese-light.css";
 
 const Agents = lazy(() =>
-  import("./features/agents/Agents").then((module) => ({ default: module.Agents })),
+  import("./features/agents/Agents").then((module) => ({
+    default: module.Agents,
+  })),
 );
+
 const Extensions = lazy(() =>
-  import("./features/extensions/Extensions").then((module) => ({ default: module.Extensions })),
+  import("./features/extensions/Extensions").then((module) => ({
+    default: module.Extensions,
+  })),
 );
+
 const Tasks = lazy(() =>
-  import("./features/tasks/Tasks").then((module) => ({ default: module.Tasks })),
+  import("./features/tasks/Tasks").then((module) => ({
+    default: module.Tasks,
+  })),
 );
+
 const KnowledgeCenter = lazy(() =>
-  import("./features/knowledge/KnowledgeCenter").then((module) => ({ default: module.KnowledgeCenter })),
+  import("./features/knowledge/KnowledgeCenter").then((module) => ({
+    default: module.KnowledgeCenter,
+  })),
 );
+
 const Governance = lazy(() =>
-  import("./features/governance/Governance").then((module) => ({ default: module.Governance })),
+  import("./features/governance/Governance").then((module) => ({
+    default: module.Governance,
+  })),
 );
+
 const ModelSettings = lazy(() =>
-  import("./features/model-settings/ModelSettings").then((module) => ({ default: module.ModelSettings })),
+  import("./features/model-settings/ModelSettings").then((module) => ({
+    default: module.ModelSettings,
+  })),
+);
+
+const Ecosystem = lazy(() =>
+  import("./features/ecosystem/Ecosystem").then((module) => ({
+    default: module.Ecosystem,
+  })),
+);
+
+const Profile = lazy(() =>
+  import("./features/profile/Profile").then((module) => ({
+    default: module.Profile,
+  })),
 );
 
 type Tab =
@@ -75,7 +108,95 @@ type Tab =
   | "extensions"
   | "tasks"
   | "model-settings"
-  | "governance";
+  | "governance"
+  | "ecosystem"
+  | "profile";
+
+const VALID_TABS: readonly Tab[] = [
+  "workspace",
+  "agents",
+  "knowledge",
+  "extensions",
+  "tasks",
+  "model-settings",
+  "governance",
+  "ecosystem",
+  "profile",
+];
+
+function isTab(value: string | null): value is Tab {
+  return value != null && VALID_TABS.includes(value as Tab);
+}
+
+/**
+ * 从 URL 中恢复当前一级页面。
+ *
+ * 示例：
+ * /                         -> 工作台
+ * /?page=agents             -> 智能体
+ * /?page=knowledge          -> 知识库
+ * /?page=ecosystem          -> 生态中心
+ *
+ * workspace 是默认页面，所以 URL 中不需要显式写 page=workspace。
+ */
+function readTabFromLocation(): Tab {
+  const params = new URLSearchParams(window.location.search);
+  const page = params.get("page");
+
+  return isTab(page) ? page : "workspace";
+}
+
+/**
+ * 更新当前页面对应的 URL。
+ *
+ * 不引入 React Router，继续保持当前项目的轻量架构。
+ * 使用 History API 的好处：
+ * 1. F5 可以恢复当前页面
+ * 2. 浏览器前进/后退可以正常切换页面
+ * 3. 不需要后端增加 SPA 路由配置
+ */
+function writeTabToLocation(
+  tab: Tab,
+  options?: {
+    replace?: boolean;
+  },
+) {
+  const url = new URL(window.location.href);
+
+  if (tab === "workspace") {
+    url.searchParams.delete("page");
+  } else {
+    url.searchParams.set("page", tab);
+  }
+
+  /**
+   * section 是生态中心内部 Tab 使用的参数。
+   *
+   * 离开生态中心时删除它，避免出现：
+   *
+   * ?page=agents&section=api
+   */
+  if (tab !== "ecosystem") {
+    url.searchParams.delete("section");
+  }
+
+  const nextUrl = `${url.pathname}${url.search}${url.hash}`;
+
+  if (options?.replace) {
+    window.history.replaceState(
+      { page: tab },
+      "",
+      nextUrl,
+    );
+    return;
+  }
+
+  window.history.pushState(
+    { page: tab },
+    "",
+    nextUrl,
+  );
+}
 
 export default function App() {
   const [user, setUser] =
@@ -86,16 +207,35 @@ export default function App() {
   const [
     sessionReady,
     setSessionReady,
-  ] =
-    useState(false);
+  ] = useState(false);
 
-  const [bootError, setBootError] = useState("");
-  const [shellError, setShellError] = useState("");
-  const [sessionAttempt, setSessionAttempt] = useState(0);
+  const [
+    bootError,
+    setBootError,
+  ] = useState("");
 
+  const [
+    shellError,
+    setShellError,
+  ] = useState("");
+
+  const [
+    sessionAttempt,
+    setSessionAttempt,
+  ] = useState(0);
+
+  /**
+   * 以前固定写：
+   *
+   * useState<Tab>("workspace")
+   *
+   * 因此每次 F5 都会回到工作台。
+   *
+   * 现在从 URL 初始化。
+   */
   const [tab, setTab] =
-    useState<Tab>(
-      "workspace",
+    useState<Tab>(() =>
+      readTabFromLocation(),
     );
 
   const [
@@ -123,15 +263,45 @@ export default function App() {
     );
 
   const [
-    messages,
-    setMessages,
+    messageProjection,
+    setMessageProjection,
   ] =
-    useState<Message[]>(
+    useState<{
+      conversationId: number | null;
+      items: Message[];
+    }>({
+      conversationId: null,
+      items: [],
+    });
+
+  const [
+    messageLoadFailure,
+    setMessageLoadFailure,
+  ] = useState<{
+    conversationId: number;
+    message: string;
+  } | null>(null);
+
+  // Conversation list loading is also projection-only. A late list request
+  // must never override a newer explicit conversation mutation/selection.
+  const conversationLoadSequenceRef = useRef(0);
+
+  // Conversation message loading is scoped by conversation id. The visible
+  // message projection carries its owning conversation id atomically, so a
+  // render can never mistake A's rows for B's rows while a switch is loading.
+  // Older requests are ignored and hidden/background conversations are never
+  // allowed to project their rows into the active Workspace.
+  const messageLoadSequenceRef = useRef(0);
+  const currentConversationIdRef = useRef<number | null>(current?.id ?? null);
+  currentConversationIdRef.current = current?.id ?? null;
+
+  const [
+    agents,
+    setAgents,
+  ] =
+    useState<Agent[]>(
       [],
     );
-
-  const [agents, setAgents] =
-    useState<Agent[]>([]);
 
   const [
     plugins,
@@ -141,11 +311,21 @@ export default function App() {
       PluginInfo[]
     >([]);
 
-  const [tasks, setTasks] =
-    useState<Task[]>([]);
+  const [
+    tasks,
+    setTasks,
+  ] =
+    useState<Task[]>(
+      [],
+    );
 
-  const [tools, setTools] =
-    useState<Tool[]>([]);
+  const [
+    tools,
+    setTools,
+  ] =
+    useState<Tool[]>(
+      [],
+    );
 
   const [
     mcpServers,
@@ -163,10 +343,110 @@ export default function App() {
       null,
     );
 
+  /**
+   * 一级页面统一导航入口。
+   *
+   * 后面不要再直接 setTab("xxx")。
+   * 所有正常页面跳转都通过这里，
+   * 这样 React 状态和浏览器 URL 永远保持一致。
+   */
+  const navigateToTab = (
+    nextTab: Tab,
+  ) => {
+    setShellError("");
+
+    if (nextTab === tab) {
+      return;
+    }
+
+    writeTabToLocation(
+      nextTab,
+    );
+
+    setTab(nextTab);
+  };
+
+  /**
+   * 支持浏览器：
+   *
+   * ← 后退
+   * → 前进
+   *
+   * History API 改变后，浏览器触发 popstate，
+   * 我们重新从 URL 恢复当前页面。
+   */
+  useEffect(() => {
+    const handlePopState =
+      () => {
+        setTab(
+          readTabFromLocation(),
+        );
+      };
+
+    window.addEventListener(
+      "popstate",
+      handlePopState,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "popstate",
+        handlePopState,
+      );
+    };
+  }, []);
+
+  /**
+   * 如果有人手动输入非法页面，例如：
+   *
+   * ?page=abcdef
+   *
+   * 页面会安全回到工作台，
+   * 同时把非法参数从 URL 中清理掉。
+   */
+  useEffect(() => {
+    const params =
+      new URLSearchParams(
+        window.location.search,
+      );
+
+    const page =
+      params.get("page");
+
+    if (
+      page != null &&
+      !isTab(page)
+    ) {
+      writeTabToLocation(
+        "workspace",
+        {
+          replace: true,
+        },
+      );
+
+      setTab(
+        "workspace",
+      );
+    }
+  }, []);
+
   const loadConversations =
     async () => {
+      const sequence =
+        ++conversationLoadSequenceRef.current;
+
       const result =
         await listConversations();
+
+      // Ignore an older projection that completed after a newer refresh was
+      // already started. This is critical after create/select mutations: an
+      // older list snapshot must not write A back over an authoritative B.
+      if (
+        sequence !==
+        conversationLoadSequenceRef.current
+      ) {
+        return;
+      }
 
       setConversations(
         result,
@@ -174,22 +454,27 @@ export default function App() {
 
       setCurrent(
         (previous) => {
-          if (previous) {
-            const refreshed =
-              result.find(
-                (item) =>
-                  item.id ===
-                  previous.id,
-              );
-
-            if (refreshed) {
-              return refreshed;
-            }
+          if (!previous) {
+            return (
+              result[0] ??
+              null
+            );
           }
 
+          const refreshed =
+            result.find(
+              (item) =>
+                item.id ===
+                previous.id,
+            );
+
+          // Explicit user selection / successful mutation is authoritative.
+          // If a projection is temporarily stale and does not contain the
+          // selected conversation yet, preserve the selected conversation
+          // instead of falling back to result[0] and jumping to another row.
           return (
-            result[0] ??
-            null
+            refreshed ??
+            previous
           );
         },
       );
@@ -208,18 +493,74 @@ export default function App() {
     ) => {
       const id =
         conversationId ??
-        current?.id;
+        currentConversationIdRef.current ??
+        undefined;
 
       if (!id) {
-        setMessages([]);
+        ++messageLoadSequenceRef.current;
+        setMessageProjection({
+          conversationId: null,
+          items: [],
+        });
+        setMessageLoadFailure(null);
         return;
       }
 
-      setMessages(
-        await listMessages(
-          id,
-        ),
+      // A background conversation may finish work after the user navigated
+      // elsewhere. Fetching its history is unnecessary for the visible
+      // projection; the normal conversation-switch effect will load it when
+      // that conversation becomes active again. More importantly, do not let
+      // a hidden refresh invalidate or replace the active conversation load.
+      if (
+        currentConversationIdRef.current !== id
+      ) {
+        return;
+      }
+
+      const sequence =
+        ++messageLoadSequenceRef.current;
+
+      setMessageLoadFailure(
+        (failure) =>
+          failure?.conversationId === id
+            ? null
+            : failure,
       );
+
+      try {
+        const loaded =
+          await listMessages(
+            id,
+          );
+
+        if (
+          sequence !== messageLoadSequenceRef.current ||
+          currentConversationIdRef.current !== id
+        ) {
+          return;
+        }
+
+        setMessageProjection({
+          conversationId: id,
+          items: loaded,
+        });
+        setMessageLoadFailure(null);
+      } catch (error) {
+        if (
+          sequence === messageLoadSequenceRef.current &&
+          currentConversationIdRef.current === id
+        ) {
+          setMessageLoadFailure({
+            conversationId: id,
+            message: friendlyApiError(
+              error,
+              "会话记录加载失败，请稍后重试。",
+            ),
+          });
+        }
+
+        throw error;
+      }
     };
 
   const handleRenameConversation =
@@ -276,7 +617,8 @@ export default function App() {
             (active) =>
               active?.id ===
               conversationId
-                ? next[0] ?? null
+                ? next[0] ??
+                  null
                 : active,
           );
 
@@ -294,26 +636,6 @@ export default function App() {
 
       await loadProjects();
     };
-
-  const handleStartNewTask = async () => {
-    try {
-      setShellError("");
-      setTab("workspace");
-      const conversation = await createConversation("新会话");
-      setConversations((items) => [conversation, ...items.filter((item) => item.id !== conversation.id)]);
-      setCurrent(conversation);
-      setMessages([]);
-      setLatestRunState(null);
-      await Promise.allSettled([loadConversations(), loadProjects()]);
-    } catch (error) {
-      setShellError(friendlyApiError(error, "创建新任务失败，请稍后重试。"));
-    }
-  };
-
-  const handleOpenPersonalWorkspace = () => {
-    setShellError("");
-    setTab("workspace");
-  };
 
   const handleCreateProject =
     async (
@@ -384,9 +706,14 @@ export default function App() {
   const handleMoveConversation =
     async (
       conversationId: number,
-      projectId: number | null,
+      projectId:
+        | number
+        | null,
     ) => {
-      if (projectId == null) {
+      if (
+        projectId ==
+        null
+      ) {
         await removeConversationFromProject(
           conversationId,
         );
@@ -430,7 +757,9 @@ export default function App() {
       );
 
       setTasks(
-        (currentTasks) =>
+        (
+          currentTasks,
+        ) =>
           currentTasks.filter(
             (task) =>
               task.id !==
@@ -440,8 +769,8 @@ export default function App() {
 
       setLatestRunState(
         (currentRun) =>
-          currentRun?.result
-            .task.id ===
+          currentRun
+            ?.result.task.id ===
           taskId
             ? null
             : currentRun,
@@ -458,10 +787,13 @@ export default function App() {
         );
 
       setTasks(
-        (currentTasks) =>
+        (
+          currentTasks,
+        ) =>
           currentTasks.map(
             (task) =>
-              task.id === taskId
+              task.id ===
+              taskId
                 ? updated
                 : task,
           ),
@@ -469,7 +801,9 @@ export default function App() {
 
       setLatestRunState(
         (currentRun) =>
-          currentRun?.result.task.id === taskId
+          currentRun
+            ?.result.task.id ===
+          taskId
             ? null
             : currentRun,
       );
@@ -482,6 +816,16 @@ export default function App() {
       );
     };
 
+  const bootstrapTools =
+    async () => {
+      // Desktop Agent is a built-in AgentMesh capability. Provision/repair the
+      // official local.* contract once when the authenticated shell starts,
+      // instead of requiring the user to click “接入本机”. SeedDesktop is
+      // idempotent and preserves each tool's enabled/disabled choice.
+      await seedDesktopTools();
+      await loadTools();
+    };
+
   const loadMCPServers =
     async () => {
       setMCPServers(
@@ -491,23 +835,46 @@ export default function App() {
 
   useEffect(
     () => {
-      setSessionReady(false);
-      setBootError("");
+      setSessionReady(
+        false,
+      );
+
+      setBootError(
+        "",
+      );
 
       me()
-        .then(setUser)
-        .catch((error) => {
-          if (error instanceof ApiError && error.status === 401) {
-            return;
-          }
+        .then(
+          setUser,
+        )
+        .catch(
+          (error) => {
+            if (
+              error instanceof
+                ApiError &&
+              error.status ===
+                401
+            ) {
+              return;
+            }
 
-          setBootError(
-            friendlyApiError(error, "无法恢复登录状态。"),
-          );
-        })
-        .finally(() => setSessionReady(true));
+            setBootError(
+              friendlyApiError(
+                error,
+                "无法恢复登录状态。",
+              ),
+            );
+          },
+        )
+        .finally(() =>
+          setSessionReady(
+            true,
+          ),
+        );
     },
-    [sessionAttempt],
+    [
+      sessionAttempt,
+    ],
   );
 
   useEffect(
@@ -516,7 +883,9 @@ export default function App() {
         return;
       }
 
-      setShellError("");
+      setShellError(
+        "",
+      );
 
       Promise.all([
         loadConversations(),
@@ -524,16 +893,26 @@ export default function App() {
         loadAgents(),
         loadPlugins(),
         loadTasks(),
-        loadTools(),
+        bootstrapTools(),
         loadMCPServers(),
-      ]).catch((error) => {
-        console.error(error);
-        setShellError(
-          friendlyApiError(error, "工作台资源加载失败，请重试。"),
-        );
-      });
+      ]).catch(
+        (error) => {
+          console.error(
+            error,
+          );
+
+          setShellError(
+            friendlyApiError(
+              error,
+              "工作台资源加载失败，请重试。",
+            ),
+          );
+        },
+      );
     },
-    [user],
+    [
+      user,
+    ],
   );
 
   useEffect(
@@ -544,10 +923,36 @@ export default function App() {
         console.error,
       );
     },
-    [current?.id],
+    [
+      current?.id,
+    ],
   );
 
-  if (!sessionReady) {
+  const visibleMessages =
+    current != null &&
+    messageProjection.conversationId === current.id
+      ? messageProjection.items
+      : [];
+
+  const messagesLoadError =
+    current != null &&
+    messageProjection.conversationId !== current.id &&
+    messageLoadFailure?.conversationId === current.id
+      ? messageLoadFailure.message
+      : "";
+
+  // A current conversation whose authoritative message projection has not
+  // arrived yet is loading synchronously from the very first render after a
+  // switch. This prevents both cross-conversation row leakage and the false
+  // "empty conversation" flash that used to appear during async refetch.
+  const messagesLoading =
+    current != null &&
+    messageProjection.conversationId !== current.id &&
+    messagesLoadError === "";
+
+  if (
+    !sessionReady
+  ) {
     return (
       <div className="session-restore-page">
         <div className="session-restore-card">
@@ -569,18 +974,38 @@ export default function App() {
     );
   }
 
-  if (bootError && !user) {
+  if (
+    bootError &&
+    !user
+  ) {
     return (
       <div className="session-restore-page">
         <div className="session-restore-card">
-          <span className="session-restore-logo">AM</span>
+          <span className="session-restore-logo">
+            AM
+          </span>
+
           <div>
-            <strong>暂时无法连接 AgentMesh</strong>
-            <small>{bootError}</small>
+            <strong>
+              暂时无法连接 AgentMesh
+            </strong>
+
+            <small>
+              {
+                bootError
+              }
+            </small>
+
             <button
               className="session-restore-retry"
               type="button"
-              onClick={() => setSessionAttempt((value) => value + 1)}
+              onClick={() =>
+                setSessionAttempt(
+                  (value) =>
+                    value +
+                    1,
+                )
+              }
             >
               重新连接
             </button>
@@ -593,9 +1018,16 @@ export default function App() {
   if (!user) {
     return (
       <Auth
-        onDone={(nextUser) => {
-          setUser(nextUser);
-          setBootError("");
+        onDone={(
+          nextUser,
+        ) => {
+          setUser(
+            nextUser,
+          );
+
+          setBootError(
+            "",
+          );
         }}
       />
     );
@@ -627,6 +1059,11 @@ export default function App() {
       icon: "extensions",
     },
     {
+      id: "ecosystem",
+      label: "生态中心",
+      icon: "sparkles",
+    },
+    {
       id: "tasks",
       label: "任务记录",
       icon: "tasks",
@@ -644,7 +1081,9 @@ export default function App() {
   ];
 
   return (
-    <div className={`app-shell app-shell-v3 tab-${tab}`}>
+    <div
+      className={`app-shell app-shell-v3 tab-${tab}`}
+    >
       <aside className="global-sidebar">
         <div>
           <div className="brand">
@@ -663,28 +1102,6 @@ export default function App() {
             </div>
           </div>
 
-          <button
-            type="button"
-            className="workspace-switcher"
-            onClick={handleOpenPersonalWorkspace}
-          >
-            <span className="workspace-switcher-mark">P</span>
-            <span>
-              <strong>个人工作空间</strong>
-              <small>个人任务与项目工作台</small>
-            </span>
-            <Icon name="chevron" size={14} />
-          </button>
-
-          <button
-            type="button"
-            className="sidebar-primary-action"
-            onClick={() => void handleStartNewTask()}
-          >
-            <Icon name="plus" size={17} />
-            开始新任务
-          </button>
-
           <nav className="global-nav">
             {navItems.map(
               (item) => (
@@ -700,7 +1117,7 @@ export default function App() {
                   }
                   data-testid={`nav-${item.id}`}
                   onClick={() =>
-                    setTab(
+                    navigateToTab(
                       item.id,
                     )
                   }
@@ -725,28 +1142,26 @@ export default function App() {
 
         <div className="sidebar-footer">
           <div className="user-card">
-            <span className="user-avatar">
-              {user.displayName
-                .slice(
-                  0,
-                  2,
-                )
-                .toUpperCase()}
-            </span>
+            <button
+              type="button"
+              className="user-profile-entry"
+              data-testid="nav-profile"
+              onClick={() => navigateToTab("profile")}
+            >
+              <span className="user-avatar">
+                {user.displayName
+                  .slice(
+                    0,
+                    2,
+                  )
+                  .toUpperCase()}
+              </span>
 
-            <div>
-              <strong>
-                {
-                  user.displayName
-                }
-              </strong>
-
-              <small>
-                {
-                  user.email
-                }
-              </small>
-            </div>
+              <span className="user-profile-copy">
+                <strong>{user.displayName}</strong>
+                <small>{user.email}</small>
+              </span>
+            </button>
 
             <button
               className="icon-button"
@@ -754,16 +1169,10 @@ export default function App() {
               data-testid="auth-logout"
               onClick={async () => {
                 await logout();
-
-                setUser(
-                  null,
-                );
+                setUser(null);
               }}
             >
-              <Icon
-                name="logout"
-                size={17}
-              />
+              <Icon name="logout" size={17} />
             </button>
           </div>
         </div>
@@ -771,153 +1180,212 @@ export default function App() {
 
       <main className="app-main">
         {shellError && (
-          <div className="shell-notice" role="alert">
-            <span>{shellError}</span>
-            <button type="button" onClick={() => setSessionAttempt((value) => value + 1)}>重新加载</button>
+          <div
+            className="shell-notice"
+            role="alert"
+          >
+            <span>
+              {
+                shellError
+              }
+            </span>
+
+            <button
+              type="button"
+              onClick={() =>
+                setSessionAttempt(
+                  (value) =>
+                    value +
+                    1,
+                )
+              }
+            >
+              重新加载
+            </button>
           </div>
         )}
 
-        <AppErrorBoundary resetKey={tab}>
-          <Suspense fallback={<PanelLoading label="正在加载功能模块…" />}>
-        {tab ===
-          "workspace" && (
-          <Workspace
-            conversations={
-              conversations
+        <AppErrorBoundary
+          resetKey={
+            tab
+          }
+        >
+          <Suspense
+            fallback={
+              <PanelLoading label="正在加载功能模块…" />
             }
-            projects={
-              projects
-            }
-            current={
-              current
-            }
-            setCurrent={
-              setCurrent
-            }
-            messages={
-              messages
-            }
-            tasks={
-              tasks
-            }
-            latestRunState={
-              latestRunState
-            }
-            setLatestRunState={
-              setLatestRunState
-            }
-            reloadConversations={
-              loadConversations
-            }
-            reloadProjects={
-              loadProjects
-            }
-            renameConversation={
-              handleRenameConversation
-            }
-            deleteConversation={
-              handleDeleteConversation
-            }
-            createProject={
-              handleCreateProject
-            }
-            updateProject={
-              handleUpdateProject
-            }
-            deleteProject={
-              handleDeleteProject
-            }
-            moveConversation={
-              handleMoveConversation
-            }
-            reloadMessages={
-              loadMessages
-            }
-            reloadTasks={
-              loadTasks
-            }
-            agents={
-              agents
-            }
-            pluginCount={
-              plugins.length
-            }
-            tools={
-              tools
-            }
-            mcpServers={
-              mcpServers
-            }
-          />
-        )}
+          >
+            {tab ===
+              "workspace" && (
+              <Workspace
+                conversations={
+                  conversations
+                }
+                projects={
+                  projects
+                }
+                current={
+                  current
+                }
+                setCurrent={
+                  setCurrent
+                }
+                messages={
+                  visibleMessages
+                }
+                messagesLoading={
+                  messagesLoading
+                }
+                messagesLoadError={
+                  messagesLoadError
+                }
+                tasks={
+                  tasks
+                }
+                latestRunState={
+                  latestRunState
+                }
+                setLatestRunState={
+                  setLatestRunState
+                }
+                reloadConversations={
+                  loadConversations
+                }
+                reloadProjects={
+                  loadProjects
+                }
+                renameConversation={
+                  handleRenameConversation
+                }
+                deleteConversation={
+                  handleDeleteConversation
+                }
+                createProject={
+                  handleCreateProject
+                }
+                updateProject={
+                  handleUpdateProject
+                }
+                deleteProject={
+                  handleDeleteProject
+                }
+                moveConversation={
+                  handleMoveConversation
+                }
+                reloadMessages={
+                  loadMessages
+                }
+                reloadTasks={
+                  loadTasks
+                }
+                agents={
+                  agents
+                }
+                pluginCount={
+                  plugins.length
+                }
+                tools={
+                  tools
+                }
+                mcpServers={
+                  mcpServers
+                }
+              />
+            )}
 
-        {tab ===
-          "agents" && (
-          <Agents
-            agents={
-              agents
-            }
-            reload={
-              loadAgents
-            }
-          />
-        )}
+            {tab ===
+              "agents" && (
+              <Agents
+                agents={
+                  agents
+                }
+                reload={
+                  loadAgents
+                }
+              />
+            )}
 
-        {tab ===
-          "knowledge" && (
-          <KnowledgeCenter
-            projects={
-              projects
-            }
-            onCreateProject={
-              handleCreateProject
-            }
-          />
-        )}
+            {tab ===
+              "knowledge" && (
+              <KnowledgeCenter
+                projects={
+                  projects
+                }
+                onCreateProject={
+                  handleCreateProject
+                }
+              />
+            )}
 
-        {tab ===
-          "extensions" && (
-          <Extensions
-            plugins={
-              plugins
-            }
-            tools={
-              tools
-            }
-            mcpServers={
-              mcpServers
-            }
-            reloadTools={
-              loadTools
-            }
-            reloadMCP={
-              loadMCPServers
-            }
-          />
-        )}
+            {tab ===
+              "extensions" && (
+              <Extensions
+                plugins={
+                  plugins
+                }
+                tools={
+                  tools
+                }
+                mcpServers={
+                  mcpServers
+                }
+                reloadTools={
+                  loadTools
+                }
+                reloadMCP={
+                  loadMCPServers
+                }
+              />
+            )}
 
-        {tab ===
-          "model-settings" && (
-          <ModelSettings />
-        )}
+            {tab ===
+              "model-settings" && (
+              <ModelSettings />
+            )}
 
-        {tab ===
-          "governance" && (
-          <Governance projects={projects} />
-        )}
+            {tab ===
+              "ecosystem" && (
+              <Ecosystem
+                projects={
+                  projects
+                }
+              />
+            )}
 
-        {tab ===
-          "tasks" && (
-          <Tasks
-            tasks={tasks}
-            onDeleteTask={
-              handleDeleteTask
-            }
-            onCancelTask={
-              handleCancelTask
-            }
-          />
-        )}
+            {tab ===
+              "governance" && (
+              <Governance
+                projects={
+                  projects
+                }
+              />
+            )}
+
+            {tab === "profile" && (
+              <Profile
+                user={user}
+                projects={projects}
+                conversations={conversations}
+                agents={agents}
+                tasks={tasks}
+                onNavigate={(page) => navigateToTab(page)}
+              />
+            )}
+
+            {tab ===
+              "tasks" && (
+              <Tasks
+                tasks={
+                  tasks
+                }
+                onDeleteTask={
+                  handleDeleteTask
+                }
+                onCancelTask={
+                  handleCancelTask
+                }
+              />
+            )}
           </Suspense>
         </AppErrorBoundary>
       </main>

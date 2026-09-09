@@ -362,6 +362,11 @@ export type TaskApproval = {
   argumentsPreview?: Record<string, unknown>;
 };
 
+export type ModelSelection = {
+  mode: "auto" | "manual";
+  serviceId?: number | null;
+};
+
 export type Task = {
   id: number;
   userId?: number;
@@ -379,6 +384,8 @@ export type Task = {
   executionMode?: string;
 
   synthesisMode?: string;
+
+  modelSelection?: ModelSelection;
 
   deliveryMode?: DeliveryMode | string;
 
@@ -734,6 +741,34 @@ export type UserModelProviderInput = {
   apiKey: string;
   enabled: boolean;
 };
+
+export type UserModelService = {
+  id: number;
+  userId: number;
+  name: string;
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  visionModelName: string;
+  maskedHint: string;
+  enabled: boolean;
+  autoRoute: boolean;
+  isDefault: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type UserModelServiceInput = {
+  name: string;
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  visionModelName: string;
+  apiKey: string;
+  enabled: boolean;
+  autoRoute: boolean;
+  isDefault: boolean;
+};
 export type AuditEvent = {
   id: number;
   projectId?: number | null;
@@ -796,4 +831,129 @@ export type Organization = {
   name: string;
   createdAt: string;
   updatedAt: string;
+};
+
+// =========================================================
+// V4 Platform Ecosystem
+// =========================================================
+
+export type ServiceAccount = {
+  id: number;
+  projectId: number;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  status: string;
+  createdBy: number;
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+  requestCount: number;
+  errorCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ServiceAccountCredential = {
+  serviceAccount: ServiceAccount;
+  apiKey: string;
+};
+
+export type EcosystemAgentTemplate = {
+  name: string;
+  description?: string;
+  endpoint: string;
+  protocol?: string;
+  capabilities: string[];
+  provider?: string;
+  modelName?: string;
+};
+
+export type EcosystemMCPTemplate = {
+  name: string;
+  transport?: string;
+  endpoint: string;
+  connectTimeoutMs?: number;
+  callTimeoutMs?: number;
+};
+
+export type EcosystemPluginTemplate = {
+  name: string;
+  description?: string;
+  runtime?: string;
+  entrypoint?: string;
+  capabilities?: string[];
+  configSchema?: Record<string, unknown>;
+};
+
+export type EcosystemPackageManifest = {
+  schemaVersion: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  permissions: string[];
+  agent?: EcosystemAgentTemplate;
+  mcp?: EcosystemMCPTemplate;
+  plugin?: EcosystemPluginTemplate;
+};
+
+export type EcosystemPackage = {
+  id: number;
+  ownerUserId: number;
+  slug: string;
+  name: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  summary: string;
+  description: string;
+  visibility: string;
+  status: string;
+  latestVersion?: string;
+  installCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EcosystemPackageVersion = {
+  id: number;
+  packageId: number;
+  version: string;
+  manifest: EcosystemPackageManifest;
+  checksum: string;
+  status: string;
+  createdBy: number;
+  createdAt: string;
+};
+
+export type EcosystemPackageDetail = {
+  package: EcosystemPackage;
+  versions: EcosystemPackageVersion[];
+};
+
+export type EcosystemPackageBundle = {
+  formatVersion: string;
+  package: EcosystemPackage;
+  version: EcosystemPackageVersion;
+};
+
+export type ProjectPackageInstallation = {
+  id: number;
+  projectId: number;
+  packageId: number;
+  versionId: number;
+  packageSlug: string;
+  packageName: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  version: string;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+  resourceType?: string;
+  resourceId?: number | null;
+  installedBy: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EcosystemOverview = {
+  publishedPackages: number;
+  agentPackages: number;
+  mcpPackages: number;
+  pluginPackages: number;
+  totalInstalls: number;
 };

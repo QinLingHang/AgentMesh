@@ -2,6 +2,10 @@ package main
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"flag"
@@ -30,7 +34,7 @@ type fixture struct {
 func main() {
 	flag.Parse()
 	if flag.NArg() < 1 {
-		log.Fatal("usage: p12-e2e-fixture <prepare|verify|cleanup> [flags]")
+		log.Fatal("usage: p12-e2e-fixture <prepare|verify|cleanup|seed-v4-1-model-service> [flags]")
 	}
 
 	switch flag.Arg(0) {
@@ -40,6 +44,8 @@ func main() {
 		verify(flag.Args()[1:])
 	case "cleanup":
 		cleanup(flag.Args()[1:])
+	case "seed-v4-1-model-service":
+		seedV41ModelService(flag.Args()[1:])
 	default:
 		log.Fatalf("unknown action %q", flag.Arg(0))
 	}
@@ -196,6 +202,128 @@ func cleanup(args []string) {
 		log.Fatal(err)
 	}
 	encode(map[string]any{"dropped": *databaseName})
+}
+
+func seedV41ModelService(args []string) {
+	fs := flag.NewFlagSet("seed-v4-1-model-service", flag.ExitOnError)
+	databaseName := fs.String("database", "", "fixture database")
+	email := fs.String("email", "", "registered fixture user email")
+	baseURL := fs.String("base-url", "", "loopback model fixture base URL")
+	modelName := fs.String("model-name", "v4-1-e2e", "fixture model name")
+	_ = fs.Parse(args)
+
+	if *databaseName == "" || *email == "" || *baseURL == "" || *modelName == "" {
+		log.Fatal("seed-v4-1-model-service requires --database --email --base-url --model-name")
+	}
+	if !strings.HasPrefix(*databaseName, "agentmesh_p12_browser_") {
+		log.Fatal("refusing to seed model service outside a P12/V4.1 QA database")
+	}
+	if !strings.HasPrefix(strings.TrimSpace(*baseURL), "http://127.0.0.1:") {
+		log.Fatal("V4.1 model fixture base URL must be an isolated 127.0.0.1 HTTP endpoint")
+	}
+
+	masterKey := strings.TrimSpace(os.Getenv("V4_1_FIXTURE_GOVERNANCE_MASTER_KEY"))
+	apiKey := strings.TrimSpace(os.Getenv("V4_1_FIXTURE_MODEL_API_KEY"))
+	if masterKey == "" || apiKey == "" {
+		log.Fatal("V4_1_FIXTURE_GOVERNANCE_MASTER_KEY and V4_1_FIXTURE_MODEL_API_KEY are required")
+	}
+
+	admin, cfg := openAdmin()
+	admin.Close()
+	dbCfg := *cfg
+	dbCfg.DBName = *databaseName
+	database, err := sql.Open("mysql", dbCfg.FormatDSN())
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer database.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := database.PingContext(ctx); err != nil {
+		log.Fatal(err)
+	}
+
+	var uid int64
+	if err := database.QueryRowContext(ctx, "SELECT id FROM users WHERE email=? LIMIT 1", strings.TrimSpace(*email)).Scan(&uid); err != nil {
+		log.Fatal(err)
+	}
+
+	serviceKey := fmt.Sprintf("v41-browser-model-%d", uid)
+	ciphertext, nonce, err := encryptV41FixtureSecret(masterKey, uid, serviceKey, apiKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	masked := "••••"
+	if runes := []rune(apiKey); len(runes) > 4 {
+		masked += string(runes[len(runes)-4:])
+	}
+
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "DELETE FROM user_model_services WHERE user_id=? AND service_key=?", uid, serviceKey); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE user_model_services SET is_default=0 WHERE user_id=?", uid); err != nil {
+		log.Fatal(err)
+	}
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO user_model_services(service_key,user_id,name,provider,base_url,model_name,vision_model_name,ciphertext,nonce,masked_hint,enabled,auto_route,is_default) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		serviceKey,
+		uid,
+		"V4.1 Browser Model Fixture",
+		"openai-compatible",
+		strings.TrimRight(strings.TrimSpace(*baseURL), "/"),
+		strings.TrimSpace(*modelName),
+		strings.TrimSpace(*modelName),
+		ciphertext,
+		nonce,
+		masked,
+		true,
+		true,
+		true,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		log.Fatal(err)
+	}
+
+	encode(map[string]any{
+		"serviceId": id,
+		"userId":    uid,
+		"enabled":   true,
+		"autoRoute": true,
+		"isDefault": true,
+		"modelName": strings.TrimSpace(*modelName),
+	})
+}
+
+func encryptV41FixtureSecret(masterKey string, uid int64, serviceKey, secret string) ([]byte, []byte, error) {
+	h := sha256.Sum256([]byte(masterKey))
+	block, err := aes.NewCipher(h[:])
+	if err != nil {
+		return nil, nil, err
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, err
+	}
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, nil, err
+	}
+	aad := []byte(fmt.Sprintf("agentmesh:user:%d:model-service:%s", uid, serviceKey))
+	return aead.Seal(nil, nonce, []byte(secret), aad), nonce, nil
 }
 
 func splitAddr(addr string) (string, string) {

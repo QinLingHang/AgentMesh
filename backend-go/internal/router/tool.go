@@ -9,4 +9,5 @@ func registerToolRoutes(g *gin.RouterGroup, d Dependencies) {
 	g.PATCH("/tools/:id", d.ToolHandler.Update)
 	g.DELETE("/tools/:id", d.ToolHandler.Delete)
 	g.POST("/tools/seed-demo", d.ToolHandler.Seed)
+	g.POST("/tools/seed-desktop", d.ToolHandler.SeedDesktop)
 }

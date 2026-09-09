@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -76,10 +79,15 @@ func TestV3NodeRegistrationCapacityAwareSchedulingAndTopologyPrivacy(t *testing.
 }
 
 func TestV3DispatcherLeaseFailoverUsesMonotonicEpoch(t *testing.T) {
-	_, repo, _ := p8Fixture(t)
+	database, _ := p2Database(t)
 	ctx := context.Background()
+	repo := repository.NewMySQL(database)
 
-	first, leader, err := repo.AcquireRuntimeDispatcherLease(ctx, "dispatcher-a", 80*time.Millisecond)
+	// Keep the pre-expiry assertion far away from a wall-clock boundary. The
+	// repository itself uses MySQL UTC_TIMESTAMP(6) as the authoritative clock,
+	// so this test should control lease state with that same clock instead of
+	// racing an 80ms lease against scheduler/database latency.
+	first, leader, err := repo.AcquireRuntimeDispatcherLease(ctx, "dispatcher-a", time.Minute)
 	if err != nil || !leader || first == nil {
 		t.Fatalf("dispatcher-a acquire failed: lease=%#v leader=%v err=%v", first, leader, err)
 	}
@@ -98,13 +106,29 @@ func TestV3DispatcherLeaseFailoverUsesMonotonicEpoch(t *testing.T) {
 		t.Fatalf("standby should observe same epoch before failover: %#v", sameEpoch)
 	}
 
-	time.Sleep(120 * time.Millisecond)
-	second, leader, err := repo.AcquireRuntimeDispatcherLease(ctx, "dispatcher-b", time.Second)
+	result, err := database.ExecContext(
+		ctx,
+		`
+		UPDATE runtime_dispatcher_leases
+		SET lease_until = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND),
+		    last_heartbeat_at = UTC_TIMESTAMP(6)
+		WHERE lease_name = 'durable-runtime-dispatcher'
+		  AND holder_id = 'dispatcher-a'
+		`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("failed to deterministically expire dispatcher-a lease: affected=%d err=%v", affected, err)
+	}
+
+	second, leader, err := repo.AcquireRuntimeDispatcherLease(ctx, "dispatcher-b", time.Minute)
 	if err != nil || !leader || second == nil {
 		t.Fatalf("dispatcher-b failover failed: lease=%#v leader=%v err=%v", second, leader, err)
 	}
-	if second.Epoch <= first.Epoch {
-		t.Fatalf("dispatcher epoch must increase on ownership transfer: first=%d second=%d", first.Epoch, second.Epoch)
+	if second.Epoch != first.Epoch+1 {
+		t.Fatalf("dispatcher epoch must increase exactly once on ownership transfer: first=%d second=%d", first.Epoch, second.Epoch)
 	}
 
 	oldOwnerView, oldLeader, err := repo.AcquireRuntimeDispatcherLease(ctx, "dispatcher-a", time.Second)
@@ -116,6 +140,79 @@ func TestV3DispatcherLeaseFailoverUsesMonotonicEpoch(t *testing.T) {
 	}
 	if oldOwnerView == nil || oldOwnerView.HolderID != "dispatcher-b" || oldOwnerView.Epoch != second.Epoch {
 		t.Fatalf("old dispatcher observed wrong authoritative lease: %#v", oldOwnerView)
+	}
+}
+
+func v3DispatcherLeaseStressIterations(t *testing.T) int {
+	t.Helper()
+	raw := os.Getenv("V4_1_LEASE_STRESS_ITERATIONS")
+	if raw == "" {
+		// Keep ordinary package/full-suite runs lightweight. FIX5 acceptance sets
+		// this environment variable to 100 and exercises 100 real ownership
+		// transfers inside one isolated database instead of recreating/migrating
+		// the database 100 times with `go test -count=100`.
+		return 1
+	}
+	iterations, err := strconv.Atoi(raw)
+	if err != nil || iterations < 1 {
+		t.Fatalf("invalid V4_1_LEASE_STRESS_ITERATIONS=%q: must be a positive integer", raw)
+	}
+	return iterations
+}
+
+func TestV3DispatcherLeaseFailoverStress(t *testing.T) {
+	database, _ := p2Database(t)
+	ctx := context.Background()
+	repo := repository.NewMySQL(database)
+	iterations := v3DispatcherLeaseStressIterations(t)
+
+	holder := "dispatcher-stress-0"
+	current, leader, err := repo.AcquireRuntimeDispatcherLease(ctx, holder, time.Minute)
+	if err != nil || !leader || current == nil {
+		t.Fatalf("initial dispatcher acquire failed: lease=%#v leader=%v err=%v", current, leader, err)
+	}
+
+	for i := 1; i <= iterations; i++ {
+		result, err := database.ExecContext(
+			ctx,
+			`
+			UPDATE runtime_dispatcher_leases
+			SET lease_until = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 1 SECOND),
+			    last_heartbeat_at = UTC_TIMESTAMP(6)
+			WHERE lease_name = 'durable-runtime-dispatcher'
+			  AND holder_id = ?
+			`,
+			holder,
+		)
+		if err != nil {
+			t.Fatalf("iteration %d expire holder %q: %v", i, holder, err)
+		}
+		if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+			t.Fatalf("iteration %d expire holder %q: affected=%d err=%v", i, holder, affected, err)
+		}
+
+		nextHolder := fmt.Sprintf("dispatcher-stress-%d", i)
+		next, nextLeader, err := repo.AcquireRuntimeDispatcherLease(ctx, nextHolder, time.Minute)
+		if err != nil || !nextLeader || next == nil {
+			t.Fatalf("iteration %d takeover by %q failed: lease=%#v leader=%v err=%v", i, nextHolder, next, nextLeader, err)
+		}
+		if next.Epoch != current.Epoch+1 {
+			t.Fatalf("iteration %d epoch must increase exactly once: current=%d next=%d", i, current.Epoch, next.Epoch)
+		}
+
+		staleView, staleLeader, err := repo.AcquireRuntimeDispatcherLease(ctx, holder, time.Second)
+		if err != nil {
+			t.Fatalf("iteration %d stale holder %q acquire: %v", i, holder, err)
+		}
+		if staleLeader {
+			t.Fatalf("iteration %d stale holder %q reclaimed an unexpired lease owned by %q", i, holder, nextHolder)
+		}
+		if staleView == nil || staleView.HolderID != nextHolder || staleView.Epoch != next.Epoch {
+			t.Fatalf("iteration %d stale holder observed wrong authoritative lease: %#v", i, staleView)
+		}
+
+		holder = nextHolder
+		current = next
 	}
 }
 

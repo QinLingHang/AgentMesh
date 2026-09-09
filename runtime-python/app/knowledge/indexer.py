@@ -90,6 +90,20 @@ class KnowledgeIndexer:
         knowledge_base_id: int,
         knowledge_file_id: int,
     ) -> None:
+        # Prefer the backend's public deletion contract when available. This is
+        # important for persistent/hybrid backends: inspecting a private
+        # in-memory cache must never short-circuit deletion from Milvus.
+        delete_documents = getattr(self.backend, "delete_documents", None)
+        if delete_documents is not None:
+            await delete_documents(
+                filters={
+                    "userId": user_id,
+                    "knowledgeBaseId": knowledge_base_id,
+                    "knowledgeFileId": knowledge_file_id,
+                }
+            )
+            return
+
         # In-memory deterministic baseline.
         memory = getattr(self.backend, "_documents", None)
         if isinstance(memory, dict):
@@ -104,6 +118,9 @@ class KnowledgeIndexer:
                 memory.pop(key, None)
             return
 
+        # Compatibility fallback for older Milvus-like backends. Keep the
+        # expression aligned with the current explicit collection schema:
+        # user_id is a top-level INT64 field; knowledge IDs live in metadata.
         client = getattr(self.backend, "client", None) or getattr(self.backend, "_client", None)
         collection_name = getattr(self.backend, "collection_name", None) or getattr(self.backend, "_collection_name", None)
 
@@ -115,9 +132,9 @@ class KnowledgeIndexer:
             return
 
         expression = (
-            f"userId == {int(user_id)} and "
-            f"knowledgeBaseId == {int(knowledge_base_id)} and "
-            f"knowledgeFileId == {int(knowledge_file_id)}"
+            f"user_id == {int(user_id)} and "
+            f'metadata["knowledgeBaseId"] == {int(knowledge_base_id)} and '
+            f'metadata["knowledgeFileId"] == {int(knowledge_file_id)}'
         )
 
         def do_delete() -> None:
@@ -125,10 +142,7 @@ class KnowledgeIndexer:
                 delete(collection_name=collection_name, filter=expression)
             except TypeError:
                 delete(collection_name, filter=expression)
-            except Exception as exc:
-                text = str(exc).lower()
-                if "not exist" in text or "not found" in text:
-                    return
-                raise
 
+        # Do not translate schema/filter errors into success. A failed delete
+        # must propagate so the Control Plane cannot report a false cleanup.
         await asyncio.to_thread(do_delete)

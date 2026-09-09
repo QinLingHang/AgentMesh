@@ -78,3 +78,12 @@ func (h *ToolHandler) Seed(c *gin.Context) {
 	}
 	ok(c, v)
 }
+
+func (h *ToolHandler) SeedDesktop(c *gin.Context) {
+	v, e := h.s.SeedDesktop(c, uid(c))
+	if e != nil {
+		domain(c, e)
+		return
+	}
+	ok(c, v)
+}

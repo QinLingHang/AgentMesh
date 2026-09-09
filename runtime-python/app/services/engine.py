@@ -27,6 +27,13 @@ from app.agents.capability import (
     effective_capability_profile,
 )
 from app.config import settings
+from app.capabilities import (
+    contextualize_discovery_task,
+    continuation_subject_task,
+    discover_capabilities,
+    discover_mcp_tools,
+    discovery_context,
+)
 from app.eval import (
     EvaluationRequest,
     HeuristicEvaluator,
@@ -126,9 +133,7 @@ from app.services.rescheduler import (
     RuntimeRescheduler,
 )
 from app.services.request_policy import (
-    should_discover_mcp,
     should_retrieve_long_term_memory,
-    should_use_project_rag,
 )
 from app.tools import (
     ToolApprovalRequest,
@@ -136,6 +141,7 @@ from app.tools import (
     ToolRegistry,
     register_builtin_tools,
     register_demo_tools,
+    register_desktop_tools,
     tool_call_fingerprint,
 )
 from app.tools.loop import safe as safe_tool_payload
@@ -1140,6 +1146,7 @@ class RuntimeEngine:
         demo_registry = ToolRegistry(timeout=settings.tool_timeout_seconds)
         register_builtin_tools(demo_registry)
         register_demo_tools(demo_registry)
+        register_desktop_tools(demo_registry)
         demo_handlers = {
             tool.name: demo_registry._adapters[tool.name].handler
             for tool in demo_registry.list()
@@ -2612,38 +2619,80 @@ class RuntimeEngine:
                 # later for Scheduler / Planner observability.
                 # ====================================================
 
+        # ====================================================
+        # 1. Task Accepted
+        #
+        # The task event is the stable trace boundary for every new runtime
+        # execution. Capability discovery is work performed *after* the task
+        # has been accepted, so keep this event first for P3.x trace contracts
+        # and downstream consumers that rely on trace[0] being the task.
+        # Resume requests short-circuit above and preserve their own lifecycle.
+        # ====================================================
+
+        event(
+            "task",
+            "Task Accepted",
+            "completed",
+            req.request_id,
+        )
+
         pre_profile = profile_task(req.task)
 
         # ====================================================
-        # Tool execution vs MCP discovery
+        # V4.1 Autonomous Capability Discovery
         #
-        # These are two different decisions:
-        #
-        # 1. Explicit request-scoped Tools:
-        #    If the request already contains an enabled internal/HTTP Tool,
-        #    the Agent must be allowed to use it.
-        #
-        # 2. MCP discovery:
-        #    MCP discovery may still be skipped for ordinary turns so that
-        #    unnecessary remote discovery work is avoided.
-        #
-        # Do NOT gate explicit Tools behind should_discover_mcp().
+        # Users express goals; Runtime discovers request-relevant Tool / MCP /
+        # Skill / Knowledge capabilities before expensive execution work.
         # ====================================================
 
-        mcp_discovery_enabled = should_discover_mcp(
+        capability_query, capability_used_history, capability_history_turns = (
+            contextualize_discovery_task(
+                req.task,
+                req.history,
+            )
+        )
+
+        capability_plan = discover_capabilities(
+            capability_query,
+            tools=req.tools,
+            mcp_servers=req.mcp_servers,
+            agents=req.agents,
+            has_attachments=bool(req.attachments),
+        )
+
+        knowledge_query = continuation_subject_task(
             req.task,
-            pre_profile,
+            req.history,
         )
 
-        has_explicit_tools = any(
-            tool.enabled
-            and tool.protocol in {"internal", "http"}
-            for tool in req.tools
+        capability_trace = capability_plan.trace_detail()
+        capability_trace.update(
+            {
+                "contextualized": capability_used_history,
+                "historyTurns": capability_history_turns,
+            }
+        )
+        event(
+            "capability_discovery",
+            "Autonomous Capability Discovery",
+            "completed",
+            json.dumps(
+                capability_trace,
+                ensure_ascii=False,
+            ),
         )
 
-        tool_execution_enabled = (
-            has_explicit_tools
-            or mcp_discovery_enabled
+        selected_tool_names = {
+            name.casefold()
+            for name in capability_plan.selected_tool_names
+        }
+        selected_mcp_server_ids = set(
+            capability_plan.selected_mcp_server_ids
+        )
+
+        tool_execution_enabled = bool(
+            selected_tool_names
+            or selected_mcp_server_ids
         )
 
         # ====================================================
@@ -2742,6 +2791,10 @@ class RuntimeEngine:
             demo_registry
         )
 
+        register_desktop_tools(
+            demo_registry
+        )
+
         demo_handlers = {
             tool.name:
                 demo_registry
@@ -2755,6 +2808,9 @@ class RuntimeEngine:
         }
 
         for tool in req.tools:
+
+            if tool.name.casefold() not in selected_tool_names:
+                continue
 
             if (
                 tool.protocol
@@ -2786,14 +2842,14 @@ class RuntimeEngine:
 
         eligible_mcp_servers = []
 
-        if req.mcp_servers and not mcp_discovery_enabled:
+        if req.mcp_servers and not selected_mcp_server_ids:
             event(
                 "mcp",
                 "MCP Discovery Skipped",
                 "completed",
                 json.dumps(
                     {
-                        "reason": "request does not require external tool discovery",
+                        "reason": "capability discovery found no relevant MCP connector",
                         "configuredServers": len(req.mcp_servers),
                     },
                     ensure_ascii=False,
@@ -2801,7 +2857,9 @@ class RuntimeEngine:
             )
 
         for server in (
-            req.mcp_servers if mcp_discovery_enabled else []
+            server
+            for server in req.mcp_servers
+            if server.id in selected_mcp_server_ids
         ):
 
             decision = (
@@ -2941,12 +2999,43 @@ class RuntimeEngine:
                     )
 
             # =================================================
-            # Register MCP Tools
+            # V4.1 MCP Tool-level Discovery
             # =================================================
 
-            for tool in (
-                discovered_tools
-            ):
+            mcp_tool_plan = discover_mcp_tools(
+                capability_query,
+                discovered_tools,
+            )
+            capability_plan.selected_mcp_tool_names = list(
+                mcp_tool_plan.selected_mcp_tool_names
+            )
+            capability_plan.candidates.extend(
+                mcp_tool_plan.candidates
+            )
+            capability_plan.confidence = max(
+                capability_plan.confidence,
+                mcp_tool_plan.confidence,
+            )
+
+            if discovered_tools:
+                event(
+                    "capability_discovery",
+                    "MCP Capability Discovery",
+                    "completed",
+                    json.dumps(
+                        mcp_tool_plan.trace_detail(),
+                        ensure_ascii=False,
+                    ),
+                )
+
+            selected_mcp_tool_names = {
+                name.casefold()
+                for name in mcp_tool_plan.selected_mcp_tool_names
+            }
+
+            for tool in discovered_tools:
+                if tool.name.casefold() not in selected_mcp_tool_names:
+                    continue
 
                 tool_registry.register(
                     tool,
@@ -2957,15 +3046,8 @@ class RuntimeEngine:
                     ),
                 )
 
-            # =================================================
-            # 1. Task Accepted
-            # =================================================
-
-            event(
-                "task",
-                "Task Accepted",
-                "completed",
-                req.request_id,
+            tool_execution_enabled = bool(
+                tool_registry.list()
             )
 
             # =================================================
@@ -3179,20 +3261,36 @@ class RuntimeEngine:
             ):
 
                 try:
+                    history_source = "runtime_memory"
 
-                    memory_messages = (
-                        await self.memory
-                        .recent(
-                            user_id=(
-                                req.user_id
-                            ),
-                            conversation_id=(
-                                req
-                                .conversation_id
-                            ),
-                            limit=8,
+                    # Go/MySQL is the authoritative conversation log and spans
+                    # both execution paths.  Prefer request history when present
+                    # so a turn that moves from InteractiveFastPath -> full Agent
+                    # Runtime still sees the immediately preceding discussion.
+                    if req.history:
+                        memory_messages = [
+                            MemoryMessage(
+                                role=item.role,
+                                content=item.content,
+                            )
+                            for item in req.history[-8:]
+                            if item.content.strip()
+                        ]
+                        history_source = "control_plane_history"
+                    else:
+                        memory_messages = (
+                            await self.memory
+                            .recent(
+                                user_id=(
+                                    req.user_id
+                                ),
+                                conversation_id=(
+                                    req
+                                    .conversation_id
+                                ),
+                                limit=8,
+                            )
                         )
-                    )
 
                     event(
                         "memory",
@@ -3211,6 +3309,9 @@ class RuntimeEngine:
                                     len(
                                         memory_messages
                                     ),
+
+                                "source":
+                                    history_source,
                             },
                             ensure_ascii=False,
                         ),
@@ -3338,20 +3439,36 @@ class RuntimeEngine:
             retrieval_mode_decision = classify_retrieval_mode(req.task, rag_decision.analysis)
             retrieval_mode = retrieval_mode_decision.mode
 
-            # Project Knowledge is opt-in by request semantics. Ordinary world
-            # knowledge questions should use the base model, while request-local
-            # attachments are already the authoritative evidence for this turn.
-            if not should_use_project_rag(
-                req.task,
-                profile,
-                has_attachments=bool(req.attachments),
-            ):
+            # Project Knowledge is selected by the same request-scoped
+            # capability resolver as Tool/MCP/Skill. Ordinary world-knowledge
+            # questions keep the base model path, while project-specific tasks
+            # no longer require the user to say “use knowledge base”.
+            if capability_plan.use_project_knowledge:
+                if not rag_decision.retrieve:
+                    rag_decision = replace(
+                        rag_decision,
+                        mode=RAGMode.FAST_RAG,
+                        reason=(
+                            "autonomous capability discovery selected project "
+                            "knowledge for this task"
+                        ),
+                        confidence=max(rag_decision.confidence, 0.92),
+                        retrieve=True,
+                        inject_context=True,
+                        top_k=max(settings.rag_top_k, 5),
+                        max_retrieval_rounds=1,
+                        enable_query_rewrite=False,
+                        enable_multi_query=False,
+                        enable_decomposition=False,
+                        enable_reranker=True,
+                    )
+            else:
                 rag_decision = replace(
                     rag_decision,
                     mode=RAGMode.NO_RAG,
                     reason=(
-                        "request uses model/attachment context; project knowledge "
-                        "retrieval is not required"
+                        "autonomous capability discovery did not select project "
+                        "knowledge for this request"
                     ),
                     confidence=max(rag_decision.confidence, 0.96),
                     retrieve=False,
@@ -3490,7 +3607,7 @@ class RuntimeEngine:
                                 .reason,
 
                             "query":
-                                req.task,
+                                knowledge_query,
 
                             "retrieverCalled":
                                 False,
@@ -3521,7 +3638,7 @@ class RuntimeEngine:
                     json.dumps(
                         {
                             "query":
-                                req.task,
+                                knowledge_query,
 
                             "mode":
                                 rag_decision
@@ -3663,7 +3780,7 @@ class RuntimeEngine:
                         agentic_result = (
                             await agentic_executor
                             .retrieve(
-                                req.task,
+                                knowledge_query,
 
                                 user_id=(
                                     req.user_id
@@ -3697,7 +3814,7 @@ class RuntimeEngine:
                                 ),
                             )
                         )
-                        
+
 
                         retrieval_hits = list(
                             agentic_result
@@ -3826,7 +3943,7 @@ class RuntimeEngine:
                             await self
                             .retriever
                             .retrieve(
-                                req.task,
+                                knowledge_query,
                                 top_k=(
                                     max(
                                         rag_decision.top_k,
@@ -4271,6 +4388,70 @@ class RuntimeEngine:
                     )
 
             # =================================================
+            # 2.4 Agent / A2A Skill Discovery Refinement
+            # =================================================
+
+            skill_refresh = discover_capabilities(
+                capability_query,
+                agents=req.agents,
+                has_attachments=bool(req.attachments),
+            )
+            refreshed_skills = list(
+                dict.fromkeys(
+                    [
+                        *capability_plan.selected_skill_names,
+                        *skill_refresh.selected_skill_names,
+                    ]
+                )
+            )
+            capability_plan.selected_skill_names = refreshed_skills
+
+            existing_candidate_keys = {
+                (item.kind.value, item.identifier)
+                for item in capability_plan.candidates
+            }
+            for candidate in skill_refresh.candidates:
+                key = (candidate.kind.value, candidate.identifier)
+                if key in existing_candidate_keys:
+                    continue
+                capability_plan.candidates.append(candidate)
+                existing_candidate_keys.add(key)
+            capability_plan.confidence = max(
+                capability_plan.confidence,
+                skill_refresh.confidence,
+            )
+
+            existing_profile_capabilities = {
+                item.casefold()
+                for item in profile.required_capabilities
+            }
+            for skill in refreshed_skills:
+                if skill.casefold() in existing_profile_capabilities:
+                    continue
+                profile.required_capabilities.append(skill)
+                existing_profile_capabilities.add(skill.casefold())
+
+            if refreshed_skills:
+                event(
+                    "capability_discovery",
+                    "Agent Skill Discovery",
+                    "completed",
+                    json.dumps(
+                        {
+                            **skill_refresh.trace_detail(),
+                            "selectedSkills": refreshed_skills,
+                            "requiredCapabilities": list(
+                                profile.required_capabilities
+                            ),
+                            "source": "Agent/A2A skill catalog",
+                            "contextualized": capability_used_history,
+                            "historyTurns": capability_history_turns,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+
+            # =================================================
             # 3. Scheduler
             # =================================================
 
@@ -4615,6 +4796,9 @@ class RuntimeEngine:
                             constraints=req.constraints,
                             profile=profile,
                             project_model=req.project_model,
+                            model_pool=req.model_pool,
+                            model_selection=req.model_selection,
+                            has_images=bool(model_attachments),
                         )
                     )
 
@@ -4647,6 +4831,10 @@ class RuntimeEngine:
                                     if model_attachments and model_runtime.vision_model
                                     else model_runtime.model
                                 ),
+
+                                "serviceId": model_runtime.service_id,
+                                "serviceName": model_runtime.service_name,
+                                "selectionMode": model_runtime.selection_mode,
 
                                 "mode": (
                                     model_runtime.route_decision.mode
@@ -4724,6 +4912,21 @@ class RuntimeEngine:
                         ),
                     )
                 )
+
+                if (
+                    agent.protocol.strip().lower()
+                    in {"internal", "langgraph"}
+                ):
+                    capability_context = discovery_context(
+                        capability_plan
+                    )
+                    if capability_context:
+                        execution_context = (
+                            execution_context
+                            + "\n\n"
+                            + capability_context
+                        )
+
                 event(
                     "context",
                     (

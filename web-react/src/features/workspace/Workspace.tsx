@@ -1,10 +1,12 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
+  ApiError,
   createConversation,
   decideTaskApproval,
   deleteConversation,
   deleteConversationAttachment,
   friendlyApiError,
+  listUserModelServices,
   resumeTask,
   runTask,
   runTaskStream,
@@ -18,6 +20,7 @@ import type {
   MCPServer,
   Message,
   MessageAttachmentMetadata,
+  ModelSelection,
   Planner,
   Project,
   RunResult,
@@ -25,6 +28,7 @@ import type {
   SynthesisMode,
   Task,
   Tool,
+  UserModelService,
 } from "../../types";
 import { Icon } from "../../components/common/Icon";
 import {
@@ -92,6 +96,8 @@ export function Workspace({
   current,
   setCurrent,
   messages,
+  messagesLoading,
+  messagesLoadError,
   tasks,
   latestRunState,
   setLatestRunState,
@@ -117,6 +123,8 @@ export function Workspace({
     conversation: Conversation,
   ) => void;
   messages: Message[];
+  messagesLoading: boolean;
+  messagesLoadError: string;
   tasks: Task[];
   latestRunState: LatestRunState | null;
   setLatestRunState: (
@@ -157,6 +165,13 @@ export function Workspace({
   mcpServers: MCPServer[];
 }) {
   const [text, setText] = useState("");
+
+  const messageScrollRef = useRef<HTMLDivElement | null>(null);
+
+  const [showModelPicker, setShowModelPicker] = useState(false);
+
+  const [modelServices, setModelServices] = useState<UserModelService[]>([]);
+  const [modelSelection, setModelSelection] = useState<ModelSelection>({ mode: "auto" });
 
   const [scheduler, setScheduler] =
     useState<Scheduler>(
@@ -209,6 +224,13 @@ export function Workspace({
 
   const [streamingPhase, setStreamingPhase] =
     useState("");
+
+  // Long-running direct streams belong to the conversation that submitted
+  // them. Keep the latest active conversation id outside the async closure so
+  // late deltas/status/error tails from a background conversation cannot write
+  // into the currently visible Workspace after the user switches threads.
+  const activeConversationIdRef = useRef<number | null>(current?.id ?? null);
+  activeConversationIdRef.current = current?.id ?? null;
 
   const [error, setError] =
     useState("");
@@ -315,17 +337,65 @@ export function Workspace({
         ) ?? null
       : null;
 
-  const latestWaitingTask =
-    latestRun &&
-    isWaitingStatus(
-      latestRun.status,
-    )
-      ? latestRun.task
+  const persistedLatestRunTask =
+    latestRun
+      ? tasks.find((task) => task.id === latestRun.task.id) ?? null
       : null;
 
+  const latestWaitingTask =
+    latestRun &&
+    isWaitingStatus(latestRun.status) &&
+    (persistedLatestRunTask == null ||
+      isWaitingStatus(persistedLatestRunTask.status))
+      ? persistedLatestRunTask ?? latestRun.task
+      : null;
+
+  // The persisted server projection is authoritative. A local RunResult can
+  // remain AUTH_REQUIRED after another tab/retry already changed the task, and
+  // showing that stale approval card causes a guaranteed 409 on confirmation.
   const waitingTask =
-    latestWaitingTask ??
-    persistedWaitingTask;
+    persistedWaitingTask ??
+    latestWaitingTask;
+
+  useEffect(() => {
+    let active = true;
+    void listUserModelServices()
+      .then((items) => {
+        if (!active) return;
+        setModelServices(items);
+        setModelSelection((currentSelection) => {
+          if (currentSelection.mode !== "manual" || !currentSelection.serviceId) return currentSelection;
+          const stillAvailable = items.some(
+            (item) => item.id === currentSelection.serviceId && item.enabled,
+          );
+          return stillAvailable ? currentSelection : { mode: "auto" };
+        });
+      })
+      .catch(() => {
+        if (active) setModelServices([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!showModelPicker) {
+      return;
+    }
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowModelPicker(false);
+      }
+    };
+
+    window.addEventListener("keydown", closeOnEscape);
+
+    return () => {
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [showModelPicker]);
 
   useEffect(
     () => {
@@ -350,14 +420,57 @@ export function Workspace({
 
   useEffect(
     () => {
+      // A conversation boundary is also a composer/runtime boundary.
+      // Never carry a failed prompt, attachment preview, streamed answer, or
+      // resume state into a newly created/opened conversation.
+      setText("");
+      setPendingPrompt("");
+      setPendingAttachments([]);
+      setStreamingAnswer("");
+      setStreamingPhase("");
+      setAttachments((items) => {
+        for (const item of items) {
+          if (item.previewUrl) {
+            URL.revokeObjectURL(item.previewUrl);
+          }
+        }
+        return [];
+      });
       setResumeText("");
       setResumeError("");
       setError("");
       setShowDetails(false);
       setDetailsResult(null);
       setShowSettings(false);
+      setShowModelPicker(false);
     },
     [current?.id],
+  );
+
+  const latestMessageId =
+    messages.length > 0
+      ? messages[messages.length - 1]?.id ?? null
+      : null;
+
+  useLayoutEffect(
+    () => {
+      const scrollNode =
+        messageScrollRef.current;
+
+      if (!scrollNode) {
+        return;
+      }
+
+      // Entering Workspace or loading/switching a conversation should land on
+      // the newest persisted message instead of the beginning of the thread.
+      scrollNode.scrollTop =
+        scrollNode.scrollHeight;
+    },
+    [
+      current?.id,
+      messages.length,
+      latestMessageId,
+    ],
   );
 
   const durablePending =
@@ -456,11 +569,12 @@ export function Workspace({
       throw error;
     }
 
-    await Promise.all([
-      reloadConversations(),
-      reloadProjects(),
-    ]);
-
+    // Conversation creation (and optional project assignment above) is the
+    // authoritative mutation. Select it immediately; sidebar/project
+    // projections are best-effort follow-up work and must never prevent an
+    // already-created conversation from becoming current. In particular, a
+    // transient project-list failure must not leave a new conversation visible
+    // in Recent while Workspace remains attached to the previous thread.
     setCurrent(
       conversation,
     );
@@ -472,6 +586,11 @@ export function Workspace({
     setLatestRunState(
       null,
     );
+
+    void Promise.allSettled([
+      reloadConversations(),
+      reloadProjects(),
+    ]);
   };
 
   const openConversation = (
@@ -626,25 +745,40 @@ export function Workspace({
     setText("");
     setAttachments([]);
 
+    let submittedConversation = current;
+
     try {
       setBusy(true);
       setError("");
 
-      let conversation = current;
+      let conversation = submittedConversation;
       if (!conversation) {
         conversation = await createConversation("新会话");
+        submittedConversation = conversation;
+        activeConversationIdRef.current = conversation.id;
         setCurrent(conversation);
         await reloadConversations();
+      } else {
+        submittedConversation = conversation;
       }
 
+      // Capture the submission owner as an immutable scalar before any async
+      // callbacks are created. TypeScript does not preserve the local
+      // `conversation != null` narrowing inside closures, and more
+      // importantly ownership must stay bound to the conversation that
+      // accepted this submission even if the local conversation object is
+      // later replaced by an auto-title response.
+      const submissionConversationId = conversation.id;
+
       const input = {
-        conversationId: conversation.id,
+        conversationId: submissionConversationId,
         task: submittedPrompt,
         scheduler,
         planner,
         executionMode,
         synthesisMode,
         deliveryMode,
+        modelSelection,
         maxLatencyMs: latency,
         maxCost: cost,
         minQuality: quality,
@@ -652,49 +786,117 @@ export function Workspace({
         attachmentIds: submittedAttachments.map((item) => item.server!.id),
       };
 
+      const isSubmissionConversationActive = () =>
+        activeConversationIdRef.current === submissionConversationId;
+
       const result = deliveryMode === "direct"
         ? await runTaskStream(input, {
             onDelta: (delta) => {
+              if (!isSubmissionConversationActive()) return;
               setStreamingPhase("正在生成回答…");
               setStreamingAnswer((currentText) => currentText + delta);
             },
-            onStatus: (message) => setStreamingPhase(message),
+            onStatus: (message) => {
+              if (!isSubmissionConversationActive()) return;
+              setStreamingPhase(message);
+            },
           })
         : await runTask(input);
 
-      setLatestRunState({ conversationId: conversation.id, result });
+      setLatestRunState({ conversationId: submissionConversationId, result });
 
       if (UNTITLED_TITLES.has(conversation.title)) {
         try {
           const renamed = await renameConversation(conversation.id, deriveConversationTitle(submittedPrompt));
           conversation = renamed;
-          setCurrent(renamed);
+          // renameConversation is already responsible for updating the active
+          // conversation only when that conversation is still current. Never
+          // force the renamed submission conversation back into current here:
+          // the user may have created/selected another conversation while the
+          // auto-title request was still in flight.
         } catch {
           // Auto-title failure must never fail the task itself.
         }
       }
 
-      await Promise.all([
-        reloadMessages(conversation.id),
+      // Message history is a visible projection of the active conversation.
+      // A background submission may finish and persist successfully after the
+      // user switches elsewhere, but it must not load its messages into the
+      // active thread. When the user returns, the normal conversation switch
+      // path reloads that conversation from authoritative server history.
+      const completionRefreshes: Promise<unknown>[] = [
         reloadTasks(),
         reloadConversations(),
-      ]);
+      ];
+      if (isSubmissionConversationActive()) {
+        completionRefreshes.unshift(reloadMessages(submissionConversationId));
+      }
+      await Promise.all(completionRefreshes);
 
       submittedAttachments.forEach((item) => {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
-      setPendingPrompt("");
-      setPendingAttachments([]);
-      setStreamingAnswer("");
-      setStreamingPhase("");
+      if (isSubmissionConversationActive()) {
+        setPendingPrompt("");
+        setPendingAttachments([]);
+        setStreamingAnswer("");
+        setStreamingPhase("");
+      }
     } catch (e) {
-      setError(friendlyApiError(e, "任务提交失败，请稍后重试。"));
-      setText((currentText) => currentText.trim() ? currentText : submittedPrompt);
-      setAttachments((currentItems) => currentItems.length ? currentItems : submittedAttachments);
-      setPendingPrompt("");
-      setPendingAttachments([]);
-      setStreamingAnswer("");
-      setStreamingPhase("");
+      const submittedConversationIsActive =
+        submittedConversation != null &&
+        activeConversationIdRef.current === submittedConversation.id;
+
+      if (submittedConversationIsActive) {
+        setError(friendlyApiError(e, "任务提交失败，请稍后重试。"));
+      }
+
+      const serverAcceptedStreamFailure =
+        e instanceof ApiError &&
+        e.code === 50210;
+
+      if (
+        serverAcceptedStreamFailure &&
+        submittedConversation
+      ) {
+        // run-stream errors arrive only after Go accepted the request and
+        // persisted the user turn. Refresh authoritative server history and do
+        // not restore the same prompt into the composer, otherwise a retry
+        // creates duplicate user messages (for example repeated bare "A").
+        const failureRefreshes: Promise<unknown>[] = [
+          reloadTasks(),
+          reloadConversations(),
+        ];
+        if (submittedConversationIsActive) {
+          failureRefreshes.unshift(reloadMessages(submittedConversation.id));
+        }
+        await Promise.allSettled(failureRefreshes);
+        if (submittedConversationIsActive) {
+          setText("");
+        }
+        submittedAttachments.forEach((item) => {
+          if (item.previewUrl) {
+            URL.revokeObjectURL(item.previewUrl);
+          }
+        });
+        if (submittedConversationIsActive) {
+          setAttachments([]);
+        }
+      } else if (submittedConversationIsActive) {
+        // Transport/preflight failures may happen before the server persists the
+        // request, so retain the local draft only when its submitting
+        // conversation is still visible. Never restore a background
+        // conversation's prompt/attachments into another active conversation.
+        setText((currentText) => currentText.trim() ? currentText : submittedPrompt);
+        setAttachments((currentItems) => currentItems.length ? currentItems : submittedAttachments);
+      }
+
+      if (submittedConversationIsActive) {
+        setPendingPrompt("");
+        setPendingAttachments([]);
+        setStreamingAnswer("");
+        setStreamingPhase("");
+      }
     } finally {
       setBusy(false);
     }
@@ -806,11 +1008,40 @@ export function Workspace({
         setDetailsResult(null);
       }
     } catch (e) {
-      setResumeError(friendlyApiError(e, "审批操作失败，请稍后重试。"));
+      // A 409 can mean the task already advanced between rendering the card and
+      // clicking it. Refresh server state and discard the stale local waiting
+      // snapshot instead of leaving a permanently unusable approval panel.
+      await Promise.allSettled([
+        reloadTasks(),
+        reloadMessages(current.id),
+      ]);
+      setLatestRunState(null);
+      setResumeError(friendlyApiError(e, "审批操作失败，已刷新最新任务状态。"));
     } finally {
       setResumeBusy(false);
     }
   };
+
+  const enabledModelServices =
+    modelServices.filter(
+      (service) =>
+        service.enabled,
+    );
+
+  const selectedModelService =
+    modelSelection.mode === "manual" &&
+    modelSelection.serviceId
+      ? enabledModelServices.find(
+          (service) =>
+            service.id ===
+            modelSelection.serviceId,
+        ) ?? null
+      : null;
+
+  const modelPickerLabel =
+    selectedModelService?.modelName?.trim() ||
+    selectedModelService?.name?.trim() ||
+    "自动选择";
 
   return (
     <div className={`workspace-layout ${railCollapsed ? "rail-collapsed" : ""}`}>
@@ -889,7 +1120,13 @@ export function Workspace({
             }
           />
         ) : (
-        <section className="workspace-core">
+        <section
+          className="workspace-core"
+          data-testid="workspace-conversation"
+          data-conversation-id={current?.id ?? ""}
+          data-messages-state={messagesLoading ? "loading" : messagesLoadError ? "error" : "ready"}
+          aria-busy={messagesLoading}
+        >
             <header className="workspace-toolbar">
             <div>
               <div className="workspace-breadcrumb">
@@ -919,10 +1156,12 @@ export function Workspace({
             </div>
           </header>
 
-          <div className="workspace-scroll">
+          <div className="workspace-scroll" ref={messageScrollRef}>
             <div className="workspace-scroll-inner">
               <MessageHistory
                 messages={messages}
+                messagesLoading={messagesLoading}
+                messagesLoadError={messagesLoadError}
                 tasks={tasks}
                 latestRun={latestRun}
                 openDetails={openRunDetails}
@@ -996,13 +1235,23 @@ export function Workspace({
                 }}
               >
                 <textarea
+                  data-testid="workspace-composer"
                   value={text}
                   rows={3}
                   placeholder={busy ? "可以继续输入下一条消息…" : "描述目标，AgentMesh 会自动规划并执行..."}
                   onChange={(e) => setText(e.target.value)}
                   onKeyDown={(e) => {
-                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
-                      e.preventDefault();
+                    if (
+                      e.key !== "Enter" ||
+                      e.shiftKey ||
+                      e.nativeEvent.isComposing
+                    ) {
+                      return;
+                    }
+
+                    e.preventDefault();
+
+                    if (!busy) {
                       void run();
                     }
                   }}
@@ -1016,65 +1265,214 @@ export function Workspace({
                 />
 
                 <footer className="composer-footer composer-footer-clean">
-                  <button
-                    className="composer-settings-button"
-                    onClick={() =>
-                      setShowSettings(
-                        true,
-                      )
-                    }
-                    type="button"
-                  >
-                    <span className="composer-settings-icon">
-                      <Icon
-                        name="tool"
-                        size={14}
-                      />
-                    </span>
+                  <div className="composer-footer-left">
+                    <div className={`composer-model-menu ${showModelPicker ? "open" : ""}`}>
+                      <button
+                        className="composer-model-trigger"
+                        type="button"
+                        aria-haspopup="menu"
+                        aria-expanded={showModelPicker}
+                        title={
+                          selectedModelService
+                            ? `${selectedModelService.name} · ${selectedModelService.modelName}`
+                            : "自动选择模型"
+                        }
+                        onClick={() =>
+                          setShowModelPicker(
+                            (value) =>
+                              !value,
+                          )
+                        }
+                      >
+                        <span className="composer-model-trigger-label">
+                          {modelPickerLabel}
+                        </span>
 
-                    <span className="composer-settings-copy">
-                      <strong>
-                        执行偏好
-                      </strong>
+                        <span
+                          className="composer-model-trigger-chevron"
+                          aria-hidden="true"
+                        >
+                          ⌄
+                        </span>
+                      </button>
 
-                      <small>
-                        自动选择合适的执行方式
-                      </small>
-                    </span>
-                  </button>
+                      {showModelPicker && (
+                        <>
+                          <button
+                            className="composer-model-menu-backdrop"
+                            type="button"
+                            aria-label="关闭模型选择"
+                            onClick={() =>
+                              setShowModelPicker(
+                                false,
+                              )
+                            }
+                          />
 
-                  <span className="composer-keyboard-hint">
-                    Ctrl / ⌘ + Enter
-                  </span>
+                          <div
+                            className="composer-model-popover"
+                            role="menu"
+                            aria-label="选择模型"
+                          >
+                            <div className="composer-model-popover-title">
+                              选择模型
+                            </div>
 
-                  <button
-                    className="primary-button run-button"
-                    disabled={
-                      busy ||
-                      attachments.some((item) => item.status === "uploading") ||
-                      (!text.trim() && !attachments.some((item) => item.status === "ready" && item.server))
-                    }
-                    onClick={() =>
-                      void run()
-                    }
-                  >
-                    {busy ? (
-                      <>
-                        <span className="spinner" />
+                            <button
+                              className={`composer-model-option ${
+                                modelSelection.mode === "auto"
+                                  ? "active"
+                                  : ""
+                              }`}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={
+                                modelSelection.mode === "auto"
+                              }
+                              onClick={() => {
+                                setModelSelection({
+                                  mode: "auto",
+                                });
+                                setShowModelPicker(false);
+                              }}
+                            >
+                              <span className="composer-model-option-main">
+                                <strong>
+                                  自动选择
+                                </strong>
 
-                        正在运行
-                      </>
-                    ) : (
-                      <>
-                        运行任务
+                                <small>
+                                  根据任务能力、质量、延迟和成本自动路由
+                                </small>
+                              </span>
 
+                              {modelSelection.mode === "auto" && (
+                                <span
+                                  className="composer-model-option-check"
+                                  aria-hidden="true"
+                                >
+                                  ✓
+                                </span>
+                              )}
+                            </button>
+
+                            {enabledModelServices.length > 0 && (
+                              <div className="composer-model-option-divider" />
+                            )}
+
+                            {enabledModelServices.map(
+                              (service) => {
+                                const active =
+                                  modelSelection.mode === "manual" &&
+                                  modelSelection.serviceId === service.id;
+
+                                return (
+                                  <button
+                                    key={service.id}
+                                    className={`composer-model-option ${
+                                      active
+                                        ? "active"
+                                        : ""
+                                    }`}
+                                    type="button"
+                                    role="menuitemradio"
+                                    aria-checked={active}
+                                    onClick={() => {
+                                      setModelSelection({
+                                        mode: "manual",
+                                        serviceId: service.id,
+                                      });
+                                      setShowModelPicker(false);
+                                    }}
+                                  >
+                                    <span className="composer-model-option-main">
+                                      <strong>
+                                        {service.name}
+                                      </strong>
+
+                                      <small>
+                                        {service.modelName}
+                                        {" · "}
+                                        个人模型服务
+                                      </small>
+                                    </span>
+
+                                    {active && (
+                                      <span
+                                        className="composer-model-option-check"
+                                        aria-hidden="true"
+                                      >
+                                        ✓
+                                      </span>
+                                    )}
+                                  </button>
+                                );
+                              },
+                            )}
+
+                            {enabledModelServices.length === 0 && (
+                              <div className="composer-model-empty">
+                                暂无已启用的个人模型服务，可在“模型设置”中添加。
+                              </div>
+                            )}
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <button
+                      className="composer-settings-button composer-settings-button-compact"
+                      onClick={() => {
+                        setShowModelPicker(false);
+                        setShowSettings(true);
+                      }}
+                      type="button"
+                      title="执行偏好"
+                    >
+                      <span className="composer-settings-icon">
                         <Icon
-                          name="arrow"
-                          size={15}
+                          name="tool"
+                          size={14}
                         />
-                      </>
-                    )}
-                  </button>
+                      </span>
+
+                      <span>
+                        执行偏好
+                      </span>
+                    </button>
+                  </div>
+
+                  <div className="composer-footer-right">
+                    <button
+                      className="primary-button run-button"
+                      data-testid="workspace-submit"
+                      disabled={
+                        busy ||
+                        attachments.some((item) => item.status === "uploading") ||
+                        (!text.trim() && !attachments.some((item) => item.status === "ready" && item.server))
+                      }
+                      onClick={() =>
+                        void run()
+                      }
+                    >
+                      {busy ? (
+                        <>
+                          <span className="spinner" />
+
+                          正在运行
+                        </>
+                      ) : (
+                        <>
+                          运行任务
+
+                          <Icon
+                            name="arrow"
+                            size={15}
+                          />
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </footer>
               </div>
             )}
@@ -1098,7 +1496,13 @@ export function Workspace({
               }
             }}
           >
-            <aside className="workspace-details-drawer" role="dialog" aria-modal="true" aria-label="运行详情">
+            <aside
+              className="workspace-details-drawer"
+              data-testid="run-details-drawer"
+              role="dialog"
+              aria-modal="true"
+              aria-label="运行详情"
+            >
               <Suspense fallback={<div className="empty-state">正在加载 Run Details…</div>}>
                 <RunDetails result={detailsResult} onBack={closeRunDetails} display="drawer" />
               </Suspense>

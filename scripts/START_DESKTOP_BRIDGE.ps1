@@ -1,0 +1,72 @@
+param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Root,
+
+    [switch]$ReadOnly,
+    [switch]$AllowDelete,
+    [switch]$AllowSensitive,
+
+    [string]$Token = "",
+    [int]$Port = 9583
+)
+
+$ErrorActionPreference = "Stop"
+$Repo = Split-Path $PSScriptRoot -Parent
+$Bridge = Join-Path $Repo "desktop-bridge"
+
+if (-not (Test-Path $Bridge)) {
+    throw "desktop-bridge directory not found: $Bridge"
+}
+
+if ([string]::IsNullOrWhiteSpace($Token)) {
+    $Bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($Bytes)
+    $Token = [Convert]::ToHexString($Bytes).ToLowerInvariant()
+}
+
+$Grants = @(
+    foreach ($Item in $Root) {
+        $Resolved = [System.IO.Path]::GetFullPath($Item)
+        [ordered]@{
+            path           = $Resolved
+            read           = $true
+            write          = -not $ReadOnly.IsPresent
+            delete         = $AllowDelete.IsPresent -and -not $ReadOnly.IsPresent
+            allowSensitive = $AllowSensitive.IsPresent
+        }
+    }
+)
+
+$env:DESKTOP_BRIDGE_HOST = "127.0.0.1"
+$env:DESKTOP_BRIDGE_PORT = "$Port"
+$env:DESKTOP_BRIDGE_TOKEN = $Token
+$env:DESKTOP_ALLOWED_ROOTS_JSON = ($Grants | ConvertTo-Json -Compress -Depth 6)
+
+Write-Host ""
+Write-Host "===== AgentMesh Desktop Bridge =====" -ForegroundColor Cyan
+Write-Host "URL    : http://127.0.0.1:$Port"
+Write-Host "Roots  :"
+$Grants | ForEach-Object {
+    Write-Host "  - $($_.path) read=$($_.read) write=$($_.write) delete=$($_.delete) sensitive=$($_.allowSensitive)"
+}
+Write-Host ""
+Write-Host "Runtime shell must use the same token:" -ForegroundColor Yellow
+Write-Host '$env:DESKTOP_BRIDGE_ENABLED = "true"'
+Write-Host '$env:DESKTOP_BRIDGE_BASE_URL = "http://127.0.0.1:'$Port'"'
+Write-Host '$env:DESKTOP_BRIDGE_TOKEN = "'$Token'"'
+Write-Host ""
+Write-Host "The token is not written to the repository." -ForegroundColor DarkGray
+Write-Host ""
+
+Push-Location $Bridge
+try {
+    python -c "import fastapi, uvicorn" 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Missing Desktop Bridge dependencies. Run: python -m pip install -r `"$Bridge\requirements.txt`""
+    }
+
+    python -m uvicorn desktop_bridge.app:app --host 127.0.0.1 --port $Port
+}
+finally {
+    Pop-Location
+}

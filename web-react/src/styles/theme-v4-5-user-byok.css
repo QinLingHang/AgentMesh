@@ -130,12 +130,40 @@
 }
 
 .model-enabled-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 9px;
+  width: auto;
   margin-top: 16px;
   color: #53635d;
   font-size: 14px;
+  cursor: pointer;
+}
+
+.model-enabled-row input[type="checkbox"] {
+  flex: 0 0 17px;
+  width: 17px !important;
+  height: 17px !important;
+  min-width: 17px;
+  min-height: 17px;
+
+  margin: 0;
+  padding: 0 !important;
+
+  border-radius: 4px;
+  box-shadow: none !important;
+
+  accent-color: #5f8b7d;
+  cursor: pointer;
+}
+
+.model-enabled-row span {
+  display: inline;
+  width: auto;
+  margin: 0;
+  color: #53635d;
+  line-height: 1.4;
+  cursor: pointer;
 }
 
 .model-security-note {
@@ -213,5 +241,588 @@
   }
   .model-api-key-field {
     grid-column: auto;
+  }
+}
+
+/* =========================================================
+   Multi-model service pool
+   ========================================================= */
+
+.model-pool-card {
+  padding: 22px 24px;
+  border: 1px solid #dde5e0;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 10px 26px rgba(35, 54, 47, 0.035);
+}
+
+.model-pool-head,
+.model-pool-head > div {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.model-pool-head {
+  justify-content: space-between;
+}
+
+.model-pool-head h2 {
+  margin: 0;
+  color: #26332f;
+  font-size: 20px;
+}
+
+.model-pool-head p {
+  margin: 6px 0 0;
+  color: #788680;
+  line-height: 1.65;
+}
+
+.model-service-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.model-service-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 15px;
+  border: 1px solid #dfe7e2;
+  border-radius: 15px;
+  background: #fbfcfb;
+}
+
+.model-service-card.disabled {
+  opacity: 0.72;
+}
+
+.model-service-main {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.model-service-mark {
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border-radius: 11px;
+  color: #5e8b7b;
+  background: #edf4f0;
+}
+
+.model-service-main > div {
+  min-width: 0;
+}
+
+.model-service-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.model-service-title strong {
+  color: #263630;
+  font-size: 15px;
+}
+
+.model-service-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  background: #eef3f0;
+  color: #677770;
+  font-size: 11px;
+}
+
+.model-service-tag.route {
+  background: #e9f4ef;
+  color: #4f7d6c;
+}
+
+.model-service-main p {
+  margin: 5px 0 2px;
+  color: #596a63;
+  font-size: 13px;
+}
+
+.model-service-main small {
+  color: #89958f;
+  font-size: 12px;
+}
+
+.model-service-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.model-pool-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  margin-top: 18px;
+  border: 1px dashed #dce5e0;
+  border-radius: 16px;
+  background: #fafcfb;
+  color: #7d8a84;
+  text-align: center;
+}
+
+.model-pool-empty strong {
+  color: #33433d;
+}
+
+.model-pool-empty .calm-button {
+  margin-top: 6px;
+}
+
+.model-service-editor {
+  margin-top: 18px;
+}
+
+.model-service-toggles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-top: 4px;
+}
+
+.model-wide-field {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 900px) {
+  .model-pool-head,
+  .model-service-card {
+    grid-template-columns: 1fr;
+  }
+
+  .model-pool-head {
+    display: grid;
+  }
+
+  .model-service-card {
+    display: grid;
+  }
+
+  .model-service-actions {
+    justify-content: flex-start;
+  }
+
+  .model-wide-field {
+    grid-column: auto;
+  }
+}
+
+/* =========================================================
+   Workspace task-level model selector
+   Compact trigger + floating model menu
+   ========================================================= */
+
+/*
+ * Keep the composer compact. Model choice is a secondary action,
+ * so the trigger behaves like a lightweight text control instead of
+ * a form card.
+ */
+.tab-workspace .workspace-composer-area,
+.tab-workspace .composer.composer-compact {
+  overflow: visible;
+}
+
+.tab-workspace .composer-footer-clean {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  min-height: 50px;
+  padding: 8px 10px 9px 12px;
+}
+
+.tab-workspace .composer-footer-left,
+.tab-workspace .composer-footer-right {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.tab-workspace .composer-footer-left {
+  flex: 1 1 auto;
+  gap: 3px;
+}
+
+.tab-workspace .composer-footer-right {
+  flex: 0 0 auto;
+  gap: 9px;
+  margin-left: auto;
+}
+
+/* -------------------------
+   Compact model trigger
+   ------------------------- */
+
+.tab-workspace .composer-model-menu {
+  position: relative;
+  z-index: 30;
+
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.tab-workspace .composer-model-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  width: auto;
+  max-width: 190px;
+  height: 32px;
+
+  margin: 0;
+  padding: 0 8px;
+
+  border: 0;
+  border-radius: 8px;
+
+  background: transparent;
+  color: #495952;
+
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  line-height: 1;
+
+  cursor: pointer;
+
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.tab-workspace .composer-model-trigger:hover,
+.tab-workspace .composer-model-menu.open .composer-model-trigger {
+  background: #f1f5f3;
+  color: #273b34;
+}
+
+.tab-workspace .composer-model-trigger:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(95, 139, 125, 0.14);
+}
+
+.tab-workspace .composer-model-trigger-label {
+  min-width: 0;
+
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-workspace .composer-model-trigger-chevron {
+  flex: 0 0 auto;
+
+  margin-top: -2px;
+
+  color: #7f8c86;
+
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+
+  transition: transform 0.15s ease;
+}
+
+.tab-workspace .composer-model-menu.open
+  .composer-model-trigger-chevron {
+  transform: rotate(180deg);
+}
+
+/* -------------------------
+   Click-outside layer
+   ------------------------- */
+
+.tab-workspace .composer-model-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+
+  display: block;
+
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+
+  border: 0;
+  border-radius: 0;
+
+  background: transparent;
+
+  cursor: default;
+}
+
+/* -------------------------
+   Floating menu
+   ------------------------- */
+
+.tab-workspace .composer-model-popover {
+  position: absolute;
+
+  left: 0;
+  bottom: calc(100% + 9px);
+
+  z-index: 1001;
+
+  width: 326px;
+  max-width: min(326px, calc(100vw - 32px));
+  max-height: 360px;
+
+  padding: 7px;
+
+  overflow-x: hidden;
+  overflow-y: auto;
+
+  border: 1px solid #dce4df;
+  border-radius: 13px;
+
+  background: #ffffff;
+
+  box-shadow:
+    0 18px 44px rgba(36, 55, 48, 0.14),
+    0 3px 10px rgba(36, 55, 48, 0.07);
+}
+
+.tab-workspace .composer-model-popover-title {
+  padding: 7px 9px 8px;
+
+  color: #8a9690;
+
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.tab-workspace .composer-model-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  width: 100%;
+  min-height: 52px;
+
+  margin: 0;
+  padding: 9px 10px;
+
+  border: 0;
+  border-radius: 9px;
+
+  background: transparent;
+
+  text-align: left;
+
+  cursor: pointer;
+
+  transition:
+    background 0.13s ease,
+    color 0.13s ease;
+}
+
+.tab-workspace .composer-model-option:hover {
+  background: #f5f7f6;
+}
+
+.tab-workspace .composer-model-option.active {
+  background: #edf4f1;
+}
+
+.tab-workspace .composer-model-option-main {
+  display: grid;
+  gap: 3px;
+
+  min-width: 0;
+}
+
+.tab-workspace .composer-model-option-main strong {
+  min-width: 0;
+
+  overflow: hidden;
+
+  color: #2b3934;
+
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.25;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-workspace .composer-model-option-main small {
+  min-width: 0;
+
+  overflow: hidden;
+
+  color: #8b9791;
+
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 1.35;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tab-workspace .composer-model-option-check {
+  flex: 0 0 auto;
+
+  color: #5f8b7d;
+
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.tab-workspace .composer-model-option-divider {
+  height: 1px;
+
+  margin: 5px 7px;
+
+  background: #edf1ef;
+}
+
+.tab-workspace .composer-model-empty {
+  padding: 13px 10px 14px;
+
+  color: #909c96;
+
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+/* -------------------------
+   Compact execution settings
+   ------------------------- */
+
+.tab-workspace .composer-settings-button-compact {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+
+  width: auto;
+  min-width: 0;
+  height: 32px;
+
+  margin: 0;
+  padding: 0 8px;
+
+  border: 0;
+  border-radius: 8px;
+
+  background: transparent;
+  color: #62716b;
+
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+
+  cursor: pointer;
+
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+.tab-workspace .composer-settings-button-compact:hover {
+  background: #f1f5f3;
+  color: #30443c;
+}
+
+.tab-workspace
+  .composer-settings-button-compact
+  .composer-settings-icon {
+  display: grid;
+  place-items: center;
+
+  width: 22px;
+  height: 22px;
+
+  border: 0;
+  border-radius: 7px;
+
+  background: #edf4f1;
+  color: #688b7e;
+}
+
+/* Keep the right side light and single-line. */
+.tab-workspace .composer-footer-clean .composer-keyboard-hint {
+  color: #9aa49f;
+
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.tab-workspace .composer-footer-clean .run-button {
+  flex: 0 0 auto;
+
+  width: auto !important;
+  min-width: 104px;
+  min-height: 34px;
+
+  margin: 0;
+}
+
+/* -------------------------
+   Responsive
+   ------------------------- */
+
+@media (max-width: 760px) {
+  .tab-workspace .composer-footer-clean {
+    gap: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+
+  .tab-workspace .composer-footer-left {
+    gap: 0;
+  }
+
+  .tab-workspace .composer-model-trigger {
+    max-width: 128px;
+    padding-inline: 6px;
+  }
+
+  .tab-workspace .composer-model-popover {
+    width: min(310px, calc(100vw - 24px));
+  }
+
+  .tab-workspace .composer-settings-button-compact {
+    padding-inline: 6px;
+  }
+
+  .tab-workspace
+    .composer-settings-button-compact
+    > span:last-child {
+    display: none;
+  }
+
+  .tab-workspace .composer-keyboard-hint {
+    display: none;
+  }
+
+  .tab-workspace .composer-footer-clean .run-button {
+    min-width: 92px;
   }
 }
