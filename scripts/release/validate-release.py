@@ -133,7 +133,8 @@ def tree_hygiene_findings(root: Path) -> list[str]:
         if any(part.startswith(FORBIDDEN_DIR_PREFIXES) for part in rel.parts):
             findings.append(str(rel))
             continue
-        if any(BACKUP_DIR_PATTERN.search(part) for part in rel.parts):
+        dir_parts = rel.parts[:-1] if (path.is_file() or path.is_symlink()) else rel.parts
+        if any(BACKUP_DIR_PATTERN.search(part) for part in dir_parts):
             findings.append(str(rel))
             continue
         if path.is_file() or path.is_symlink():

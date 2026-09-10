@@ -5,14 +5,14 @@
   "status": "release",
   "basedOnRelease": "v1.0.0-rc.2",
   "publishable": true,
-  "generatedAtUtc": "2026-09-10T09:54:29.583991Z",
+  "generatedAtUtc": "2026-09-10T10:01:36.923958Z",
   "manifestExcluded": true,
   "release": {
     "candidate": "1.0.0",
     "final_target": "1.0.0"
   },
   "fileCount": 621,
-  "totalBytes": 4447157,
+  "totalBytes": 4447248,
   "files": [
     {
       "path": ".env.auth-session.example",
@@ -2376,8 +2376,8 @@
     },
     {
       "path": "scripts/release/validate-release.py",
-      "bytes": 6398,
-      "sha256": "3998C588FF8DB84EA14CA122F8EAE80E2AE24425ECF0C6B5B1726F9131453DCE"
+      "bytes": 6489,
+      "sha256": "37A4CB20F5CF29C3ED7BF82DF790D389EB8004735A337528421F3CD1B5D7F6C6"
     },
     {
       "path": "sdk/README.md",
