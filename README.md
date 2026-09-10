@@ -1278,3 +1278,14 @@ Govern Runtime.
 ```
 
 **面向真实工程场景构建可扩展、可治理、可观测的 Agent Runtime。**
+
+## Release
+
+Current stable release: **AgentMesh v1.0.0**
+
+Release and operations documentation:
+
+- [Final release](docs/p12/FINAL_RELEASE.md)
+- [Full manual acceptance](docs/p12/FULL_MANUAL_ACCEPTANCE.md)
+- [Production runbook](docs/p10/RUNBOOK.md)
+- [P11 completion](docs/p11/P11_COMPLETION.md)

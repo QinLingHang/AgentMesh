@@ -6,7 +6,7 @@ import re
 import json
 from pathlib import Path
 
-EXPECTED_VERSION = "1.0.0-rc.1"
+EXPECTED_VERSION = "1.0.0"
 FINAL_TARGET = "1.0.0"
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]
@@ -115,7 +115,6 @@ def check_required(root: Path) -> None:
 def check_readme(root: Path) -> None:
     text = (root / "README.md").read_text(encoding="utf-8")
     for needle in [
-        "v1.0.0-rc.1",
         "docs/p12/FINAL_RELEASE.md",
         "docs/p12/FULL_MANUAL_ACCEPTANCE.md",
         "docs/p10/RUNBOOK.md",

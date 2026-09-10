@@ -1,7 +1,7 @@
 {
   "name": "agentmesh-web",
   "private": true,
-  "version": "4.0.0-dev",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
