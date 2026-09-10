@@ -691,6 +691,41 @@ func (h *ConversationHandler) Messages(
 	)
 }
 
+func (h *ConversationHandler) MessagePage(c *gin.Context) {
+	id, valid := idParam(c)
+	if !valid {
+		return
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			fail(c, http.StatusBadRequest, 40010, "分页参数不合法")
+			return
+		}
+		limit = parsed
+	}
+
+	var beforeID int64
+	if raw := strings.TrimSpace(c.Query("beforeId")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			fail(c, http.StatusBadRequest, 40010, "分页游标不合法")
+			return
+		}
+		beforeID = parsed
+	}
+
+	page, err := h.s.MessagePage(c, uid(c), id, beforeID, limit)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+
+	ok(c, page)
+}
+
 // =========================================================
 // Agent
 // =========================================================

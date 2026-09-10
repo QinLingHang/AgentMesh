@@ -233,6 +233,7 @@ def health():
     return {
         "status": "ok" if settings.token and settings.grants else "not_configured",
         "service": "agentmesh-desktop-bridge",
+        "accessMode": settings.access_mode,
         "authorizedRoots": len(settings.grants),
         "computerUseEnabled": settings.computer_use_enabled,
         "advancedTerminalEnabled": settings.allow_terminal,

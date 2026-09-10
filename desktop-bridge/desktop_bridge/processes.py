@@ -74,7 +74,7 @@ class _ManagedProcess:
 class ProcessManager:
     def __init__(self, settings: Settings, audit: AuditLogger | None = None):
         self.settings = settings
-        self.policy = PathPolicy(settings.grants)
+        self.policy = PathPolicy(settings.grants, settings.access_mode)
         self.audit = audit or AuditLogger(settings.audit_file)
         self._processes: dict[str, _ManagedProcess] = {}
         self._lock = threading.Lock()
@@ -85,8 +85,15 @@ class ProcessManager:
             if not target.exists() or not target.is_dir():
                 raise NotADirectoryError("working directory does not exist")
             return target
+        if self.settings.default_working_directory is not None:
+            try:
+                target, _ = self.policy.resolve(str(self.settings.default_working_directory), "read")
+                if target.exists() and target.is_dir():
+                    return target
+            except DesktopPermissionError:
+                pass
         if not self.settings.grants:
-            raise DesktopPermissionError("at least one authorized root is required for local process execution")
+            raise DesktopPermissionError("at least one accessible local root is required for local process execution")
         target, _ = self.policy.resolve(str(self.settings.grants[0].path), "read")
         return target
 

@@ -813,6 +813,79 @@ func (r *MySQL) ListMessages(
 	return result, rows.Err()
 }
 
+// ListMessagesBefore pages the durable conversation log without deleting or
+// truncating older rows. Cursoring by the immutable message id keeps pagination
+// stable while new turns are appended concurrently. The query fetches limit+1
+// rows so hasMore is authoritative without a separate COUNT(*) round-trip.
+func (r *MySQL) ListMessagesBefore(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	beforeID int64,
+	limit int,
+) ([]model.Message, bool, error) {
+	var ownedID int64
+	if err := r.db.QueryRowContext(
+		ctx,
+		`SELECT id FROM conversations WHERE id = ? AND user_id = ? LIMIT 1`,
+		conversationID,
+		uid,
+	).Scan(&ownedID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, ErrNotOwned
+		}
+		return nil, false, err
+	}
+
+	if limit <= 0 {
+		return []model.Message{}, false, nil
+	}
+
+	query := `
+		SELECT id, conversation_id, role, content, status, request_id, metadata_json, created_at
+		FROM messages
+		WHERE conversation_id = ?
+	`
+	args := []any{conversationID}
+	if beforeID > 0 {
+		query += ` AND id < ?`
+		args = append(args, beforeID)
+	}
+	query += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit+1)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	newestFirst := make([]model.Message, 0, limit+1)
+	for rows.Next() {
+		message, scanErr := scanMessage(rows)
+		if scanErr != nil {
+			return nil, false, scanErr
+		}
+		newestFirst = append(newestFirst, *message)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+
+	hasMore := len(newestFirst) > limit
+	if hasMore {
+		newestFirst = newestFirst[:limit]
+	}
+
+	// API consumers render each page chronologically. Older pages are prepended
+	// client-side, so the full thread remains first-turn -> latest-turn.
+	for left, right := 0, len(newestFirst)-1; left < right; left, right = left+1, right-1 {
+		newestFirst[left], newestFirst[right] = newestFirst[right], newestFirst[left]
+	}
+
+	return newestFirst, hasMore, nil
+}
+
 // =========================================================
 // Agent
 // =========================================================
@@ -2468,4 +2541,261 @@ func (r *MySQL) DebugCounts(
 		agents,
 		tasks,
 	), nil
+}
+
+// =========================================================
+// Conversation Memory Capsules
+// =========================================================
+
+func scanConversationMemoryCapsule(s scanner) (*model.ConversationMemoryCapsule, error) {
+	var item model.ConversationMemoryCapsule
+	var factsJSON []byte
+	var decisionsJSON []byte
+	var openTasksJSON []byte
+	var entitiesJSON []byte
+	var keywordsJSON []byte
+	var estimatedCost sql.NullFloat64
+
+	if err := s.Scan(
+		&item.ID,
+		&item.UserID,
+		&item.ConversationID,
+		&item.StartMessageID,
+		&item.EndMessageID,
+		&item.Summary,
+		&factsJSON,
+		&decisionsJSON,
+		&openTasksJSON,
+		&entitiesJSON,
+		&keywordsJSON,
+		&item.Importance,
+		&item.SourceHash,
+		&item.CompactionModel,
+		&item.InputTokens,
+		&item.OutputTokens,
+		&estimatedCost,
+		&item.CreatedAt,
+		&item.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+
+	_ = json.Unmarshal(factsJSON, &item.Facts)
+	_ = json.Unmarshal(decisionsJSON, &item.Decisions)
+	_ = json.Unmarshal(openTasksJSON, &item.OpenTasks)
+	_ = json.Unmarshal(entitiesJSON, &item.Entities)
+	_ = json.Unmarshal(keywordsJSON, &item.Keywords)
+	if item.Facts == nil {
+		item.Facts = []string{}
+	}
+	if item.Decisions == nil {
+		item.Decisions = []string{}
+	}
+	if item.OpenTasks == nil {
+		item.OpenTasks = []string{}
+	}
+	if item.Entities == nil {
+		item.Entities = []string{}
+	}
+	if item.Keywords == nil {
+		item.Keywords = []string{}
+	}
+	if estimatedCost.Valid {
+		value := estimatedCost.Float64
+		item.EstimatedCost = &value
+	}
+	return &item, nil
+}
+
+func (r *MySQL) ensureConversationOwned(ctx context.Context, uid, conversationID int64) error {
+	var id int64
+	if err := r.db.QueryRowContext(
+		ctx,
+		`SELECT id FROM conversations WHERE id = ? AND user_id = ? LIMIT 1`,
+		conversationID,
+		uid,
+	).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotOwned
+		}
+		return err
+	}
+	return nil
+}
+
+func (r *MySQL) ListConversationMemoryCapsules(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	limit int,
+) ([]model.ConversationMemoryCapsule, error) {
+	if err := r.ensureConversationOwned(ctx, uid, conversationID); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		return []model.ConversationMemoryCapsule{}, nil
+	}
+
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT
+			id,user_id,conversation_id,start_message_id,end_message_id,summary,
+			facts_json,decisions_json,open_tasks_json,entities_json,keywords_json,
+			importance,source_hash,compaction_model,input_tokens,output_tokens,estimated_cost,created_at,updated_at
+		 FROM conversation_memory_capsules
+		 WHERE user_id = ? AND conversation_id = ?
+		 ORDER BY end_message_id DESC
+		 LIMIT ?`,
+		uid,
+		conversationID,
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.ConversationMemoryCapsule, 0, limit)
+	for rows.Next() {
+		item, scanErr := scanConversationMemoryCapsule(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+func (r *MySQL) UpsertConversationMemoryCapsule(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	input model.ConversationMemoryCapsuleWrite,
+) (*model.ConversationMemoryCapsule, error) {
+	if err := r.ensureConversationOwned(ctx, uid, conversationID); err != nil {
+		return nil, err
+	}
+
+	factsJSON, _ := json.Marshal(input.Facts)
+	decisionsJSON, _ := json.Marshal(input.Decisions)
+	openTasksJSON, _ := json.Marshal(input.OpenTasks)
+	entitiesJSON, _ := json.Marshal(input.Entities)
+	keywordsJSON, _ := json.Marshal(input.Keywords)
+
+	_, err := r.db.ExecContext(
+		ctx,
+		`INSERT INTO conversation_memory_capsules(
+			user_id,conversation_id,start_message_id,end_message_id,summary,
+			facts_json,decisions_json,open_tasks_json,entities_json,keywords_json,
+			importance,source_hash,compaction_model,input_tokens,output_tokens,estimated_cost
+		 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		 ON DUPLICATE KEY UPDATE
+			summary=VALUES(summary),
+			facts_json=VALUES(facts_json),
+			decisions_json=VALUES(decisions_json),
+			open_tasks_json=VALUES(open_tasks_json),
+			entities_json=VALUES(entities_json),
+			keywords_json=VALUES(keywords_json),
+			importance=VALUES(importance),
+			source_hash=VALUES(source_hash),
+			compaction_model=VALUES(compaction_model),
+			input_tokens=VALUES(input_tokens),
+			output_tokens=VALUES(output_tokens),
+			estimated_cost=VALUES(estimated_cost),
+			updated_at=CURRENT_TIMESTAMP(6)`,
+		uid,
+		conversationID,
+		input.StartMessageID,
+		input.EndMessageID,
+		input.Summary,
+		factsJSON,
+		decisionsJSON,
+		openTasksJSON,
+		entitiesJSON,
+		keywordsJSON,
+		input.Importance,
+		input.SourceHash,
+		input.CompactionModel,
+		input.InputTokens,
+		input.OutputTokens,
+		input.EstimatedCost,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	row := r.db.QueryRowContext(
+		ctx,
+		`SELECT
+			id,user_id,conversation_id,start_message_id,end_message_id,summary,
+			facts_json,decisions_json,open_tasks_json,entities_json,keywords_json,
+			importance,source_hash,compaction_model,input_tokens,output_tokens,estimated_cost,created_at,updated_at
+		 FROM conversation_memory_capsules
+		 WHERE user_id = ? AND conversation_id = ?
+		   AND start_message_id = ? AND end_message_id = ?
+		 LIMIT 1`,
+		uid,
+		conversationID,
+		input.StartMessageID,
+		input.EndMessageID,
+	)
+	return scanConversationMemoryCapsule(row)
+}
+
+func (r *MySQL) ConversationCompactionWindow(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	afterID int64,
+	minMessages int,
+	maxMessages int,
+	reserveRecent int,
+) ([]model.Message, error) {
+	if err := r.ensureConversationOwned(ctx, uid, conversationID); err != nil {
+		return nil, err
+	}
+
+	fetchLimit := maxMessages + reserveRecent
+	rows, err := r.db.QueryContext(
+		ctx,
+		`SELECT id, conversation_id, role, content, status, request_id, metadata_json, created_at
+		 FROM messages
+		 WHERE conversation_id = ?
+		   AND id > ?
+		   AND role IN ('user','assistant')
+		   AND content <> ''
+		 ORDER BY id ASC
+		 LIMIT ?`,
+		conversationID,
+		afterID,
+		fetchLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]model.Message, 0, fetchLimit)
+	for rows.Next() {
+		item, scanErr := scanMessage(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		items = append(items, *item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(items) < minMessages+reserveRecent {
+		return []model.Message{}, nil
+	}
+	eligible := len(items) - reserveRecent
+	if eligible > maxMessages {
+		eligible = maxMessages
+	}
+	if eligible < minMessages {
+		return []model.Message{}, nil
+	}
+	return items[:eligible], nil
 }

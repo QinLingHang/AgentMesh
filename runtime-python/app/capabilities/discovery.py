@@ -94,6 +94,39 @@ _CHINESE_RUN = re.compile(r"[\u3400-\u9fff]+")
 _PROJECT_CODE = re.compile(r"\b(?:p\d+|v\d+(?:\.\d+)*|[a-z]{2,}(?:[-_][a-z0-9]+)+)\b", re.IGNORECASE)
 _WINDOWS_PATH = re.compile(r"\b[a-z]:[\\/]", re.IGNORECASE)
 _UNIX_PATH = re.compile(r"(?:^|\s)/(?:home|users|tmp|var|opt|mnt|workspace)(?:/|\b)", re.IGNORECASE)
+_QUOTED_WINDOWS_PATH = re.compile(
+    r'''(?i)([\"'])\b[a-z]:[\\/].*?\1'''
+)
+_UNQUOTED_WINDOWS_PATH = re.compile(
+    r'''(?i)\b[a-z]:[\\/][^\s，。！？；,;\"']*'''
+)
+_QUOTED_UNIX_PATH = re.compile(
+    r'''(?i)([\"'])/(?:home|users|tmp|var|opt|mnt|workspace)/.*?\1'''
+)
+_UNQUOTED_UNIX_PATH = re.compile(
+    r'''(?i)(?:^|\s)/(?:home|users|tmp|var|opt|mnt|workspace)/[^\s，。！？；,;\"']*'''
+)
+
+
+def _without_filesystem_paths(text: str) -> str:
+    """Remove path literals before intent keyword matching.
+
+    A path is data, not intent. Directory names such as ``runtime-python``,
+    ``tests`` or ``build`` must never be interpreted as requests to run Python,
+    tests or a build command. Explicit path presence is still detected by the
+    dedicated path regexes above; this helper is only for lexical intent cues.
+    """
+
+    scrubbed = str(text or "")
+    for pattern in (
+        _QUOTED_WINDOWS_PATH,
+        _QUOTED_UNIX_PATH,
+        _UNQUOTED_WINDOWS_PATH,
+        _UNQUOTED_UNIX_PATH,
+    ):
+        scrubbed = pattern.sub(" ", scrubbed)
+    return " ".join(scrubbed.split())
+
 
 
 _CONTINUATION_EXACT = {
@@ -568,6 +601,156 @@ _ACTION_SIGNALS = (
 )
 
 
+_CLI_EXECUTION_SIGNALS = (
+    "命令行",
+    "终端",
+    "cli",
+    "shell",
+    "powershell",
+    "cmd",
+    "构建",
+    "编译",
+    "测试",
+    "运行",
+    "执行",
+    "run",
+    "execute",
+    "build",
+    "test",
+    "go test",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "docker ",
+    "ffmpeg ",
+    "python -",
+)
+
+_READ_ONLY_FS_SIGNALS = (
+    "读取",
+    "阅读",
+    "查看",
+    "看看",
+    "打开",
+    "查找",
+    "找到",
+    "搜索",
+    "内容",
+    "前面",
+    "read",
+    "view",
+    "open",
+    "find",
+    "search",
+    "content",
+)
+
+_FS_MUTATION_SIGNALS = (
+    "写入",
+    "保存",
+    "新建",
+    "创建",
+    "复制",
+    "拷贝",
+    "移动",
+    "重命名",
+    "删除",
+    "移除",
+    "修改",
+    "覆盖",
+    "write",
+    "save",
+    "create",
+    "copy",
+    "move",
+    "rename",
+    "delete",
+    "remove",
+    "modify",
+    "overwrite",
+)
+
+
+_CLI_EXECUTION_ACTION_SIGNALS = (
+    "运行命令",
+    "执行命令",
+    "运行工具",
+    "执行工具",
+    "命令行",
+    "终端",
+    "cli",
+    "shell",
+    "powershell",
+    "pwsh",
+    "cmd",
+    "构建",
+    "编译",
+    "运行测试",
+    "执行测试",
+    "跑测试",
+    "跑一下测试",
+    "run test",
+    "run tests",
+    "execute test",
+    "execute tests",
+    "build project",
+)
+
+_CLI_TOOL_NAME_SIGNALS = (
+    "python",
+    "pytest",
+    "pip ",
+    "git ",
+    "go test",
+    "go run",
+    "node ",
+    "npm ",
+    "pnpm ",
+    "yarn ",
+    "ffmpeg ",
+    "docker ",
+    "mvn ",
+    "maven ",
+    "gradle ",
+    "javac ",
+    "java -jar",
+)
+
+
+def _has_explicit_cli_execution_intent(task: str) -> bool:
+    """Return True only when the current turn actually requests code/CLI execution.
+
+    Words such as ``测试/test`` are common nouns in ordinary conversation
+    (for example, "记住这个测试标记").  They must not by themselves expose
+    ``local.tool.run``.  Paths are scrubbed first because directory names are
+    data, not execution intent.
+    """
+
+    intent_text = _without_filesystem_paths(task).casefold()
+    if _contains_any(intent_text, _CLI_EXECUTION_ACTION_SIGNALS):
+        return True
+
+    has_run_action = _contains_any(
+        intent_text,
+        ("运行", "执行", "跑一下", "跑", "run ", "execute "),
+    )
+    if has_run_action and _contains_any(intent_text, _CLI_TOOL_NAME_SIGNALS):
+        return True
+
+    return False
+
+
+def _is_read_only_filesystem_intent(task: str) -> bool:
+    has_path = bool(_WINDOWS_PATH.search(task) or _UNIX_PATH.search(task))
+    intent_text = _without_filesystem_paths(task)
+    return bool(
+        has_path
+        and _contains_any(intent_text, _READ_ONLY_FS_SIGNALS)
+        and not _contains_any(intent_text, _FS_MUTATION_SIGNALS)
+        and not _contains_any(intent_text, _CLI_EXECUTION_SIGNALS)
+    )
+
+
 def _descriptor_for_tool(tool: ToolDefinition) -> str:
     name = str(tool.name or "").strip()
     parts = [name, str(tool.description or "")]
@@ -594,6 +777,7 @@ def _descriptor_for_tool(tool: ToolDefinition) -> str:
 def _tool_family_boost(task: str, name: str) -> tuple[float, str]:
     lower_name = name.casefold()
     normalized = task.casefold()
+    intent_normalized = _without_filesystem_paths(task).casefold()
 
     groups: list[tuple[str, tuple[str, ...], float]] = [
         ("local.fs.", ("桌面", "文件", "文件夹", "目录", "路径", "本机", "本地", "desktop", "file", "folder", "directory", "path"), 0.18),
@@ -617,7 +801,7 @@ def _tool_family_boost(task: str, name: str) -> tuple[float, str]:
         # local code. "Python 和 Java 有什么区别" must remain ordinary chat.
         if prefix == "local.tool.":
             explicit_cli = any(
-                signal in normalized
+                signal in intent_normalized
                 for signal in ("命令行", "cli", "构建", "编译", "测试", "npm", "pnpm", "yarn", "ffmpeg", "docker")
             )
             if not explicit_cli and not _contains_any(task, _ACTION_SIGNALS):
@@ -638,7 +822,9 @@ def _tool_family_boost(task: str, name: str) -> tuple[float, str]:
         if lower_name.startswith("local.fs."):
             return 0.44, "task contains an explicit local filesystem path"
         if lower_name.startswith("local.tool."):
-            return 0.18, "task contains a local working path"
+            if _contains_any(_without_filesystem_paths(task), _CLI_EXECUTION_SIGNALS):
+                return 0.18, "task contains a local working path for explicit CLI execution"
+            return 0.0, ""
 
     return 0.0, ""
 
@@ -709,6 +895,31 @@ def _rank_tool(task: str, tool: ToolDefinition, *, kind: CapabilityKind) -> Capa
             score = min(score, 0.27)
 
     lower_tool_name = tool.name.casefold()
+
+    if (
+        lower_tool_name == "local.tool.run"
+        and not _has_explicit_cli_execution_intent(task)
+        and lower_tool_name not in task.casefold()
+    ):
+        # ``test/测试`` is frequently descriptive content rather than an
+        # instruction to execute code.  Do not let lexical overlap alone turn
+        # an ordinary turn (for example, "记住这个测试标记") into a high-risk
+        # CLI action.  Explicit command/tool execution remains available.
+        score = min(score, 0.18)
+        reasons.append("no explicit CLI execution intent; code execution suppressed")
+
+    if (
+        lower_tool_name.startswith(("local.tool.", "local.terminal."))
+        and _is_read_only_filesystem_intent(task)
+    ):
+        # Least privilege: a request to inspect/read/search an ordinary local
+        # file must not expose code-execution primitives merely because the task
+        # contains a concrete local path. Keep CLI/terminal execution below the
+        # capability-selection threshold unless the user actually asked to run
+        # a command/tool.
+        score = min(score, 0.18)
+        reasons.append("read-only filesystem intent; code execution suppressed")
+
     if lower_tool_name.startswith("local.fs."):
         mutating_fs = {
             "local.fs.write", "local.fs.mkdir", "local.fs.copy",
@@ -1124,6 +1335,8 @@ def discovery_context(result: CapabilityDiscoveryResult) -> str:
         + "\n\n"
         + "AgentMesh selected these capabilities because they are relevant to the current task. "
         + "Use an available tool when it can directly observe or perform what the user requested. "
+        + "Prefer the lowest-risk capability that directly satisfies the request; ordinary local file inspection "
+        + "must use local.fs.list/stat/read/search instead of local.tool.run or terminal execution. "
         + "Do not claim that a selected capability is unavailable before attempting the appropriate tool. "
         + "If execution requires approval or authorization, call the capability normally so Runtime can request it."
     )

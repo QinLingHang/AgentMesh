@@ -274,7 +274,7 @@ class InteractiveStreamRequest(BaseModel):
     request_id: str
     conversation_id: int | None = Field(default=None, alias="conversationId")
     task: str = Field(min_length=1, max_length=20000)
-    history: list[InteractiveMessage] = Field(default_factory=list, max_length=10)
+    history: list[InteractiveMessage] = Field(default_factory=list, max_length=48)
     project_model: ProjectModelRuntime | None = Field(default=None, alias="projectModel")
     model_pool: list[ProjectModelRuntime] = Field(default_factory=list, alias="modelPool", max_length=32)
     model_selection: ModelSelection = Field(default_factory=ModelSelection, alias="modelSelection")
@@ -328,7 +328,7 @@ class RuntimeRequest(
     # plane.  It spans both interactive-stream and full-runtime turns.
     history: list[InteractiveMessage] = Field(
         default_factory=list,
-        max_length=12,
+        max_length=48,
     )
 
     scheduler: Literal[

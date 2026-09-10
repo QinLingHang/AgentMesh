@@ -14,6 +14,9 @@ import {
   Icon,
 } from "../../components/common/Icon";
 import {
+  lightDialogControlStyle,
+} from "../../components/common/lightDialogControlStyle";
+import {
   RuntimeStatusBadge,
 } from "../../components/common/RuntimeStatusBadge";
 import {
@@ -832,6 +835,7 @@ export function ProjectHome({
 
               <input
                 autoFocus
+                style={lightDialogControlStyle}
                 value={editName}
                 maxLength={80}
                 disabled={editBusy}
@@ -849,6 +853,7 @@ export function ProjectHome({
               </span>
 
               <textarea
+                style={lightDialogControlStyle}
                 value={
                   editDescription
                 }

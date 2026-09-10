@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.capabilities import discover_capabilities, discover_mcp_tools, discovery_context
+from app.capabilities import (
+    contextualize_discovery_task,
+    discover_capabilities,
+    discover_mcp_tools,
+    discovery_context,
+)
 from app.mcp.contracts import MCPServerDefinition
 from app.schemas import AgentProfile
 from app.tools.contracts import ToolDefinition
@@ -24,6 +29,17 @@ def test_desktop_files_are_discovered_from_natural_language_without_tool_name():
     context = discovery_context(result)
     assert "local.fs.list" in context
     assert "Do not claim" in context
+
+
+def test_read_only_explicit_local_file_uses_filesystem_tools_not_code_execution():
+    result = discover_capabilities(
+        r"帮我找到 E:\AIProject\AgentMesh_v1.0.0-rc.2_SOURCE 目录里的 README.md，读取它并告诉我前面主要讲了什么。",
+        tools=_desktop_tools(),
+    )
+
+    assert "local.fs.read" in result.selected_tool_names
+    assert "local.tool.run" not in result.selected_tool_names
+    assert "local.terminal.run" not in result.selected_tool_names
 
 
 def test_desktop_application_and_cli_are_discovered_autonomously():
@@ -382,4 +398,78 @@ def test_personal_resume_question_autonomously_selects_scoped_knowledge():
 
     generic = discover_capabilities("简历应该怎么写更规范？")
     assert generic.use_project_knowledge is False
+
+
+
+def test_read_only_path_tokens_do_not_fake_cli_intent():
+    samples = [
+        r"read E:\work\runtime-python\README.md",
+        r"读取 E:\work\tests\README.md 并告诉我内容",
+        r"查看 E:\work\build\README.md 前面讲了什么",
+    ]
+
+    for task in samples:
+        result = discover_capabilities(task, tools=_desktop_tools())
+        assert "local.fs.read" in result.selected_tool_names, task
+        assert "local.tool.run" not in result.selected_tool_names, task
+        assert "local.terminal.run" not in result.selected_tool_names, task
+
+
+def test_explicit_cli_with_runtime_named_workdir_still_selects_tool_run():
+    result = discover_capabilities(
+        r"在 E:\work\runtime-python 目录运行 go test ./...",
+        tools=_desktop_tools(),
+    )
+
+    assert "local.tool.run" in result.selected_tool_names
+
+def test_test_marker_language_does_not_fake_cli_execution_intent():
+    samples = [
+        "记住这个测试标记：P20-CONV-A-001",
+        "这个测试标记叫 P20-CONV-A-001",
+        "Remember this test marker: P20-CONV-A-001",
+    ]
+
+    for task in samples:
+        result = discover_capabilities(task, tools=_desktop_tools())
+        assert "local.tool.run" not in result.selected_tool_names, task
+        assert "local.terminal.run" not in result.selected_tool_names, task
+
+
+def test_explicit_test_execution_still_selects_cli_tool_run():
+    samples = [
+        "在本机运行测试",
+        "执行 go test ./...",
+        "run tests with pytest",
+    ]
+
+    for task in samples:
+        result = discover_capabilities(task, tools=_desktop_tools())
+        assert "local.tool.run" in result.selected_tool_names, task
+
+def test_new_marker_turn_does_not_inherit_prior_read_execution_intent():
+    marker = "记住这个测试标记：P20-CONV-A-001"
+    history = [
+        {
+            "role": "user",
+            "content": (
+                r"帮我读取 E:\AIProject\AgentMesh_v1.0.0-rc.2_SOURCE\README.md，"
+                "并告诉我开头主要讲什么。"
+            ),
+        },
+        {"role": "assistant", "content": "README 已读取。"},
+    ]
+
+    discovery_task, used_history, history_turns = contextualize_discovery_task(
+        marker,
+        history,
+    )
+
+    assert discovery_task == marker
+    assert used_history is False
+    assert history_turns == 0
+
+    result = discover_capabilities(discovery_task, tools=_desktop_tools())
+    assert "local.tool.run" not in result.selected_tool_names
+    assert "local.terminal.run" not in result.selected_tool_names
 

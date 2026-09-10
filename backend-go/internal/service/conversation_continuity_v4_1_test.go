@@ -44,11 +44,11 @@ func TestBoundedInteractiveHistoryKeepsNewestTurnsInChronologicalOrder(t *testin
 	}
 
 	history := boundedInteractiveHistory(messages)
-	if len(history) != 8 {
-		t.Fatalf("expected 8 recent messages, got %d", len(history))
+	if len(history) != 20 {
+		t.Fatalf("expected all 20 short messages to fit the bounded context budget, got %d", len(history))
 	}
-	if history[0].Content != "message-13" || history[7].Content != "message-20" {
-		t.Fatalf("expected newest chronological window 13..20, got first=%q last=%q", history[0].Content, history[7].Content)
+	if history[0].Content != "message-01" || history[19].Content != "message-20" {
+		t.Fatalf("expected chronological short-history window 01..20, got first=%q last=%q", history[0].Content, history[19].Content)
 	}
 }
 

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   ApiError,
   createConversation,
@@ -90,6 +90,47 @@ export type LatestRunState = {
   result: RunResult;
 };
 
+type MessageHistoryAnchor = {
+  messageId: number | null;
+  top: number | null;
+  scrollHeight: number;
+  scrollTop: number;
+  fallbackApplied: boolean;
+  dirty: boolean;
+  stableFrames: number;
+  settleFrames: number;
+  settleStartedAt: number | null;
+  lastMutationAt: number | null;
+};
+
+const MESSAGE_ANCHOR_SELECTOR =
+  '[data-testid="message-user"][data-message-id], [data-testid="message-assistant"][data-message-id]';
+
+const MESSAGE_ANCHOR_TOLERANCE_PX = 1;
+const MESSAGE_ANCHOR_STABLE_FRAMES = 3;
+const MESSAGE_ANCHOR_MAX_SETTLE_FRAMES = 30;
+const MESSAGE_ANCHOR_QUIET_MS = 120;
+const MESSAGE_ANCHOR_MAX_SETTLE_MS = 500;
+
+function latestTaskForConversation(
+  tasks: Task[],
+  conversationId: number,
+): Task | null {
+  let latest: Task | null = null;
+
+  for (const task of tasks) {
+    if (task.conversationId !== conversationId) {
+      continue;
+    }
+
+    if (latest == null || task.id > latest.id) {
+      latest = task;
+    }
+  }
+
+  return latest;
+}
+
 export function Workspace({
   conversations,
   projects,
@@ -98,6 +139,9 @@ export function Workspace({
   messages,
   messagesLoading,
   messagesLoadError,
+  messageHasMore,
+  olderMessagesLoading,
+  loadOlderMessages,
   tasks,
   latestRunState,
   setLatestRunState,
@@ -125,6 +169,9 @@ export function Workspace({
   messages: Message[];
   messagesLoading: boolean;
   messagesLoadError: string;
+  messageHasMore: boolean;
+  olderMessagesLoading: boolean;
+  loadOlderMessages: () => Promise<void>;
   tasks: Task[];
   latestRunState: LatestRunState | null;
   setLatestRunState: (
@@ -167,6 +214,12 @@ export function Workspace({
   const [text, setText] = useState("");
 
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
+  const messageScrollInnerRef = useRef<HTMLDivElement | null>(null);
+  const messageScrollFrameRef = useRef<number | null>(null);
+  const messageScrollProgrammaticRef = useRef(false);
+  const messageHistoryAnchorRef = useRef<MessageHistoryAnchor | null>(null);
+  const shouldAutoFollowMessagesRef = useRef(true);
+  const lastScrollConversationIdRef = useRef<number | null>(null);
 
   const [showModelPicker, setShowModelPicker] = useState(false);
 
@@ -231,6 +284,11 @@ export function Workspace({
   // into the currently visible Workspace after the user switches threads.
   const activeConversationIdRef = useRef<number | null>(current?.id ?? null);
   activeConversationIdRef.current = current?.id ?? null;
+
+  // Same-conversation submissions also need turn ownership. A late result from
+  // an older turn must not replace the latest run/approval state after the user
+  // has already submitted another turn in this conversation.
+  const submissionEpochByConversationRef = useRef<Map<number, number>>(new Map());
 
   const [error, setError] =
     useState("");
@@ -325,16 +383,24 @@ export function Workspace({
   // Durable Waiting Task
   // =====================================================
 
-  const persistedWaitingTask =
+  const latestConversationTask =
     current
-      ? tasks.find(
-          (task) =>
-            task.conversationId ===
-              current.id &&
-            isWaitingStatus(
-              task.status,
-            ),
-        ) ?? null
+      ? latestTaskForConversation(
+          tasks,
+          current.id,
+        )
+      : null;
+
+  // Approval/input state is actionable only when that waiting task is still the
+  // newest task in the conversation. If a newer user turn exists, any older
+  // pending approval belongs to history and must never be rendered in the
+  // current composer.
+  const persistedWaitingTask =
+    latestConversationTask &&
+    isWaitingStatus(
+      latestConversationTask.status,
+    )
+      ? latestConversationTask
       : null;
 
   const persistedLatestRunTask =
@@ -345,6 +411,8 @@ export function Workspace({
   const latestWaitingTask =
     latestRun &&
     isWaitingStatus(latestRun.status) &&
+    (latestConversationTask == null ||
+      latestConversationTask.id === latestRun.task.id) &&
     (persistedLatestRunTask == null ||
       isWaitingStatus(persistedLatestRunTask.status))
       ? persistedLatestRunTask ?? latestRun.task
@@ -452,26 +520,489 @@ export function Workspace({
       ? messages[messages.length - 1]?.id ?? null
       : null;
 
-  useLayoutEffect(
-    () => {
-      const scrollNode =
-        messageScrollRef.current;
+  const forceMessageScrollBottom = useCallback((scrollNode: HTMLDivElement) => {
+    // workspace.css previously used scroll-behavior:smooth. That made the
+    // browser emit intermediate scroll events while the initial history was
+    // still settling; those events were mistaken for an intentional user
+    // scroll and disabled auto-follow before the true bottom was reached.
+    //
+    // Always use an immediate numeric scroll for ownership/restoration
+    // positioning. Smooth scrolling, if we ever want it for an explicit
+    // "back to bottom" button, must be opt-in and must not be used here.
+    const bottom = Math.max(
+      0,
+      scrollNode.scrollHeight - scrollNode.clientHeight,
+    );
+    scrollNode.scrollTop = bottom;
+  }, []);
 
-      if (!scrollNode) {
+  const scrollMessagesToBottom = useCallback(() => {
+    // Loading an older page temporarily owns the viewport. Any late
+    // auto-follow callback from conversation restoration/ResizeObserver must
+    // yield until the prepend anchor transaction has completed.
+    if (messageHistoryAnchorRef.current != null) {
+      return;
+    }
+
+    const scrollNode = messageScrollRef.current;
+    if (!scrollNode) {
+      return;
+    }
+
+    if (messageScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(messageScrollFrameRef.current);
+      messageScrollFrameRef.current = null;
+    }
+
+    messageScrollProgrammaticRef.current = true;
+    forceMessageScrollBottom(scrollNode);
+
+    // Settle across several layout frames. Conversation restoration can change
+    // both sides of the equation:
+    // 1. Markdown / attachments / historical run metadata can grow scrollHeight.
+    // 2. Composer / toolbar layout can shrink clientHeight.
+    //
+    // Repositioning only once (FIX10) covered the first synchronous commit but
+    // could still finish above the real bottom after either late layout change.
+    let remainingFrames = 3;
+
+    const settle = () => {
+      const settledNode = messageScrollRef.current;
+      if (!settledNode) {
+        messageScrollProgrammaticRef.current = false;
+        messageScrollFrameRef.current = null;
         return;
       }
 
-      // Entering Workspace or loading/switching a conversation should land on
-      // the newest persisted message instead of the beginning of the thread.
-      scrollNode.scrollTop =
-        scrollNode.scrollHeight;
+      forceMessageScrollBottom(settledNode);
+
+      if (remainingFrames > 0) {
+        remainingFrames -= 1;
+        messageScrollFrameRef.current =
+          window.requestAnimationFrame(settle);
+        return;
+      }
+
+      messageScrollFrameRef.current =
+        window.requestAnimationFrame(() => {
+          const finalNode = messageScrollRef.current;
+          if (finalNode) {
+            forceMessageScrollBottom(finalNode);
+          }
+          messageScrollProgrammaticRef.current = false;
+          messageScrollFrameRef.current = null;
+        });
+    };
+
+    messageScrollFrameRef.current =
+      window.requestAnimationFrame(settle);
+  }, [forceMessageScrollBottom]);
+
+  const handleMessageScroll = useCallback(() => {
+    if (messageScrollProgrammaticRef.current) {
+      return;
+    }
+
+    const scrollNode = messageScrollRef.current;
+    if (!scrollNode) {
+      return;
+    }
+
+    const distanceFromBottom =
+      scrollNode.scrollHeight - scrollNode.scrollTop - scrollNode.clientHeight;
+    shouldAutoFollowMessagesRef.current = distanceFromBottom <= 96;
+  }, []);
+
+  const cancelScheduledMessageScroll = useCallback(() => {
+    if (messageScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(messageScrollFrameRef.current);
+      messageScrollFrameRef.current = null;
+    }
+  }, []);
+
+  const captureVisibleMessageAnchor = useCallback(
+    (scrollNode: HTMLDivElement): MessageHistoryAnchor => {
+      const viewport = scrollNode.getBoundingClientRect();
+      const messageNodes =
+        Array.from(
+          scrollNode.querySelectorAll<HTMLElement>(
+            MESSAGE_ANCHOR_SELECTOR,
+          ),
+        );
+
+      const visibleNode =
+        messageNodes.find((node) => {
+          const rect =
+            node.getBoundingClientRect();
+
+          return (
+            rect.bottom >
+              viewport.top &&
+            rect.top <
+              viewport.bottom
+          );
+        }) ?? null;
+
+      const rawMessageId =
+        visibleNode?.getAttribute(
+          "data-message-id",
+        ) ?? "";
+      const parsedMessageId =
+        Number(rawMessageId);
+
+      return {
+        messageId:
+          visibleNode &&
+          Number.isFinite(
+            parsedMessageId,
+          ) &&
+          parsedMessageId > 0
+            ? parsedMessageId
+            : null,
+        top:
+          visibleNode
+            ? visibleNode
+                .getBoundingClientRect()
+                .top
+            : null,
+        scrollHeight:
+          scrollNode.scrollHeight,
+        scrollTop:
+          scrollNode.scrollTop,
+        fallbackApplied: false,
+        dirty: true,
+        stableFrames: 0,
+        settleFrames: 0,
+        settleStartedAt: null,
+        lastMutationAt: null,
+      };
     },
-    [
-      current?.id,
-      messages.length,
-      latestMessageId,
-    ],
+    [],
   );
+
+  const preserveOlderHistoryAnchor = useCallback(() => {
+    const anchor =
+      messageHistoryAnchorRef.current;
+    const scrollNode =
+      messageScrollRef.current;
+
+    if (!anchor || !scrollNode) {
+      return null;
+    }
+
+    // FIX15: the concrete durable message is authoritative. Total scroll-height
+    // growth is only a missing-anchor fallback because loading older rows can
+    // legitimately reorder already-rendered turns.
+    if (
+      anchor.messageId != null &&
+      anchor.top != null
+    ) {
+      const anchorElement =
+        scrollNode.querySelector<HTMLElement>(
+          `[data-testid="message-user"][data-message-id="${anchor.messageId}"], ` +
+            `[data-testid="message-assistant"][data-message-id="${anchor.messageId}"]`,
+        );
+
+      if (anchorElement) {
+        const nextTop =
+          anchorElement
+            .getBoundingClientRect()
+            .top;
+        const delta =
+          nextTop - anchor.top;
+
+        if (
+          Math.abs(delta) >
+          MESSAGE_ANCHOR_TOLERANCE_PX
+        ) {
+          scrollNode.scrollTop += delta;
+        }
+
+        return Math.abs(delta);
+      }
+    }
+
+    // A missing/deleted anchor should never send the reader to the bottom.
+    // Apply the legacy height fallback once, then keep the transaction alive
+    // until the same coordinator observes a quiet/stable window or times out.
+    if (!anchor.fallbackApplied) {
+      const addedHeight =
+        Math.max(
+          0,
+          scrollNode.scrollHeight -
+            anchor.scrollHeight,
+        );
+      scrollNode.scrollTop =
+        anchor.scrollTop +
+        addedHeight;
+      anchor.fallbackApplied = true;
+    }
+
+    return null;
+  }, []);
+
+  const releaseOlderHistoryAnchor = useCallback(() => {
+    if (messageScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(
+        messageScrollFrameRef.current,
+      );
+      messageScrollFrameRef.current = null;
+    }
+
+    messageHistoryAnchorRef.current = null;
+    messageScrollProgrammaticRef.current = false;
+  }, []);
+
+  const scheduleOlderHistoryAnchorSettlement = useCallback(() => {
+    if (
+      messageHistoryAnchorRef.current == null ||
+      messageScrollFrameRef.current != null
+    ) {
+      return;
+    }
+
+    const settleAnchor = () => {
+      messageScrollFrameRef.current = null;
+
+      const anchor =
+        messageHistoryAnchorRef.current;
+
+      if (anchor == null) {
+        messageScrollProgrammaticRef.current = false;
+        return;
+      }
+
+      const now =
+        window.performance.now();
+
+      if (anchor.settleStartedAt == null) {
+        anchor.settleStartedAt = now;
+      }
+
+      anchor.settleFrames += 1;
+
+      const wasDirty =
+        anchor.dirty;
+      anchor.dirty = false;
+
+      const residual =
+        preserveOlderHistoryAnchor();
+
+      const corrected =
+        residual != null &&
+        residual >
+          MESSAGE_ANCHOR_TOLERANCE_PX;
+
+      const stableMeasurement =
+        residual == null
+          ? anchor.fallbackApplied
+          : residual <=
+            MESSAGE_ANCHOR_TOLERANCE_PX;
+
+      if (
+        wasDirty ||
+        corrected ||
+        !stableMeasurement
+      ) {
+        anchor.stableFrames = 0;
+      } else {
+        anchor.stableFrames += 1;
+      }
+
+      const quietSince =
+        anchor.lastMutationAt ??
+        anchor.settleStartedAt;
+      const quietFor =
+        now - quietSince;
+      const elapsed =
+        now - anchor.settleStartedAt;
+
+      const stable =
+        anchor.stableFrames >=
+          MESSAGE_ANCHOR_STABLE_FRAMES &&
+        quietFor >=
+          MESSAGE_ANCHOR_QUIET_MS;
+
+      const timedOut =
+        anchor.settleFrames >=
+          MESSAGE_ANCHOR_MAX_SETTLE_FRAMES ||
+        elapsed >=
+          MESSAGE_ANCHOR_MAX_SETTLE_MS;
+
+      if (stable || timedOut) {
+        // One final same-element measurement closes any residual introduced in
+        // the last observed layout frame. Do not re-enable newest-message
+        // following: after loading older history the reader owns the viewport.
+        preserveOlderHistoryAnchor();
+        releaseOlderHistoryAnchor();
+        return;
+      }
+
+      messageScrollFrameRef.current =
+        window.requestAnimationFrame(
+          settleAnchor,
+        );
+    };
+
+    messageScrollFrameRef.current =
+      window.requestAnimationFrame(
+        settleAnchor,
+      );
+  }, [
+    preserveOlderHistoryAnchor,
+    releaseOlderHistoryAnchor,
+  ]);
+
+  const markOlderHistoryAnchorDirty = useCallback(() => {
+    const anchor =
+      messageHistoryAnchorRef.current;
+
+    if (anchor == null) {
+      return;
+    }
+
+    anchor.dirty = true;
+    anchor.stableFrames = 0;
+    anchor.lastMutationAt =
+      window.performance.now();
+
+    scheduleOlderHistoryAnchorSettlement();
+  }, [
+    scheduleOlderHistoryAnchorSettlement,
+  ]);
+
+  const handleMessageScrollIntent = useCallback(() => {
+    // Pointer/wheel/touch interaction means the reader is taking control of
+    // the viewport. Abort any in-flight automatic anchor transaction rather
+    // than fighting the reader. The normal scroll handler will re-enable
+    // follow if the reader actually returns close to the bottom.
+    releaseOlderHistoryAnchor();
+  }, [releaseOlderHistoryAnchor]);
+
+  const handleLoadOlderHistory = useCallback(async () => {
+    const scrollNode = messageScrollRef.current;
+    if (!scrollNode) {
+      await loadOlderMessages();
+      return;
+    }
+
+    // Enter explicit viewport ownership before the async page request starts.
+    // FIX15 keeps one post-commit coordinator: useLayoutEffect may make the
+    // first correction, ResizeObserver only marks geometry dirty, and rAF owns
+    // all settling/release decisions.
+    cancelScheduledMessageScroll();
+    shouldAutoFollowMessagesRef.current = false;
+    messageScrollProgrammaticRef.current = true;
+    messageHistoryAnchorRef.current =
+      captureVisibleMessageAnchor(
+        scrollNode,
+      );
+
+    try {
+      await loadOlderMessages();
+    } catch (error) {
+      releaseOlderHistoryAnchor();
+      throw error;
+    }
+
+    markOlderHistoryAnchorDirty();
+  }, [
+    cancelScheduledMessageScroll,
+    captureVisibleMessageAnchor,
+    loadOlderMessages,
+    markOlderHistoryAnchorDirty,
+    releaseOlderHistoryAnchor,
+  ]);
+
+  useLayoutEffect(() => {
+    const conversationId = current?.id ?? null;
+    const conversationChanged =
+      lastScrollConversationIdRef.current !== conversationId;
+
+    if (conversationChanged) {
+      lastScrollConversationIdRef.current = conversationId;
+      releaseOlderHistoryAnchor();
+      shouldAutoFollowMessagesRef.current = true;
+    }
+
+    if (messagesLoading) {
+      return;
+    }
+
+    // React has committed the new message DOM but has not painted yet. Apply
+    // one immediate concrete-element correction, then let the single rAF
+    // coordinator own all later settling/release work.
+    if (messageHistoryAnchorRef.current != null) {
+      preserveOlderHistoryAnchor();
+      markOlderHistoryAnchorDirty();
+      return;
+    }
+
+    // Opening, restoring or switching a conversation always lands at the true
+    // end. Afterwards we only follow new/streaming content while the reader
+    // remains near the bottom; scrolling upward is explicit user intent.
+    if (conversationChanged || shouldAutoFollowMessagesRef.current) {
+      scrollMessagesToBottom();
+    }
+  }, [
+    current?.id,
+    latestMessageId,
+    messages.length,
+    messagesLoading,
+    pendingPrompt,
+    streamingAnswer,
+    markOlderHistoryAnchorDirty,
+    preserveOlderHistoryAnchor,
+    releaseOlderHistoryAnchor,
+    scrollMessagesToBottom,
+  ]);
+
+  useEffect(() => {
+    const contentNode = messageScrollInnerRef.current;
+    const scrollNode = messageScrollRef.current;
+    if (
+      !contentNode ||
+      !scrollNode ||
+      typeof ResizeObserver === "undefined"
+    ) {
+      return undefined;
+    }
+
+    // ResizeObserver is notification-only during an older-history transaction.
+    // It never writes scrollTop itself; doing so would create an independent
+    // correction writer racing useLayoutEffect/rAF. The coordinator re-measures
+    // the durable anchor on the next animation frame.
+    const observer = new ResizeObserver(() => {
+      if (messageHistoryAnchorRef.current != null) {
+        markOlderHistoryAnchorDirty();
+        return;
+      }
+
+      if (shouldAutoFollowMessagesRef.current) {
+        scrollMessagesToBottom();
+      }
+    });
+
+    observer.observe(contentNode);
+    observer.observe(scrollNode);
+
+    return () => observer.disconnect();
+  }, [
+    current?.id,
+    markOlderHistoryAnchorDirty,
+    scrollMessagesToBottom,
+  ]);
+
+
+  useEffect(() => () => {
+    if (messageScrollFrameRef.current != null) {
+      window.cancelAnimationFrame(messageScrollFrameRef.current);
+      messageScrollFrameRef.current = null;
+    }
+    messageHistoryAnchorRef.current = null;
+    messageScrollProgrammaticRef.current = false;
+  }, []);
+
 
   const durablePending =
     latestRun != null &&
@@ -738,6 +1269,8 @@ export function Workspace({
     // Optimistic composer clear: once the user submits, the input area should
     // immediately become available visually instead of retaining stale text
     // for the entire model round-trip. We restore it on failure.
+    shouldAutoFollowMessagesRef.current = true;
+    scrollMessagesToBottom();
     setPendingPrompt(submittedPrompt);
     setPendingAttachments(submittedAttachmentMetadata);
     setStreamingAnswer("");
@@ -746,6 +1279,21 @@ export function Workspace({
     setAttachments([]);
 
     let submittedConversation = current;
+    let submissionOwnerConversationId: number | null =
+      submittedConversation?.id ?? null;
+    let submissionEpoch: number | null = null;
+
+    const isLatestSubmissionOwner = () => {
+      if (submissionOwnerConversationId == null || submissionEpoch == null) {
+        return true;
+      }
+
+      return (
+        submissionEpochByConversationRef.current.get(
+          submissionOwnerConversationId,
+        ) === submissionEpoch
+      );
+    };
 
     try {
       setBusy(true);
@@ -769,6 +1317,15 @@ export function Workspace({
       // accepted this submission even if the local conversation object is
       // later replaced by an auto-title response.
       const submissionConversationId = conversation.id;
+      submissionOwnerConversationId = submissionConversationId;
+      submissionEpoch =
+        (submissionEpochByConversationRef.current.get(
+          submissionConversationId,
+        ) ?? 0) + 1;
+      submissionEpochByConversationRef.current.set(
+        submissionConversationId,
+        submissionEpoch,
+      );
 
       const input = {
         conversationId: submissionConversationId,
@@ -792,18 +1349,29 @@ export function Workspace({
       const result = deliveryMode === "direct"
         ? await runTaskStream(input, {
             onDelta: (delta) => {
+              // Keep the active-conversation guard as an explicit first gate.
+              // Besides making ownership intent obvious, this preserves the
+              // legacy V4.1 source-contract shape without weakening the newer
+              // latest-submission epoch guard below.
               if (!isSubmissionConversationActive()) return;
+              if (!isLatestSubmissionOwner()) return;
               setStreamingPhase("正在生成回答…");
               setStreamingAnswer((currentText) => currentText + delta);
             },
             onStatus: (message) => {
               if (!isSubmissionConversationActive()) return;
+              if (!isLatestSubmissionOwner()) return;
               setStreamingPhase(message);
             },
           })
         : await runTask(input);
 
-      setLatestRunState({ conversationId: submissionConversationId, result });
+      if (isLatestSubmissionOwner()) {
+        setLatestRunState({
+          conversationId: submissionConversationId,
+          result,
+        });
+      }
 
       if (UNTITLED_TITLES.has(conversation.title)) {
         try {
@@ -836,7 +1404,10 @@ export function Workspace({
       submittedAttachments.forEach((item) => {
         if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
       });
-      if (isSubmissionConversationActive()) {
+      if (
+        isSubmissionConversationActive() &&
+        isLatestSubmissionOwner()
+      ) {
         setPendingPrompt("");
         setPendingAttachments([]);
         setStreamingAnswer("");
@@ -846,8 +1417,10 @@ export function Workspace({
       const submittedConversationIsActive =
         submittedConversation != null &&
         activeConversationIdRef.current === submittedConversation.id;
+      const submittedTurnIsLatest =
+        isLatestSubmissionOwner();
 
-      if (submittedConversationIsActive) {
+      if (submittedConversationIsActive && submittedTurnIsLatest) {
         setError(friendlyApiError(e, "任务提交失败，请稍后重试。"));
       }
 
@@ -867,11 +1440,11 @@ export function Workspace({
           reloadTasks(),
           reloadConversations(),
         ];
-        if (submittedConversationIsActive) {
+        if (submittedConversationIsActive && submittedTurnIsLatest) {
           failureRefreshes.unshift(reloadMessages(submittedConversation.id));
         }
         await Promise.allSettled(failureRefreshes);
-        if (submittedConversationIsActive) {
+        if (submittedConversationIsActive && submittedTurnIsLatest) {
           setText("");
         }
         submittedAttachments.forEach((item) => {
@@ -879,10 +1452,10 @@ export function Workspace({
             URL.revokeObjectURL(item.previewUrl);
           }
         });
-        if (submittedConversationIsActive) {
+        if (submittedConversationIsActive && submittedTurnIsLatest) {
           setAttachments([]);
         }
-      } else if (submittedConversationIsActive) {
+      } else if (submittedConversationIsActive && submittedTurnIsLatest) {
         // Transport/preflight failures may happen before the server persists the
         // request, so retain the local draft only when its submitting
         // conversation is still visible. Never restore a background
@@ -891,7 +1464,7 @@ export function Workspace({
         setAttachments((currentItems) => currentItems.length ? currentItems : submittedAttachments);
       }
 
-      if (submittedConversationIsActive) {
+      if (submittedConversationIsActive && submittedTurnIsLatest) {
         setPendingPrompt("");
         setPendingAttachments([]);
         setStreamingAnswer("");
@@ -983,27 +1556,51 @@ export function Workspace({
       return;
     }
 
+    const approvalTask = waitingTask;
+    const approvalConversationId = current.id;
+
+    if (
+      approvalTask.conversationId != null &&
+      approvalTask.conversationId !== approvalConversationId
+    ) {
+      setResumeError("该审批已不属于当前会话，已拒绝执行。");
+      return;
+    }
+
     try {
       setResumeBusy(true);
       setResumeError("");
 
       const result = await decideTaskApproval(
-        waitingTask.id,
+        approvalTask.id,
         decision,
       );
 
-      setLatestRunState({
-        conversationId: current.id,
-        result,
-      });
+      const approvalConversationStillActive =
+        activeConversationIdRef.current === approvalConversationId;
 
-      await Promise.all([
-        reloadMessages(current.id),
+      if (approvalConversationStillActive) {
+        setLatestRunState({
+          conversationId: approvalConversationId,
+          result,
+        });
+      }
+
+      const refreshes: Promise<unknown>[] = [
         reloadTasks(),
         reloadConversations(),
-      ]);
+      ];
+      if (approvalConversationStillActive) {
+        refreshes.unshift(
+          reloadMessages(approvalConversationId),
+        );
+      }
+      await Promise.all(refreshes);
 
-      if (result.status === "COMPLETED") {
+      if (
+        approvalConversationStillActive &&
+        result.status === "COMPLETED"
+      ) {
         setShowDetails(false);
         setDetailsResult(null);
       }
@@ -1011,12 +1608,21 @@ export function Workspace({
       // A 409 can mean the task already advanced between rendering the card and
       // clicking it. Refresh server state and discard the stale local waiting
       // snapshot instead of leaving a permanently unusable approval panel.
-      await Promise.allSettled([
+      const refreshes: Promise<unknown>[] = [
         reloadTasks(),
-        reloadMessages(current.id),
-      ]);
-      setLatestRunState(null);
-      setResumeError(friendlyApiError(e, "审批操作失败，已刷新最新任务状态。"));
+      ];
+      if (activeConversationIdRef.current === approvalConversationId) {
+        refreshes.push(
+          reloadMessages(approvalConversationId),
+        );
+      }
+      await Promise.allSettled(refreshes);
+      if (activeConversationIdRef.current === approvalConversationId) {
+        setLatestRunState(null);
+      }
+      if (activeConversationIdRef.current === approvalConversationId) {
+        setResumeError(friendlyApiError(e, "审批操作失败，已刷新最新任务状态。"));
+      }
     } finally {
       setResumeBusy(false);
     }
@@ -1156,12 +1762,23 @@ export function Workspace({
             </div>
           </header>
 
-          <div className="workspace-scroll" ref={messageScrollRef}>
-            <div className="workspace-scroll-inner">
+          <div
+            className="workspace-scroll"
+            ref={messageScrollRef}
+            onScroll={handleMessageScroll}
+            onWheel={handleMessageScrollIntent}
+            onTouchStart={handleMessageScrollIntent}
+            onPointerDown={handleMessageScrollIntent}
+            data-testid="workspace-message-scroll"
+          >
+            <div className="workspace-scroll-inner" ref={messageScrollInnerRef}>
               <MessageHistory
                 messages={messages}
                 messagesLoading={messagesLoading}
                 messagesLoadError={messagesLoadError}
+                hasMoreHistory={messageHasMore}
+                loadingOlderHistory={olderMessagesLoading}
+                onLoadOlderHistory={handleLoadOlderHistory}
                 tasks={tasks}
                 latestRun={latestRun}
                 openDetails={openRunDetails}

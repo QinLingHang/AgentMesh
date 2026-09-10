@@ -21,6 +21,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		{name: "workspace", fn: EnsureWorkspaceSchema},
 		{name: "project_runtime", fn: EnsureProjectRuntimeSchema},
 		{name: "memory", fn: EnsureMemorySchema},
+		{name: "conversation_memory", fn: EnsureConversationMemorySchema},
 		{name: "governance", fn: EnsureGovernanceSchema},
 		{name: "user_model", fn: EnsureUserModelSchema},
 		{name: "attachments", fn: EnsureAttachmentSchema},

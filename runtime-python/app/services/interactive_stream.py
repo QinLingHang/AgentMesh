@@ -8,9 +8,45 @@ from typing import Any
 from app.config import settings
 from app.knowledge.parser import parse_document_bytes
 from app.kernel import RuntimeContext
+from app.memory.conversation_context import (
+    ControlPlaneConversationMemoryStore,
+    ConversationMemoryRetriever,
+    ModelBackedConversationCompactor,
+    render_retrieved_conversation_memories,
+)
 from app.models import ModelInputAttachment, ModelMessage, ModelRequest
 from app.models.runtime import ModelRuntimeResolver
 from app.schemas import AgentProfile, InteractiveStreamRequest, TaskProfile
+
+
+_CONVERSATION_MEMORY_STORE = ControlPlaneConversationMemoryStore(
+    internal_token=settings.internal_token,
+    base_url=settings.control_plane_internal_base_url,
+    timeout_seconds=settings.memory_retrieval_timeout_seconds,
+)
+_CONVERSATION_MEMORY_RETRIEVER = ConversationMemoryRetriever(
+    store=_CONVERSATION_MEMORY_STORE,
+    enabled=settings.conversation_memory_retrieval_enabled,
+    candidate_limit=settings.conversation_memory_retrieval_candidate_limit,
+    top_k=settings.conversation_memory_retrieval_top_k,
+    min_score=settings.conversation_memory_retrieval_min_score,
+    max_chars=settings.conversation_memory_retrieval_max_chars,
+)
+_CONVERSATION_MEMORY_COMPACTOR = ModelBackedConversationCompactor(
+    store=_CONVERSATION_MEMORY_STORE,
+    enabled=settings.conversation_memory_compaction_enabled,
+    min_messages=settings.conversation_memory_compaction_min_messages,
+    max_messages=settings.conversation_memory_compaction_max_messages,
+    reserve_recent=settings.conversation_memory_compaction_reserve_recent,
+    min_input_chars=settings.conversation_memory_compaction_min_input_chars,
+    max_input_chars=settings.conversation_memory_compaction_max_input_chars,
+    max_output_tokens=settings.conversation_memory_compaction_max_output_tokens,
+    timeout_seconds=settings.conversation_memory_compaction_timeout_seconds,
+    failure_backoff_seconds=settings.conversation_memory_compaction_failure_backoff_seconds,
+    redis_url=settings.redis_url,
+    lock_prefix=settings.conversation_memory_compaction_lock_prefix,
+    lock_ttl_seconds=settings.conversation_memory_compaction_lock_ttl_seconds,
+)
 
 
 _SYSTEM_PROMPT = """你是 AgentMesh 的交互式回答模型。
@@ -23,6 +59,7 @@ _SYSTEM_PROMPT = """你是 AgentMesh 的交互式回答模型。
 5. 不确定时明确说明不确定之处，不要编造附件中不存在的事实。
 6. 默认简洁但完整；只有用户要求时再展开很长的解释。
 7. 对“继续”“可以”“好的”“展开讲讲”“然后呢”以及单独的“1/2/3/A/B”等选项回复，必须优先承接最近一轮助手给出的选项、问题或未完成任务继续；不要把这类短回复当成新话题，也不要跳回更早的无关话题。
+8. 如果用户询问“当前 AgentMesh/这个系统/这个平台”实际具备哪些菜单、插件、工作流、权限、域名、版本或能否直接执行操作，本快速通道没有权威 Capability Registry 快照。不得根据模型先验编造这些产品事实；应明确说明当前快速通道无法确认实例能力，并避免虚构 UI 路径、YAML Schema、插件名、版本、域名或“无法操作电脑”的通用免责声明。此类请求正常情况下应由控制面路由到 Full Runtime。
 """
 
 
@@ -143,8 +180,11 @@ def _bounded_history(req: InteractiveStreamRequest) -> list[ModelMessage]:
     # runtime-side budget so one large previous document answer cannot poison
     # latency for the next ordinary question.
     budget = 6000
+    max_messages = 20
     selected: list[ModelMessage] = []
-    for message in reversed(req.history[-8:]):
+    for message in reversed(req.history):
+        if len(selected) >= max_messages:
+            break
         content = " ".join(message.content.split()).strip()
         if not content:
             continue
@@ -179,7 +219,21 @@ async def stream_interactive_answer(
             f"{document_context}"
         )
 
+    conversation_memory_context = ""
+    if req.conversation_id is not None:
+        try:
+            recalled = await _CONVERSATION_MEMORY_RETRIEVER.retrieve(
+                user_id=req.user_id,
+                conversation_id=req.conversation_id,
+                query=req.task,
+            )
+            conversation_memory_context = render_retrieved_conversation_memories(recalled)
+        except Exception:
+            conversation_memory_context = ""
+
     messages = [ModelMessage(role="system", content=_SYSTEM_PROMPT)]
+    if conversation_memory_context:
+        messages.append(ModelMessage(role="system", content=conversation_memory_context))
     messages.extend(_bounded_history(req))
     messages.append(ModelMessage(role="user", content=user_content))
 
@@ -247,6 +301,12 @@ async def stream_interactive_answer(
             )
         if response.content:
             yield {"type": "delta", "delta": response.content}
+        _CONVERSATION_MEMORY_COMPACTOR.schedule(
+            user_id=req.user_id,
+            conversation_id=req.conversation_id,
+            model_gateway=provider,
+            model_name=(settings.conversation_memory_compaction_model_name.strip() or model),
+        )
         yield {
             "type": "done",
             "content": response.content,
@@ -262,6 +322,13 @@ async def stream_interactive_answer(
 
     try:
         async for event in stream_method(request):
+            if event.get("type") == "done":
+                _CONVERSATION_MEMORY_COMPACTOR.schedule(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    model_gateway=provider,
+                    model_name=(settings.conversation_memory_compaction_model_name.strip() or model),
+                )
             if event.get("type") == "done" and resolved.router is not None:
                 resolved.router.performance.record_execution(
                     resolved.runtime_id,

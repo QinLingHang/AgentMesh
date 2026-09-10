@@ -22,7 +22,21 @@ test("V4.1 conversation message projection is owned by the active conversation",
 
   assert.match(loadBlock, /currentConversationIdRef\.current !== id/);
   assert.match(loadBlock, /sequence !== messageLoadSequenceRef\.current/);
-  assert.match(loadBlock, /setMessageProjection\(\{\s*conversationId: id,\s*items: loaded/s);
+  assert.match(
+    loadBlock,
+    /setMessageProjection\(\(projection\)\s*=>\s*mergeLatestMessagePage\(/s,
+  );
+
+  // P20 FIX13+ preserves an already-expanded same-conversation history window
+  // while allowing the newest authoritative page to refresh duplicate rows.
+  assert.match(app, /function mergeLatestMessagePage/);
+  assert.match(app, /hasMore:\s*projection\.hasMore/);
+  assert.match(app, /nextBeforeId:\s*projection\.nextBeforeId/);
+  assert.match(app, /mergeMessageRows\(projection\.items,\s*loaded\.items\)/);
+  assert.match(
+    app,
+    /for \(const item of incoming\) \{\s*byId\.set\(item\.id, item\);\s*\}/s,
+  );
 
   assert.match(app, /messageProjection\.conversationId === current\.id\s*\? messageProjection\.items\s*:\s*\[\]/s);
   assert.match(app, /messageProjection\.conversationId !== current\.id/);

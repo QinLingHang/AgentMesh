@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import importlib
+import os
+import sys
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -99,7 +105,304 @@ def desktop_screenshot_attachment(result: Any):
     return attachment, metadata
 
 
-async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+def _normalize_payload(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(arguments)
+    if tool_name == "local.ui.mouse.double_click":
+        payload["clicks"] = 2
+        payload["button"] = "left"
+    elif tool_name == "local.ui.mouse.right_click":
+        payload["clicks"] = 1
+        payload["button"] = "right"
+    return payload
+
+
+def _embedded_desktop_selected() -> bool:
+    return bool(
+        settings.desktop_embedded_enabled
+        and os.name == "nt"
+        and not settings.desktop_bridge_enabled
+    )
+
+
+def _desktop_tools_available() -> bool:
+    # Remote/restricted bridge stays authoritative when explicitly enabled.
+    # Otherwise Windows Runtime exposes the same local.* tools in-process.
+    return bool(settings.desktop_bridge_enabled or _embedded_desktop_selected())
+
+
+@lru_cache(maxsize=1)
+def _embedded_services() -> dict[str, Any]:
+    """Load Desktop capability as a library inside Runtime, without HTTP.
+
+    desktop-bridge remains a standalone optional service for remote/restricted
+    nodes. In local Windows mode we reuse the exact same policy/services in the
+    Runtime process so safety rules do not fork between the two transports.
+    """
+    if not _embedded_desktop_selected():
+        raise ToolError(ToolErrorType.UNAVAILABLE, "embedded desktop runtime is disabled")
+
+    repo_root = Path(__file__).resolve().parents[3]
+    package_root = repo_root / "desktop-bridge"
+    if not package_root.is_dir():
+        raise ToolError(
+            ToolErrorType.UNAVAILABLE,
+            "embedded desktop package is missing from this AgentMesh source tree",
+        )
+
+    package_path = str(package_root)
+    if package_path not in sys.path:
+        sys.path.insert(0, package_path)
+
+    try:
+        audit_module = importlib.import_module("desktop_bridge.audit")
+        computer_module = importlib.import_module("desktop_bridge.computer")
+        config_module = importlib.import_module("desktop_bridge.config")
+        executables_module = importlib.import_module("desktop_bridge.executables")
+        filesystem_module = importlib.import_module("desktop_bridge.filesystem")
+        policy_module = importlib.import_module("desktop_bridge.policy")
+        processes_module = importlib.import_module("desktop_bridge.processes")
+    except ImportError as exc:
+        raise ToolError(
+            ToolErrorType.UNAVAILABLE,
+            "embedded desktop dependencies are unavailable; install runtime-python/requirements-desktop.txt",
+        ) from exc
+
+    desktop_settings = config_module.load_settings()
+    audit = audit_module.AuditLogger(desktop_settings.audit_file)
+    processes = processes_module.ProcessManager(desktop_settings, audit)
+    apps = executables_module.AppCatalog(desktop_settings, audit)
+    tools = executables_module.ToolCatalog(desktop_settings, processes, audit)
+    sessions = computer_module.ComputerSessionManager(desktop_settings, audit)
+    computer = computer_module.ComputerService(desktop_settings, sessions, audit)
+    filesystem = filesystem_module.FileSystemService(desktop_settings)
+
+    return {
+        "settings": desktop_settings,
+        "audit": audit,
+        "fs": filesystem,
+        "processes": processes,
+        "apps": apps,
+        "tools": tools,
+        "sessions": sessions,
+        "computer": computer,
+        "permission_error": policy_module.DesktopPermissionError,
+    }
+
+
+def _embedded_terminal_argv(services: dict[str, Any], command: str) -> tuple[list[str], dict[str, Any]]:
+    value = str(command or "")
+    desktop_settings = services["settings"]
+    if not desktop_settings.allow_terminal:
+        raise services["permission_error"](
+            "advanced terminal is disabled; set DESKTOP_ALLOW_TERMINAL=true"
+        )
+    if os.name == "nt":
+        argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", value]
+        shell = "powershell"
+    else:
+        argv = ["/bin/sh", "-lc", value]
+        shell = "sh"
+    return argv, {
+        "commandSha256": services["audit"].digest_text(value),
+        "commandLength": len(value),
+        "shell": shell,
+    }
+
+
+def _embedded_dispatch(tool_name: str, payload: dict[str, Any]) -> Any:
+    services = _embedded_services()
+    fs = services["fs"]
+    processes = services["processes"]
+    apps = services["apps"]
+    tools = services["tools"]
+    sessions = services["sessions"]
+    computer = services["computer"]
+
+    if tool_name == "local.fs.list":
+        return fs.list(payload["path"], payload.get("limit", 500))
+    if tool_name == "local.fs.stat":
+        return fs.stat(payload["path"])
+    if tool_name == "local.fs.read":
+        return fs.read(payload["path"], payload.get("maxBytes"))
+    if tool_name == "local.fs.search":
+        return fs.search(
+            payload["path"],
+            payload.get("query", ""),
+            payload.get("namePattern", "*"),
+            payload.get("recursive", True),
+            payload.get("maxResults"),
+        )
+    if tool_name == "local.fs.write":
+        return fs.write(
+            payload["path"],
+            payload["content"],
+            payload.get("overwrite", False),
+            payload.get("createParents", False),
+        )
+    if tool_name == "local.fs.mkdir":
+        return fs.mkdir(payload["path"], payload.get("parents", True))
+    if tool_name == "local.fs.copy":
+        return fs.copy(payload["source"], payload["destination"], payload.get("overwrite", False))
+    if tool_name == "local.fs.move":
+        return fs.move(payload["source"], payload["destination"], payload.get("overwrite", False))
+    if tool_name == "local.fs.delete":
+        return fs.delete(payload["path"], payload.get("recursive", False))
+
+    if tool_name == "local.app.list":
+        return {"apps": apps.list()}
+    if tool_name == "local.app.discover":
+        return {"apps": apps.refresh()}
+    if tool_name == "local.app.launch":
+        return apps.launch(payload["appId"], payload.get("args", []))
+    if tool_name == "local.app.open":
+        return apps.open(payload["appId"], payload["path"])
+    if tool_name == "local.app.status":
+        return apps.status(payload.get("appId"))
+    if tool_name == "local.app.focus":
+        return apps.focus(payload["appId"])
+    if tool_name == "local.app.close":
+        return apps.close(payload["appId"], payload.get("pid"))
+
+    if tool_name == "local.tool.list":
+        return {"tools": tools.list()}
+    if tool_name == "local.tool.discover":
+        return {"tools": tools.refresh()}
+    if tool_name == "local.tool.run":
+        return tools.run(
+            payload["toolId"],
+            payload.get("args", []),
+            payload.get("cwd"),
+            float(payload.get("waitSeconds") or 0.0),
+        )
+    if tool_name == "local.tool.status":
+        return processes.wait(payload["processId"], float(payload.get("waitSeconds") or 0.0))
+    if tool_name == "local.tool.cancel":
+        return tools.cancel(payload["processId"])
+
+    if tool_name == "local.terminal.run":
+        argv, detail = _embedded_terminal_argv(services, payload["command"])
+        result = processes.start(
+            kind="terminal",
+            executable_id="advanced-terminal",
+            argv=argv,
+            cwd=payload.get("cwd"),
+            audit_detail=detail,
+        )
+        return processes.wait(result["processId"], float(payload.get("waitSeconds") or 0.0))
+    if tool_name == "local.terminal.status":
+        return processes.wait(payload["processId"], float(payload.get("waitSeconds") or 0.0))
+    if tool_name == "local.terminal.cancel":
+        return processes.cancel(payload["processId"])
+
+    if tool_name == "local.ui.session.start":
+        return sessions.start(payload.get("durationSeconds"))
+    if tool_name == "local.ui.session.status":
+        return sessions.status(payload["sessionId"])
+    if tool_name == "local.ui.session.stop":
+        return sessions.stop(payload["sessionId"])
+    if tool_name == "local.ui.screen.capture":
+        return computer.capture(payload["sessionId"])
+    if tool_name == "local.ui.window.list":
+        return computer.window_list(payload["sessionId"], payload.get("limit", 100))
+    if tool_name == "local.ui.window.info":
+        return computer.window_info(payload["sessionId"], int(payload["handle"]))
+    if tool_name == "local.ui.window.focus":
+        return computer.window_focus(payload["sessionId"], int(payload["handle"]))
+    if tool_name == "local.ui.window.close":
+        return computer.window_close(payload["sessionId"], int(payload["handle"]))
+    if tool_name == "local.ui.mouse.move":
+        return computer.mouse_move(
+            payload["sessionId"], int(payload["x"]), int(payload["y"]), int(payload.get("durationMs") or 0)
+        )
+    if tool_name in {"local.ui.mouse.click", "local.ui.mouse.double_click", "local.ui.mouse.right_click"}:
+        return computer.mouse_click(
+            payload["sessionId"],
+            int(payload["x"]),
+            int(payload["y"]),
+            button=str(payload.get("button") or "left"),
+            clicks=int(payload.get("clicks") or 1),
+        )
+    if tool_name == "local.ui.mouse.drag":
+        return computer.mouse_drag(
+            payload["sessionId"], int(payload["startX"]), int(payload["startY"]),
+            int(payload["endX"]), int(payload["endY"]), int(payload.get("durationMs") or 300),
+        )
+    if tool_name == "local.ui.mouse.scroll":
+        return computer.mouse_scroll(
+            payload["sessionId"], int(payload["amount"]), payload.get("x"), payload.get("y")
+        )
+    if tool_name == "local.ui.keyboard.type":
+        return computer.keyboard_type(
+            payload["sessionId"], str(payload["text"]), int(payload.get("intervalMs") or 0)
+        )
+    if tool_name == "local.ui.keyboard.press":
+        return computer.keyboard_press(
+            payload["sessionId"], str(payload["key"]), int(payload.get("presses") or 1)
+        )
+    if tool_name == "local.ui.keyboard.hotkey":
+        return computer.keyboard_hotkey(payload["sessionId"], list(payload["keys"]))
+    if tool_name == "local.ui.wait":
+        return computer.wait(payload["sessionId"], int(payload["milliseconds"]))
+    if tool_name == "local.ui.element.find":
+        return computer.element_find(
+            payload["sessionId"], int(payload["handle"]),
+            name=str(payload.get("name") or ""),
+            control_type=str(payload.get("controlType") or ""),
+            automation_id=str(payload.get("automationId") or ""),
+            limit=int(payload.get("limit") or 20),
+        )
+    if tool_name in {
+        "local.ui.element.click",
+        "local.ui.element.set_text",
+        "local.ui.element.invoke",
+        "local.ui.element.select",
+    }:
+        action = {
+            "local.ui.element.click": "click",
+            "local.ui.element.set_text": "set_text",
+            "local.ui.element.invoke": "invoke",
+            "local.ui.element.select": "select",
+        }[tool_name]
+        return computer.element_action(
+            payload["sessionId"], int(payload["handle"]),
+            name=str(payload.get("name") or ""),
+            control_type=str(payload.get("controlType") or ""),
+            automation_id=str(payload.get("automationId") or ""),
+            action=action,
+            value=str(payload.get("value") or ""),
+        )
+
+    raise ToolError(ToolErrorType.NOT_FOUND, f"unsupported desktop tool: {tool_name}")
+
+
+async def _embedded_desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+    payload = _normalize_payload(tool_name, arguments)
+    try:
+        return await asyncio.to_thread(_embedded_dispatch, tool_name, payload)
+    except ToolError:
+        raise
+    except Exception as exc:
+        try:
+            permission_error = _embedded_services()["permission_error"]
+        except ToolError:
+            raise
+        if isinstance(exc, permission_error):
+            raise ToolError(ToolErrorType.PERMISSION_DENIED, str(exc)) from exc
+        if isinstance(exc, FileNotFoundError):
+            raise ToolError(ToolErrorType.NOT_FOUND, "local resource was not found") from exc
+        if isinstance(exc, (ValueError, FileExistsError, IsADirectoryError, NotADirectoryError)):
+            raise ToolError(ToolErrorType.INVALID_ARGUMENTS, str(exc)) from exc
+        if isinstance(exc, RuntimeError):
+            message = str(exc)
+            lowered = message.casefold()
+            if "disabled" in lowered:
+                raise ToolError(ToolErrorType.PERMISSION_DENIED, message) from exc
+            if "required" in lowered or "unavailable" in lowered:
+                raise ToolError(ToolErrorType.UNAVAILABLE, message) from exc
+        raise ToolError(ToolErrorType.EXECUTION_FAILED, "local desktop operation failed") from exc
+
+
+async def _desktop_bridge_call(tool_name: str, arguments: dict[str, Any]) -> Any:
     base_url = settings.desktop_bridge_base_url.rstrip("/")
     parsed = urlparse(base_url)
     if parsed.scheme not in {"http", "https"} or (parsed.hostname or "").casefold() not in {
@@ -115,19 +418,10 @@ async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
     endpoint = _ENDPOINTS.get(tool_name)
     if not endpoint:
         raise ToolError(ToolErrorType.NOT_FOUND, f"unsupported desktop tool: {tool_name}")
-    if not settings.desktop_bridge_enabled:
-        raise ToolError(ToolErrorType.UNAVAILABLE, "desktop bridge is disabled")
     if not settings.desktop_bridge_token:
         raise ToolError(ToolErrorType.PERMISSION_DENIED, "desktop bridge token is not configured")
 
-    payload = dict(arguments)
-    if tool_name == "local.ui.mouse.double_click":
-        payload["clicks"] = 2
-        payload["button"] = "left"
-    elif tool_name == "local.ui.mouse.right_click":
-        payload["clicks"] = 1
-        payload["button"] = "right"
-
+    payload = _normalize_payload(tool_name, arguments)
     requested_wait = 0.0
     if tool_name in {
         "local.tool.run",
@@ -139,16 +433,10 @@ async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
             requested_wait = max(0.0, min(60.0, float(payload.get("waitSeconds") or 0.0)))
         except (TypeError, ValueError):
             requested_wait = 0.0
-    request_timeout = max(
-        float(settings.desktop_bridge_timeout_seconds),
-        requested_wait + 3.0,
-    )
+    request_timeout = max(float(settings.desktop_bridge_timeout_seconds), requested_wait + 3.0)
 
     try:
-        async with httpx.AsyncClient(
-            timeout=request_timeout,
-            trust_env=False,
-        ) as client:
+        async with httpx.AsyncClient(timeout=request_timeout, trust_env=False) as client:
             response = await client.post(
                 f"{base_url}{endpoint}",
                 json=payload,
@@ -160,10 +448,7 @@ async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
         raise ToolError(ToolErrorType.UNAVAILABLE, "desktop bridge is unavailable") from exc
 
     if response.status_code in {401, 403}:
-        raise ToolError(
-            ToolErrorType.PERMISSION_DENIED,
-            "desktop bridge denied the requested local operation",
-        )
+        raise ToolError(ToolErrorType.PERMISSION_DENIED, "desktop bridge denied the requested local operation")
     if response.status_code == 404:
         raise ToolError(ToolErrorType.NOT_FOUND, "local resource was not found")
     if response.status_code // 100 != 2:
@@ -180,6 +465,14 @@ async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
         return response.json()
     except ValueError as exc:
         raise ToolError(ToolErrorType.EXECUTION_FAILED, "desktop bridge returned invalid JSON") from exc
+
+
+async def _desktop_call(tool_name: str, arguments: dict[str, Any]) -> Any:
+    if settings.desktop_bridge_enabled:
+        return await _desktop_bridge_call(tool_name, arguments)
+    if _embedded_desktop_selected():
+        return await _embedded_desktop_call(tool_name, arguments)
+    raise ToolError(ToolErrorType.UNAVAILABLE, "local desktop capability is disabled")
 
 
 def _handler(name: str):
@@ -202,7 +495,7 @@ def _path_schema(extra: dict[str, Any] | None = None, required: list[str] | None
     properties: dict[str, Any] = {
         "path": {
             "type": "string",
-            "description": "Absolute path inside a folder explicitly authorized in AgentMesh Desktop Bridge.",
+            "description": "Absolute local path. In Local Computer Mode, normal files on fixed drives are available subject to Desktop safety policy; sensitive/system paths remain protected.",
         }
     }
     properties.update(extra or {})
@@ -258,27 +551,27 @@ def desktop_tool_definitions() -> list[ToolDefinition]:
 
     definitions = [
         # Files
-        _tool("local.fs.list", "List files and folders in an explicitly authorized local directory.", _path_schema({"limit": {"type": "integer"}})),
-        _tool("local.fs.stat", "Read metadata for an explicitly authorized local file or folder.", _path_schema()),
-        _tool("local.fs.read", "Read a text file from an explicitly authorized local directory.", _path_schema({"maxBytes": {"type": "integer"}})),
-        _tool("local.fs.search", "Search file names and bounded text content under an explicitly authorized local directory.", _path_schema({"query": {"type": "string"}, "namePattern": {"type": "string"}, "recursive": {"type": "boolean"}, "maxResults": {"type": "integer"}})),
-        _tool("local.fs.write", "Create or replace a UTF-8 text file in an explicitly authorized local directory.", _path_schema({"content": {"type": "string"}, "overwrite": {"type": "boolean"}, "createParents": {"type": "boolean"}}, ["content"]), "medium", True),
-        _tool("local.fs.mkdir", "Create a folder in an explicitly authorized local directory.", _path_schema({"parents": {"type": "boolean"}}), "medium", True),
-        _tool("local.fs.copy", "Copy a local file or folder between explicitly authorized locations.", transfer_schema, "medium", True),
-        _tool("local.fs.move", "Move or rename a local file or folder between explicitly authorized locations.", transfer_schema, "high", True),
-        _tool("local.fs.delete", "Delete a local file or folder from an explicitly authorized location.", _path_schema({"recursive": {"type": "boolean"}}), "high", True),
+        _tool("local.fs.list", "List files and folders on the local computer when allowed by Desktop safety policy.", _path_schema({"limit": {"type": "integer"}})),
+        _tool("local.fs.stat", "Read metadata for a local file or folder when allowed by Desktop safety policy.", _path_schema()),
+        _tool("local.fs.read", "Read a normal local text file directly; sensitive/system paths remain protected.", _path_schema({"maxBytes": {"type": "integer"}})),
+        _tool("local.fs.search", "Search file names and bounded text content on the local computer within Desktop safety limits.", _path_schema({"query": {"type": "string"}, "namePattern": {"type": "string"}, "recursive": {"type": "boolean"}, "maxResults": {"type": "integer"}})),
+        _tool("local.fs.write", "Create or replace a UTF-8 text file on the local computer. Mutation requires explicit approval.", _path_schema({"content": {"type": "string"}, "overwrite": {"type": "boolean"}, "createParents": {"type": "boolean"}}, ["content"]), "medium", True),
+        _tool("local.fs.mkdir", "Create a local folder. Mutation requires explicit approval.", _path_schema({"parents": {"type": "boolean"}}), "medium", True),
+        _tool("local.fs.copy", "Copy a local file or folder between policy-allowed locations. Mutation requires explicit approval.", transfer_schema, "medium", True),
+        _tool("local.fs.move", "Move or rename a local file or folder between policy-allowed locations. This is high risk and requires approval.", transfer_schema, "high", True),
+        _tool("local.fs.delete", "Delete a local file or folder from a policy-allowed location. This is high risk and requires approval.", _path_schema({"recursive": {"type": "boolean"}}), "high", True),
         # Applications
-        _tool("local.app.list", "List local applications currently registered by Desktop Bridge.", _schema()),
+        _tool("local.app.list", "List local applications registered by the local desktop runtime.", _schema()),
         _tool("local.app.discover", "Rescan known Windows applications without launching them.", _schema()),
         _tool("local.app.launch", "Launch a registered local application. Application launch requires explicit approval.", _schema({"appId": {"type": "string"}, "args": {"type": "array"}}, ["appId"]), "medium", True),
-        _tool("local.app.open", "Open an authorized local file/folder with a registered application.", _schema({"appId": {"type": "string"}, "path": {"type": "string"}}, ["appId", "path"]), "medium", True),
+        _tool("local.app.open", "Open a policy-allowed local file/folder with a registered application.", _schema({"appId": {"type": "string"}, "path": {"type": "string"}}, ["appId", "path"]), "medium", True),
         _tool("local.app.status", "List currently running instances of registered local applications.", _schema({"appId": {"type": "string"}})),
         _tool("local.app.focus", "Bring a visible registered application window to the foreground.", app_schema),
         _tool("local.app.close", "Close a registered local application process. Unsaved work may be lost.", _schema({"appId": {"type": "string"}, "pid": {"type": "integer"}}, ["appId"]), "high", True),
         # CLI tools
         _tool("local.tool.list", "List registered local CLI tools such as Python, Git, Go, Node and FFmpeg.", _schema()),
         _tool("local.tool.discover", "Rescan the local PATH for approved known CLI tool families.", _schema()),
-        _tool("local.tool.run", "Run a registered local CLI executable with argv and an authorized working directory. This is code execution and always requires approval.", _schema({"toolId": {"type": "string"}, "args": {"type": "array"}, "cwd": {"type": "string"}, "waitSeconds": {"type": "number"}}, ["toolId"]), "high", True),
+        _tool("local.tool.run", "Run a registered local CLI executable with argv and a policy-allowed working directory. This is code execution and always requires approval.", _schema({"toolId": {"type": "string"}, "args": {"type": "array"}, "cwd": {"type": "string"}, "waitSeconds": {"type": "number"}}, ["toolId"]), "high", True),
         _tool("local.tool.status", "Wait briefly for, then read bounded stdout/stderr and status for a process started by local.tool.run.", process_status_schema),
         _tool("local.tool.cancel", "Cancel a process started by local.tool.run.", process_schema, "medium", True),
         # Advanced terminal
@@ -302,7 +595,7 @@ def desktop_tool_definitions() -> list[ToolDefinition]:
         _tool("local.ui.mouse.scroll", "Scroll the current desktop view.", _session_schema({"amount": {"type": "integer"}, "x": {"type": "integer"}, "y": {"type": "integer"}}, ["amount"]), "medium"),
         _tool("local.ui.keyboard.type", "Type text into the focused UI without using the clipboard.", _session_schema({"text": {"type": "string"}, "intervalMs": {"type": "integer"}}, ["text"]), "medium"),
         _tool("local.ui.keyboard.press", "Press a keyboard key in an active Computer Use session.", _session_schema({"key": {"type": "string"}, "presses": {"type": "integer"}}, ["key"]), "medium"),
-        _tool("local.ui.keyboard.hotkey", "Send a bounded keyboard shortcut; dangerous system shortcuts are blocked by the bridge.", _session_schema({"keys": {"type": "array"}}, ["keys"]), "medium"),
+        _tool("local.ui.keyboard.hotkey", "Send a bounded keyboard shortcut; dangerous system shortcuts are blocked by Desktop safety policy.", _session_schema({"keys": {"type": "array"}}, ["keys"]), "medium"),
         _tool("local.ui.wait", "Wait briefly for a local application UI to update.", _session_schema({"milliseconds": {"type": "integer"}}, ["milliseconds"])),
         _tool("local.ui.element.find", "Find Windows UI Automation elements by name/control type/automation id.", _session_schema({**selector_props, "limit": {"type": "integer"}}, ["handle"])),
         _tool("local.ui.element.click", "Click a Windows UI Automation element.", _session_schema(selector_props, ["handle"]), "medium"),
@@ -314,7 +607,7 @@ def desktop_tool_definitions() -> list[ToolDefinition]:
 
 
 def register_desktop_tools(registry: ToolRegistry) -> None:
-    if not settings.desktop_bridge_enabled:
+    if not _desktop_tools_available():
         return
     for tool in desktop_tool_definitions():
         registry.register(tool, _handler(tool.name))

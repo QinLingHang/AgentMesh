@@ -204,6 +204,35 @@ async function runFixture(action, args = [], extraEnv = {}) {
   return JSON.parse(lines.at(-1));
 }
 
+async function runP20MemoryFixture(action, args = []) {
+  const { stdout } = await spawnCollected("go", ["run", "./cmd/p20-memory-e2e-fixture", action, ...args], {
+    cwd: backendRoot,
+    env: process.env,
+  }, 45000);
+  const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+  return JSON.parse(lines.at(-1));
+}
+
+async function inspectRuntimeMemory(runtimePython, runtimeRoot, redisUrl, memoryPrefix) {
+  const script = [
+    'import json, os',
+    'import redis',
+    'client = redis.Redis.from_url(os.environ["P20_REDIS_URL"], decode_responses=False)',
+    'prefix = os.environ["P20_MEMORY_PREFIX"]',
+    'items = []',
+    'for key in client.scan_iter(match=(prefix + ":*").encode("utf-8")):',
+    '    kind = client.type(key).decode("utf-8")',
+    '    size = client.llen(key) if kind == "list" else 0',
+    '    items.append({"key": key.decode("utf-8"), "type": kind, "listLength": int(size)})',
+    'print(json.dumps({"items": items, "maxListLength": max([x["listLength"] for x in items] or [0])}))',
+  ].join('\n');
+  const { stdout } = await spawnCollected(runtimePython, ['-c', script], {
+    cwd: runtimeRoot,
+    env: { ...process.env, P20_REDIS_URL: redisUrl, P20_MEMORY_PREFIX: memoryPrefix },
+  }, 15000);
+  return JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1));
+}
+
 function redisDatabaseFromUrl(rawUrl) {
   let parsed;
   try {
@@ -349,6 +378,14 @@ async function selectValue(cdp, selector, value) {
   await setValue(cdp, selector, value, 0);
 }
 
+function redactQaDiagnostics(raw) {
+  return String(raw ?? "")
+    .replace(
+      /(\[DEV EMAIL\][^\r\n]*\bcode=)\d{6}\b/g,
+      "$1[REDACTED]",
+    );
+}
+
 async function waitForVerificationCode(getLogs, email, scene, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
   const escapedEmail = email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -358,7 +395,9 @@ async function waitForVerificationCode(getLogs, email, scene, timeoutMs = 10000)
     if (match) return match[1];
     await sleep(100);
   }
-  throw new Error(`Timed out waiting for ${scene} verification code for ${email}\nServer log:\n${getLogs()}`);
+  throw new Error(
+    `Timed out waiting for ${scene} verification code for ${email}\nServer log:\n${redactQaDiagnostics(getLogs())}`,
+  );
 }
 
 async function registerOwner(cdp, owner) {
@@ -428,6 +467,63 @@ async function apiRequest(baseUrl, accessToken, method, route, body, headers = {
     throw new Error(`${method} ${route} failed: HTTP ${response.status} ${text}`);
   }
   return unwrap(payload);
+}
+
+async function internalMemoryRequest(baseUrl, internalToken, method, route, body) {
+  const headers = {};
+  if (internalToken) headers["X-Internal-Token"] = internalToken;
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const response = await fetch(`${baseUrl}${route}`, {
+    method,
+    headers,
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try { payload = JSON.parse(text); } catch { payload = text; }
+  }
+  return { response, payload, data: unwrap(payload) };
+}
+
+async function waitForConversationCapsules(baseUrl, internalToken, userId, conversationId, timeoutMs = 25000) {
+  const route = `/internal/v1/users/${userId}/conversations/${conversationId}/memory-capsules?limit=20`;
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const result = await internalMemoryRequest(baseUrl, internalToken, "GET", route);
+    if (result.response.ok && Array.isArray(result.data) && result.data.length > 0) return result.data;
+    last = result;
+    await sleep(150);
+  }
+  throw new Error(`conversation capsule was not persisted in time: ${JSON.stringify(last?.payload ?? null)}`);
+}
+
+async function loadAllConversationHistory(cdp, expectedAtLeast, timeoutMs = 30000) {
+  const deadline = Date.now() + timeoutMs;
+  for (let page = 0; page < 20 && Date.now() < deadline; page += 1) {
+    const state = await cdp.evaluate(`(() => ({
+      count: document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]').length,
+      hasMore: Boolean(document.querySelector('[data-testid="message-history-load-earlier"] button')),
+    }))()`);
+    if (!state.hasMore) {
+      assert.ok(state.count >= expectedAtLeast, `expected at least ${expectedAtLeast} durable messages, got ${state.count}`);
+      return state.count;
+    }
+    const before = state.count;
+    assert.equal(
+      await cdp.evaluate(`(() => { const button=document.querySelector('[data-testid="message-history-load-earlier"] button'); if(!button||button.disabled)return false; button.click(); return true; })()`),
+      true,
+      "load-earlier history button was not clickable",
+    );
+    await waitFor(
+      cdp,
+      `document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]').length > ${before}`,
+      `older history page after ${before} messages`,
+      10000,
+    );
+  }
+  throw new Error(`timed out loading complete durable conversation history (expected >= ${expectedAtLeast})`);
 }
 
 
@@ -559,6 +655,12 @@ async function waitForConversationHistoryReady(cdp, id, timeoutMs = 20000) {
 
 async function createConversationThroughBrowser(cdp) {
   const before = await currentConversationId(cdp);
+  await waitFor(
+    cdp,
+    `(() => { const button=document.querySelector('[data-testid="conversation-create"]'); return Boolean(button && !button.disabled); })()`,
+    "new conversation button ready",
+    15000,
+  );
   await clickSelector(cdp, '[data-testid="conversation-create"]', "new conversation");
   await waitFor(
     cdp,
@@ -572,8 +674,156 @@ async function createConversationThroughBrowser(cdp) {
 }
 
 async function openConversation(cdp, id) {
-  await clickSelector(cdp, `[data-testid="conversation-item-${id}"]`, `conversation ${id}`);
+  const selector = `[data-testid="conversation-item-${id}"]`;
+  await waitFor(
+    cdp,
+    `(() => { const item=document.querySelector(${q(selector)}); return Boolean(item && !item.disabled); })()`,
+    `conversation ${id} rail item ready`,
+    20000,
+  );
+  await clickSelector(cdp, selector, `conversation ${id}`);
   await waitForConversationHistoryReady(cdp, id);
+}
+
+async function assertConversationAtBottom(cdp, label, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await cdp.evaluate(`(() => {
+      const node=document.querySelector('[data-testid="workspace-message-scroll"]');
+      if(!node)return null;
+      return {
+        scrollTop: node.scrollTop,
+        scrollHeight: node.scrollHeight,
+        clientHeight: node.clientHeight,
+        distance: Math.max(0, node.scrollHeight - node.scrollTop - node.clientHeight),
+      };
+    })()`);
+    if (last && last.distance <= 4) return last;
+    await sleep(50);
+  }
+  throw new Error(`${label} did not land at the latest-message bottom: ${JSON.stringify(last)}`);
+}
+
+async function loadOneOlderPagePreservingViewport(cdp) {
+  const before = await cdp.evaluate(`(() => {
+    const node=document.querySelector('[data-testid="workspace-message-scroll"]');
+    const button=document.querySelector('[data-testid="message-history-load-earlier"] button');
+    if(!node||!button)return null;
+    node.scrollTop=0;
+    const anchor=document.querySelector('[data-testid="message-user"][data-message-id], [data-testid="message-assistant"][data-message-id]');
+    const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
+      .map((item)=>Number(item.getAttribute('data-message-id')||0));
+    return {
+      count: ids.length,
+      ids,
+      scrollTop: node.scrollTop,
+      scrollHeight: node.scrollHeight,
+      anchorId: anchor?.getAttribute('data-message-id') ?? null,
+      anchorTop: anchor?.getBoundingClientRect().top ?? null,
+    };
+  })()`);
+  assert.ok(before, "P20 older-history viewport fixture was unavailable");
+  assert.ok(before.anchorId && Number.isFinite(before.anchorTop), "P20 visible message anchor was unavailable");
+
+  assert.equal(
+    await cdp.evaluate(`(() => { const button=document.querySelector('[data-testid="message-history-load-earlier"] button'); if(!button||button.disabled)return false; button.click(); return true; })()`),
+    true,
+    "P20 older-history button was not clickable",
+  );
+
+  await waitFor(
+    cdp,
+    `document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]').length > ${before.count}`,
+    "P20 first older-history page",
+    10000,
+  );
+
+  await sleep(120);
+
+  const after = await cdp.evaluate(`(() => {
+    const node=document.querySelector('[data-testid="workspace-message-scroll"]');
+    const anchor=document.querySelector('[data-message-id="${before.anchorId}"]');
+    const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
+      .map((item)=>Number(item.getAttribute('data-message-id')||0));
+    return node ? {
+      count: ids.length,
+      ids,
+      scrollTop: node.scrollTop,
+      scrollHeight: node.scrollHeight,
+      anchorTop: anchor?.getBoundingClientRect().top ?? null,
+    } : null;
+  })()`);
+
+  assert.ok(after, "P20 older-history scroll container disappeared");
+
+  const expectedTop =
+    before.scrollTop +
+    Math.max(
+      0,
+      after.scrollHeight -
+        before.scrollHeight,
+    );
+
+  const scrollDisplacement =
+    Math.abs(
+      after.scrollTop -
+        expectedTop,
+    );
+
+  const hasConcreteAnchor =
+    Number.isFinite(
+      after.anchorTop,
+    );
+
+  const anchorDisplacement =
+    hasConcreteAnchor
+      ? Math.abs(
+          after.anchorTop -
+            before.anchorTop,
+        )
+      : null;
+
+  const diagnostics = {
+    before: {
+      ...before,
+      firstIds: before.ids.slice(0, 5),
+      lastIds: before.ids.slice(-5),
+      ids: undefined,
+    },
+    after: {
+      ...after,
+      firstIds: after.ids.slice(0, 5),
+      lastIds: after.ids.slice(-5),
+      ids: undefined,
+    },
+    expectedTop,
+    scrollDisplacement,
+    anchorDisplacement,
+    anchorMode:
+      hasConcreteAnchor
+        ? "concrete-element"
+        : "height-fallback",
+  };
+
+  console.log(
+    `[P20] older-history anchor ${JSON.stringify(diagnostics)}`,
+  );
+
+  if (hasConcreteAnchor) {
+    assert.ok(
+      anchorDisplacement <= 16,
+      `loading older history displaced the visible message anchor: ${JSON.stringify(diagnostics)}`,
+    );
+    return;
+  }
+
+  // Height arithmetic is only authoritative when the concrete durable anchor
+  // disappeared and production had to use its one-time missing-anchor fallback.
+  assert.ok(
+    scrollDisplacement <= 8,
+    `loading older history fallback did not preserve the viewport: ${JSON.stringify(diagnostics)}`,
+  );
 }
 
 async function composerValue(cdp) {
@@ -584,7 +834,35 @@ async function workspaceText(cdp) {
   return await cdp.evaluate(`document.querySelector('[data-testid="workspace-conversation"]')?.innerText ?? ''`);
 }
 
+async function durableMessageSnapshot(cdp) {
+  return await cdp.evaluate(`(() => {
+    const nodes=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')];
+    return {
+      count: nodes.length,
+      ids: nodes.map((node) => Number(node.getAttribute('data-message-id') || 0)),
+      texts: nodes.map((node) => node.textContent || ''),
+    };
+  })()`);
+}
+
+function p20HistoryEvidence(label, snapshot, firstMarker, lastMarker) {
+  const evidence = {
+    count: snapshot.count,
+    firstIds: snapshot.ids.slice(0, 5),
+    lastIds: snapshot.ids.slice(-5),
+    firstMarker: snapshot.texts.some((value) => value.includes(firstMarker)),
+    lastMarker: snapshot.texts.some((value) => value.includes(lastMarker)),
+  };
+  console.log(`[P20] ${label} ${JSON.stringify(evidence)}`);
+  return evidence;
+}
+
 async function sendPrompt(cdp, prompt, expectedText = "", timeoutMs = 90000) {
+  const beforeSend = await cdp.evaluate(`(() => ({
+    durableUserCount: document.querySelectorAll('[data-testid="message-user"]').length,
+    durableAssistantCount: document.querySelectorAll('[data-testid="message-assistant"]').length,
+  }))()`);
+
   await setValue(cdp, '[data-testid="workspace-composer"]', prompt);
   await clickSelector(cdp, '[data-testid="workspace-submit"]', "workspace submit");
   await waitFor(
@@ -593,6 +871,7 @@ async function sendPrompt(cdp, prompt, expectedText = "", timeoutMs = 90000) {
     `user prompt ${prompt}`,
     15000,
   );
+
   if (expectedText) {
     await waitFor(
       cdp,
@@ -600,9 +879,26 @@ async function sendPrompt(cdp, prompt, expectedText = "", timeoutMs = 90000) {
       `assistant text ${expectedText}`,
       timeoutMs,
     );
-  } else {
-    await waitFor(cdp, `document.querySelector('[data-testid="message-assistant"]')`, "assistant response", timeoutMs);
+    return;
   }
+
+  // A conversation can already contain many assistant rows. Waiting for
+  // "any assistant message" therefore returns immediately and can race the
+  // authoritative same-conversation refresh. For no-specific-text calls,
+  // wait until this submission itself is durable: the exact user prompt must
+  // exist as a persisted user row and a new persisted assistant row must have
+  // appeared beyond the pre-submit baseline.
+  await waitFor(
+    cdp,
+    `(() => {
+      const users=[...document.querySelectorAll('[data-testid="message-user"]')];
+      const assistants=document.querySelectorAll('[data-testid="message-assistant"]');
+      const promptPersisted=users.some((el)=>el.textContent?.includes(${q(prompt)}));
+      return promptPersisted && assistants.length > ${beforeSend.durableAssistantCount};
+    })()`,
+    `durable assistant response for ${prompt}`,
+    timeoutMs,
+  );
 }
 
 async function openLatestRunDetails(cdp) {
@@ -666,6 +962,20 @@ function modelFixtureReply(body, desktopRoot) {
   const messages = Array.isArray(body.messages) ? body.messages : [];
   const all = flattenedMessageText(messages);
   const user = lastUserText(messages);
+
+  if (all.includes("Compress an OLD range of one conversation into a durable memory capsule.")) {
+    return {
+      content: JSON.stringify({
+        summary: "P20 durable conversation history was compacted into a bounded memory capsule.",
+        facts: ["Raw conversation history remains authoritative in MySQL."],
+        decisions: ["Redis is only bounded working memory."],
+        open_tasks: ["Continue P20 reliability validation."],
+        entities: ["AgentMesh", "Redis", "MySQL"],
+        keywords: ["conversation", "memory", "durability"],
+        importance: 0.92,
+      }),
+    };
+  }
 
   if (all.includes("[operation]\nrewrite")) {
     const query = originalRetrievalQuery(all);
@@ -982,6 +1292,187 @@ async function runV41() {
     tokenA = await waitForAccessToken(() => latestAccessToken);
     await verifyAndReloadV41ModelService(cdp, fixture, apiBase, tokenA, ownerA.email, ownerA.displayName, modelPort);
 
+    // P20 light-theme regression: project management controls must stay on the
+    // light surface even if legacy/global form rules still exist elsewhere.
+    await clickSelector(cdp, '[data-testid="project-create-open"]', "open create-project dialog");
+    await waitFor(cdp, `document.querySelector('[data-testid="project-name-input"]')`, "create-project name input");
+    const projectControlTheme = await cdp.evaluate(`(() => {
+      const input=document.querySelector('[data-testid="project-name-input"]');
+      const textarea=input?.closest('form')?.querySelector('textarea');
+      const parse=(value)=>{ const xs=String(value||'').match(/[0-9.]+/g)?.map(Number)??[]; return xs.slice(0,3); };
+      return { inputBg: parse(getComputedStyle(input).backgroundColor), textareaBg: parse(getComputedStyle(textarea).backgroundColor) };
+    })()`);
+    assert.ok(projectControlTheme.inputBg.length === 3 && projectControlTheme.inputBg.every((value) => value >= 220), `project name input is not a light surface: ${JSON.stringify(projectControlTheme)}`);
+    assert.ok(projectControlTheme.textareaBg.length === 3 && projectControlTheme.textareaBg.every((value) => value >= 220), `project description textarea is not a light surface: ${JSON.stringify(projectControlTheme)}`);
+    await clickText(cdp, "取消");
+
+    // P20 Conversation Memory Reliability: one real-stack scenario closes the
+    // durability loop end-to-end while the canonical stack is still alive.
+    // It deliberately combines browser pagination, Runtime compaction, bounded
+    // Redis working memory, Redis namespace loss, internal-token authorization,
+    // cross-user isolation and durable MySQL capsule/history recovery.
+    const p20History = await runP20MemoryFixture("seed-history", [
+      "--database", fixture.database,
+      "--email", ownerA.email,
+      "--count", "125",
+      "--marker-prefix", `P20_HISTORY_${stamp}`,
+    ]);
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await waitFor(cdp, `document.querySelector('.app-shell')`, "P20 durable-history reload", 20000);
+    await openConversation(cdp, p20History.conversationId);
+    await assertConversationAtBottom(cdp, "P20 durable-history open");
+    await loadOneOlderPagePreservingViewport(cdp);
+    await loadAllConversationHistory(cdp, 125);
+    let p20HistorySnapshot = await durableMessageSnapshot(cdp);
+    const initialHistoryEvidence = p20HistoryEvidence(
+      "rendered-history",
+      p20HistorySnapshot,
+      p20History.firstMarker,
+      p20History.lastMarker,
+    );
+    assert.ok(
+      initialHistoryEvidence.count >= 125,
+      `browser rendered fewer than 125 durable P20 messages: ${JSON.stringify(initialHistoryEvidence)}`,
+    );
+    assert.ok(
+      initialHistoryEvidence.firstMarker,
+      `browser could not reach first durable P20 message: ${JSON.stringify(initialHistoryEvidence)}`,
+    );
+    assert.ok(
+      initialHistoryEvidence.lastMarker,
+      `browser could not reach last durable P20 message: ${JSON.stringify(initialHistoryEvidence)}`,
+    );
+
+    const capsuleRoute = `/internal/v1/users/${p20History.userId}/conversations/${p20History.conversationId}/memory-capsules?limit=20`;
+    assert.equal((await internalMemoryRequest(apiBase, "", "GET", capsuleRoute)).response.status, 401, "missing internal token must be rejected");
+    assert.equal((await internalMemoryRequest(apiBase, "wrong-p20-internal-token", "GET", capsuleRoute)).response.status, 401, "wrong internal token must be rejected");
+
+    const beforeCompactionRefresh = p20HistorySnapshot;
+    const compactionPrompt = `P20_MEMORY_COMPACTION_TRIGGER_${stamp}`;
+    await sendPrompt(cdp, compactionPrompt);
+    const afterSameConversationRefresh = await durableMessageSnapshot(cdp);
+    const sameConversationEvidence = p20HistoryEvidence(
+      "same-conversation-refresh",
+      afterSameConversationRefresh,
+      p20History.firstMarker,
+      p20History.lastMarker,
+    );
+    console.log(
+      `[P20] same-conversation-refresh counts ${JSON.stringify({
+        before: beforeCompactionRefresh.count,
+        after: afterSameConversationRefresh.count,
+        compactionPromptPresent: afterSameConversationRefresh.texts.some((value) => value.includes(compactionPrompt)),
+      })}`,
+    );
+    assert.ok(
+      sameConversationEvidence.firstMarker,
+      `same-conversation refresh collapsed the expanded durable history window: ${JSON.stringify(sameConversationEvidence)}`,
+    );
+    assert.ok(
+      sameConversationEvidence.lastMarker,
+      `same-conversation refresh lost the newest durable marker: ${JSON.stringify(sameConversationEvidence)}`,
+    );
+    assert.ok(
+      afterSameConversationRefresh.texts.some((value) => value.includes(compactionPrompt)),
+      `same-conversation refresh lost the compaction-trigger prompt: ${JSON.stringify(sameConversationEvidence)}`,
+    );
+    const capsules = await waitForConversationCapsules(
+      apiBase, runtimeToken, p20History.userId, p20History.conversationId, 30000,
+    );
+    const capsule = capsules[0];
+    assert.ok(Number(capsule?.id) > 0, "Runtime did not persist a real conversation memory capsule");
+    console.log(
+      `[P20] memory-capsule ${JSON.stringify({
+        capsuleId: Number(capsule.id),
+        conversationId: Number(p20History.conversationId),
+        startMessageId: Number(capsule.startMessageId),
+        endMessageId: Number(capsule.endMessageId),
+      })}`,
+    );
+
+    const crossUser = await internalMemoryRequest(
+      apiBase, runtimeToken, "GET",
+      `/internal/v1/users/${Number(p20History.userId) + 1000000}/conversations/${p20History.conversationId}/memory-capsules?limit=20`,
+    );
+    assert.equal(crossUser.response.status, 404, "cross-user capsule access must fail closed");
+
+    const capsuleWrite = {
+      startMessageId: capsule.startMessageId,
+      endMessageId: capsule.endMessageId,
+      summary: capsule.summary,
+      facts: capsule.facts ?? [],
+      decisions: capsule.decisions ?? [],
+      openTasks: capsule.openTasks ?? [],
+      entities: capsule.entities ?? [],
+      keywords: capsule.keywords ?? [],
+      importance: capsule.importance,
+      sourceHash: capsule.sourceHash,
+      compactionModel: capsule.compactionModel ?? "",
+      inputTokens: capsule.inputTokens ?? 0,
+      outputTokens: capsule.outputTokens ?? 0,
+      estimatedCost: capsule.estimatedCost ?? null,
+    };
+    const beforeIdempotentCount = capsules.length;
+    for (let index = 0; index < 2; index += 1) {
+      const upserted = await internalMemoryRequest(
+        apiBase, runtimeToken, "POST",
+        `/internal/v1/users/${p20History.userId}/conversations/${p20History.conversationId}/memory-capsules`,
+        capsuleWrite,
+      );
+      assert.equal(upserted.response.ok, true, `idempotent capsule upsert ${index + 1} failed: ${JSON.stringify(upserted.payload)}`);
+    }
+    const afterIdempotent = await internalMemoryRequest(apiBase, runtimeToken, "GET", capsuleRoute);
+    assert.equal(afterIdempotent.response.ok, true);
+    assert.equal(afterIdempotent.data.length, beforeIdempotentCount, "same capsule range must upsert idempotently");
+
+    const redisBeforeClear = await inspectRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
+    console.log(
+      `[P20] redis-working-memory ${JSON.stringify({
+        maxListLength: redisBeforeClear.maxListLength,
+        keyCount: redisBeforeClear.items.length,
+      })}`,
+    );
+    assert.ok(redisBeforeClear.maxListLength <= 20, `Runtime Redis working list exceeded 20 messages: ${JSON.stringify(redisBeforeClear)}`);
+    await cleanupRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
+    const redisAfterClear = await inspectRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
+    assert.equal(redisAfterClear.items.length, 0, "isolated P20 Runtime Redis namespace was not cleared");
+
+    await cdp.send("Page.reload", { ignoreCache: true });
+    await waitFor(cdp, `document.querySelector('.app-shell')`, "P20 post-Redis-clear reload", 20000);
+    await openConversation(cdp, p20History.conversationId);
+    await assertConversationAtBottom(cdp, "P20 post-Redis-clear conversation restore");
+    await loadAllConversationHistory(cdp, 125);
+    p20HistorySnapshot = await durableMessageSnapshot(cdp);
+    const postRedisHistoryEvidence = p20HistoryEvidence(
+      "post-redis-clear-history",
+      p20HistorySnapshot,
+      p20History.firstMarker,
+      p20History.lastMarker,
+    );
+    assert.ok(
+      postRedisHistoryEvidence.count >= 125,
+      `fewer than 125 durable messages remained after Redis clear: ${JSON.stringify(postRedisHistoryEvidence)}`,
+    );
+    assert.ok(
+      postRedisHistoryEvidence.firstMarker,
+      `first durable message disappeared after Redis clear: ${JSON.stringify(postRedisHistoryEvidence)}`,
+    );
+    assert.ok(
+      postRedisHistoryEvidence.lastMarker,
+      `last durable message disappeared after Redis clear: ${JSON.stringify(postRedisHistoryEvidence)}`,
+    );
+    const capsulesAfterRedisClear = await internalMemoryRequest(apiBase, runtimeToken, "GET", capsuleRoute);
+    assert.equal(capsulesAfterRedisClear.response.ok, true);
+    assert.ok(Array.isArray(capsulesAfterRedisClear.data) && capsulesAfterRedisClear.data.length >= 1, "MySQL capsule disappeared after Redis clear");
+    console.log(
+      `[P20] redis-loss-recovery ${JSON.stringify({
+        recoveredCount: postRedisHistoryEvidence.count,
+        firstMarker: postRedisHistoryEvidence.firstMarker,
+        lastMarker: postRedisHistoryEvidence.lastMarker,
+        capsuleCount: capsulesAfterRedisClear.data.length,
+      })}`,
+    );
+
     // 1) New-conversation isolation, including late-response ownership.
     const convA = await createConversationThroughBrowser(cdp);
     const aMarker = `FIX4_A_${stamp}`;
@@ -1238,7 +1729,7 @@ async function runV41() {
   }
 
   if (primaryError) {
-    if (serverLog) console.error(`V4.1 Go log:\n${serverLog}`);
+    if (serverLog) console.error(`V4.1 Go log:\n${redactQaDiagnostics(serverLog)}`);
     if (runtimeLog) console.error(`V4.1 Runtime log:\n${runtimeLog}`);
     if (desktopLog) console.error(`V4.1 Desktop log:\n${desktopLog}`);
     if (cleanupError) console.error(`V4.1 cleanup warning: ${cleanupError.stack ?? cleanupError}`);

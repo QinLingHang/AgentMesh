@@ -83,8 +83,14 @@ class Settings(
     # Local Desktop Bridge
     # =====================================================
 
-    # Disabled by default. The Desktop Bridge is a separate loopback-only
-    # process that enforces authorized local roots independently of the Agent.
+    # Local Windows Runtime embeds Desktop capability by default, so normal
+    # local development does not require a second Desktop Bridge process.
+    # Set DESKTOP_EMBEDDED_ENABLED=false to disable local embedded execution.
+    desktop_embedded_enabled: bool = True
+
+    # Optional remote/restricted Desktop Bridge transport. When enabled it
+    # takes precedence over embedded execution. V4.1 acceptance deliberately
+    # uses this path to preserve its explicit Restricted Root isolation proof.
     desktop_bridge_enabled: bool = False
     desktop_bridge_base_url: str = "http://127.0.0.1:9583"
     desktop_bridge_token: str = ""
@@ -140,9 +146,11 @@ class Settings(
         "agentmesh:memory"
     )
 
+    # Runtime-only short-term cache. This does NOT cap or delete durable
+    # conversation history; MySQL messages remain the source of truth.
     memory_max_messages: int = 20
 
-    # 7 days
+    # 7 days (cache TTL only; never a conversation-history retention policy)
     memory_ttl_seconds: int = (
         7 * 24 * 60 * 60
     )
@@ -183,6 +191,37 @@ class Settings(
     memory_retrieval_confidence_weight: float = 0.10
     memory_retrieval_authority_weight: float = 0.10
     memory_retrieval_relevance_weight: float = 0.15
+
+    # =====================================================
+    # Conversation Memory Compression / Selective Recall (P20)
+    # =====================================================
+
+    # Raw Redis memory remains a small working-memory window. Older turns are
+    # compressed into durable MySQL capsules only when enough completed history
+    # exists, so ordinary requests do not pay an extra LLM call.
+    conversation_memory_compaction_enabled: bool = True
+    conversation_memory_compaction_min_messages: int = 12
+    conversation_memory_compaction_max_messages: int = 18
+    conversation_memory_compaction_reserve_recent: int = 16
+    conversation_memory_compaction_min_input_chars: int = 1200
+    conversation_memory_compaction_max_input_chars: int = 10000
+    conversation_memory_compaction_max_output_tokens: int = 600
+    conversation_memory_compaction_timeout_seconds: float = 12.0
+    conversation_memory_compaction_failure_backoff_seconds: float = 60.0
+    conversation_memory_compaction_lock_ttl_seconds: int = 45
+    conversation_memory_compaction_lock_prefix: str = "agentmesh:conversation-memory:compact-lock"
+
+    # Optional cheaper model for memory compression. Empty means reuse the
+    # request/default model; operators can point this at a low-cost model.
+    conversation_memory_compaction_model_name: str = ""
+
+    # Retrieval is local/deterministic (hash semantic + lexical + importance +
+    # recency), so selecting old memory adds no paid model call.
+    conversation_memory_retrieval_enabled: bool = True
+    conversation_memory_retrieval_candidate_limit: int = 80
+    conversation_memory_retrieval_top_k: int = 3
+    conversation_memory_retrieval_min_score: float = 0.12
+    conversation_memory_retrieval_max_chars: int = 3200
 
 
         # =====================================================

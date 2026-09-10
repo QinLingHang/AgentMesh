@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import time
@@ -66,6 +67,12 @@ from app.memory import (
     RetrievedLongTermMemory,
     is_memory_overview_query,
 )
+from app.memory.conversation_context import (
+    ControlPlaneConversationMemoryStore,
+    ConversationMemoryRetriever,
+    ModelBackedConversationCompactor,
+    RetrievedConversationMemory,
+)
 from app.models.runtime import (
     ModelRuntimeResolver,
 )
@@ -115,6 +122,10 @@ from app.services.citation_projection import (
 )
 from app.services.grounded_answer_guard import (
     guard_grounded_answer,
+)
+from app.services.platform_capability_grounding import (
+    build_platform_capability_context,
+    guard_platform_capability_answer,
 )
 from app.services.dag import (
     build_dag,
@@ -952,6 +963,44 @@ class RuntimeEngine:
                     ),
                 )
             )
+
+
+        # ====================================================
+        # Conversation Memory Capsules (P20)
+        #
+        # Raw conversation history remains durable in MySQL. Redis keeps only
+        # a small working window; older ranges are compressed asynchronously
+        # and retrieved selectively without a paid model call per request.
+        # ====================================================
+
+        self.conversation_memory_store = ControlPlaneConversationMemoryStore(
+            internal_token=settings.internal_token,
+            base_url=settings.control_plane_internal_base_url,
+            timeout_seconds=settings.memory_retrieval_timeout_seconds,
+        )
+        self.conversation_memory_retriever = ConversationMemoryRetriever(
+            store=self.conversation_memory_store,
+            enabled=settings.conversation_memory_retrieval_enabled,
+            candidate_limit=settings.conversation_memory_retrieval_candidate_limit,
+            top_k=settings.conversation_memory_retrieval_top_k,
+            min_score=settings.conversation_memory_retrieval_min_score,
+            max_chars=settings.conversation_memory_retrieval_max_chars,
+        )
+        self.conversation_memory_compactor = ModelBackedConversationCompactor(
+            store=self.conversation_memory_store,
+            enabled=settings.conversation_memory_compaction_enabled,
+            min_messages=settings.conversation_memory_compaction_min_messages,
+            max_messages=settings.conversation_memory_compaction_max_messages,
+            reserve_recent=settings.conversation_memory_compaction_reserve_recent,
+            min_input_chars=settings.conversation_memory_compaction_min_input_chars,
+            max_input_chars=settings.conversation_memory_compaction_max_input_chars,
+            max_output_tokens=settings.conversation_memory_compaction_max_output_tokens,
+            timeout_seconds=settings.conversation_memory_compaction_timeout_seconds,
+            failure_backoff_seconds=settings.conversation_memory_compaction_failure_backoff_seconds,
+            redis_url=settings.redis_url,
+            lock_prefix=settings.conversation_memory_compaction_lock_prefix,
+            lock_ttl_seconds=settings.conversation_memory_compaction_lock_ttl_seconds,
+        )
 
 
         # Explicit conversational forget is the user-facing management path.
@@ -3273,7 +3322,7 @@ class RuntimeEngine:
                                 role=item.role,
                                 content=item.content,
                             )
-                            for item in req.history[-8:]
+                            for item in req.history
                             if item.content.strip()
                         ]
                         history_source = "control_plane_history"
@@ -3351,6 +3400,51 @@ class RuntimeEngine:
                         ensure_ascii=False,
                     ),
                 )
+
+            # =================================================
+            # 2.1.1 Selective Older Conversation Recall
+            # =================================================
+
+            conversation_memories: list[RetrievedConversationMemory] = []
+            if req.conversation_id is not None:
+                try:
+                    conversation_memories = await self.conversation_memory_retriever.retrieve(
+                        user_id=req.user_id,
+                        conversation_id=req.conversation_id,
+                        query=req.task,
+                    )
+                    event(
+                        "memory_retrieval",
+                        "Conversation Memory Recall",
+                        "completed",
+                        json.dumps(
+                            {
+                                "selectedCount": len(conversation_memories),
+                                "capsuleIds": [
+                                    item.capsule.id for item in conversation_memories
+                                ],
+                                "scores": [
+                                    round(item.score, 6) for item in conversation_memories
+                                ],
+                                "paidModelCall": False,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                except Exception as exc:
+                    conversation_memories = []
+                    event(
+                        "memory_retrieval",
+                        "Conversation Memory Recall",
+                        "error",
+                        json.dumps(
+                            {
+                                "reason": "conversation_memory_unavailable",
+                                "errorType": type(exc).__name__,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
 
             # =================================================
             # 2.2 Adaptive RAG Routing + Retrieval
@@ -4885,6 +4979,9 @@ class RuntimeEngine:
                         memory_messages=(
                             memory_messages
                         ),
+                        conversation_memories=(
+                            conversation_memories
+                        ),
                         retrieval_hits=(
                             []
                             if memory_overview_query
@@ -4925,6 +5022,28 @@ class RuntimeEngine:
                             execution_context
                             + "\n\n"
                             + capability_context
+                        )
+
+                    platform_capability_context = (
+                        build_platform_capability_context(
+                            task=req.task,
+                            history=req.history,
+                            tools=req.tools,
+                            mcp_servers=req.mcp_servers,
+                            agents=req.agents,
+                            selected_tool_names=(
+                                capability_plan.selected_tool_names
+                            ),
+                            selected_mcp_tool_names=(
+                                capability_plan.selected_mcp_tool_names
+                            ),
+                        )
+                    )
+                    if platform_capability_context:
+                        execution_context = (
+                            execution_context
+                            + "\n\n"
+                            + platform_capability_context
                         )
 
                 event(
@@ -6894,33 +7013,56 @@ class RuntimeEngine:
                 runtime_citations = []
 
                 if not long_term_memories:
-                    if memory_messages:
-                        answer = (
-                            "我目前没有保存你在这方面的偏好。"
-                            "如果你刚在当前对话里提到过，我仍会参考这次对话的上下文。"
+                    if conversation_memories:
+                        # Older same-conversation capsules are legitimate
+                        # evidence for "之前说过什么" questions. They are not
+                        # user-global memories, so keep the model answer grounded
+                        # by those capsules instead of replacing it with a false
+                        # "I forgot" response.
+                        event(
+                            "memory_guard",
+                            "Memory Epistemic Guard",
+                            "completed",
+                            json.dumps(
+                                {
+                                    "action": "conversation_memory_grounded",
+                                    "retrievalReason": memory_retrieval_reason,
+                                    "selectedCount": 0,
+                                    "conversationMessages": len(memory_messages),
+                                    "conversationCapsules": len(conversation_memories),
+                                },
+                                ensure_ascii=False,
+                            ),
                         )
-                        guard_action = "no_saved_memory_conversation_context_present"
                     else:
-                        answer = (
-                            "我目前没有记住你在这方面的偏好。"
-                            "如果你希望以后都按某种方式处理，直接告诉我就可以。"
-                        )
-                        guard_action = "no_saved_memory"
+                        if memory_messages:
+                            answer = (
+                                "我目前没有保存你在这方面的偏好。"
+                                "如果你刚在当前对话里提到过，我仍会参考这次对话的上下文。"
+                            )
+                            guard_action = "no_saved_memory_conversation_context_present"
+                        else:
+                            answer = (
+                                "我目前没有记住你在这方面的偏好。"
+                                "如果你希望以后都按某种方式处理，直接告诉我就可以。"
+                            )
+                            guard_action = "no_saved_memory"
 
-                    event(
-                        "memory_guard",
-                        "Memory Epistemic Guard",
-                        "completed",
-                        json.dumps(
-                            {
-                                "action": guard_action,
-                                "retrievalReason": memory_retrieval_reason,
-                                "selectedCount": 0,
-                                "conversationMessages": len(memory_messages),
-                            },
-                            ensure_ascii=False,
-                        ),
-                    )
+                        event(
+                            "memory_guard",
+                            "Memory Epistemic Guard",
+                            "completed",
+                            json.dumps(
+                                {
+                                    "action": guard_action,
+                                    "retrievalReason": memory_retrieval_reason,
+                                    "selectedCount": 0,
+                                    "conversationMessages": len(memory_messages),
+                                    "conversationCapsules": 0,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
                 else:
                     remembered = [
                         item.memory.content
@@ -7027,6 +7169,50 @@ class RuntimeEngine:
                                 len(
                                     rag_context_hits
                                 ),
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+
+            # =================================================
+            # 8.15 AgentMesh Platform Capability Grounding Guard
+            #
+            # Product-self questions are high-risk for stale model priors:
+            # a model can otherwise invent menus, YAML schemas, plugins,
+            # hosted domains or a generic "I cannot operate your computer"
+            # disclaimer even when request-scoped local.* tools exist.
+            # The prompt receives an authoritative capability snapshot above,
+            # and this deterministic final guard provides a fail-closed layer
+            # before Conversation Memory / RuntimeResponse persistence.
+            # =================================================
+
+            platform_guard_result = guard_platform_capability_answer(
+                task=req.task,
+                answer=answer,
+                history=req.history,
+                tools=req.tools,
+                mcp_servers=req.mcp_servers,
+                agents=req.agents,
+                selected_tool_names=(
+                    capability_plan.selected_tool_names
+                ),
+                selected_mcp_tool_names=(
+                    capability_plan.selected_mcp_tool_names
+                ),
+            )
+            if platform_guard_result.action != "not_applicable":
+                answer = platform_guard_result.answer
+                event(
+                    "capability_grounding",
+                    "AgentMesh Platform Capability Grounding Guard",
+                    "completed",
+                    json.dumps(
+                        {
+                            "passed": platform_guard_result.passed,
+                            "action": platform_guard_result.action,
+                            "violations": list(
+                                platform_guard_result.violations
+                            ),
                         },
                         ensure_ascii=False,
                     ),
@@ -7340,6 +7526,19 @@ class RuntimeEngine:
                         "error",
                         str(exc),
                     )
+
+            # LLM compaction is asynchronous and threshold-triggered. It never
+            # blocks the user response and is retried on a later turn if it fails.
+            if req.conversation_id is not None:
+                self.conversation_memory_compactor.schedule(
+                    user_id=req.user_id,
+                    conversation_id=req.conversation_id,
+                    model_gateway=self.rag_intelligence_model,
+                    model_name=(
+                        settings.conversation_memory_compaction_model_name.strip()
+                        or settings.model_name
+                    ),
+                )
 
             # =================================================
             # 10. Task Completed

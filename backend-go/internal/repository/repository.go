@@ -150,6 +150,48 @@ type MessageRepository interface {
 		int64,
 		int,
 	) ([]model.Message, error)
+
+	// ListMessagesBefore returns one cursor page from the durable MySQL
+	// conversation log. beforeID=0 means the newest page. hasMore reports
+	// whether older rows still exist. This is a UI/history contract only; model
+	// context budgeting is handled separately by the Runtime.
+	ListMessagesBefore(
+		context.Context,
+		int64,
+		int64,
+		int64,
+		int,
+	) ([]model.Message, bool, error)
+}
+
+// ConversationMemoryRepository is an optional stronger MySQL contract used by
+// Runtime conversation-memory compaction. Keeping it separate from
+// MessageRepository avoids widening every test double while preserving one Go
+// ownership boundary around durable conversation state.
+type ConversationMemoryRepository interface {
+	ListConversationMemoryCapsules(
+		context.Context,
+		int64,
+		int64,
+		int,
+	) ([]model.ConversationMemoryCapsule, error)
+
+	UpsertConversationMemoryCapsule(
+		context.Context,
+		int64,
+		int64,
+		model.ConversationMemoryCapsuleWrite,
+	) (*model.ConversationMemoryCapsule, error)
+
+	ConversationCompactionWindow(
+		context.Context,
+		int64,
+		int64,
+		int64,
+		int,
+		int,
+		int,
+	) ([]model.Message, error)
 }
 
 // TaskCompletionWrite and TaskSuspensionWrite describe authoritative task-state

@@ -4,6 +4,10 @@ from app.memory import (
     MemoryMessage,
     RetrievedLongTermMemory,
 )
+from app.memory.conversation_context import (
+    RetrievedConversationMemory,
+    render_retrieved_conversation_memories,
+)
 
 from app.rag import (
     EvidenceProvenance,
@@ -18,6 +22,9 @@ def build_agent_context(
     memory_messages: list[
         MemoryMessage
     ],
+    conversation_memories: list[
+        RetrievedConversationMemory
+    ] | None = None,
     retrieval_hits: list[
         RetrievalHit
     ],
@@ -144,6 +151,20 @@ def build_agent_context(
                     "- Do not invent a new topic merely because the current task is short or underspecified."
                 )
             )
+
+    # =====================================================
+    # Older Conversation Memory Capsules
+    #
+    # Raw recent messages always win. Capsules are durable compressed hints
+    # selected for the current query, not a replacement for the full MySQL log.
+    # =====================================================
+
+    if conversation_memories:
+        rendered_conversation_memory = render_retrieved_conversation_memories(
+            conversation_memories
+        )
+        if rendered_conversation_memory:
+            sections.append(rendered_conversation_memory)
 
     # =====================================================
     # User-global Long-term Memory

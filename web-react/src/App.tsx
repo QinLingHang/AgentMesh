@@ -3,7 +3,7 @@ import {
   listAgents,
   listConversations,
   listMCPServers,
-  listMessages,
+  listMessagePage,
   listPlugins,
   listProjects,
   listTasks,
@@ -52,6 +52,7 @@ import "./styles/theme-v4-2-soft-light.css";
 import "./styles/theme-v4-4-clean-light.css";
 import "./styles/theme-v4-5-user-byok.css";
 import "./styles/theme-v4-6-chinese-light.css";
+import "./styles/p20-light-management-dialog.css";
 
 const Agents = lazy(() =>
   import("./features/agents/Agents").then((module) => ({
@@ -111,6 +112,76 @@ type Tab =
   | "governance"
   | "ecosystem"
   | "profile";
+
+
+type MessageProjection = {
+  conversationId: number | null;
+  items: Message[];
+  hasMore: boolean;
+  nextBeforeId: number | null;
+};
+
+function mergeMessageRows(existing: Message[], incoming: Message[]): Message[] {
+  const byId = new Map<number, Message>();
+
+  // Existing rows preserve the already-expanded durable history window.
+  for (const item of existing) {
+    byId.set(item.id, item);
+  }
+
+  // Fresh rows win on duplicate ids so status/content/metadata updates from the
+  // authoritative server projection replace stale browser copies.
+  for (const item of incoming) {
+    byId.set(item.id, item);
+  }
+
+  return [...byId.values()].sort((left, right) => left.id - right.id);
+}
+
+function mergeLatestMessagePage(
+  projection: MessageProjection,
+  conversationId: number,
+  loaded: MessageProjection,
+): MessageProjection {
+  if (
+    projection.conversationId !== conversationId ||
+    projection.items.length === 0
+  ) {
+    return {
+      conversationId,
+      items: loaded.items,
+      hasMore: loaded.hasMore,
+      nextBeforeId: loaded.nextBeforeId,
+    };
+  }
+
+  const existingIds = new Set(projection.items.map((item) => item.id));
+  const overlapsExistingWindow = loaded.items.some((item) => existingIds.has(item.id));
+  const items = mergeMessageRows(projection.items, loaded.items);
+
+  if (overlapsExistingWindow) {
+    // A normal same-conversation refresh overlaps the currently loaded tail.
+    // Preserve the reader's older-history pagination state instead of
+    // collapsing an expanded 50+50+... projection back to the newest 50 rows.
+    return {
+      conversationId,
+      items,
+      hasMore: projection.hasMore,
+      nextBeforeId: projection.nextBeforeId,
+    };
+  }
+
+  // If more than one newest page appeared between refreshes there may be a gap
+  // between the old browser window and the newly fetched tail. Keep both sets,
+  // but resume cursor paging from the fresh page so the missing middle can be
+  // filled without discarding already loaded durable history.
+  return {
+    conversationId,
+    items,
+    hasMore: loaded.hasMore,
+    nextBeforeId: loaded.nextBeforeId,
+  };
+}
 
 const VALID_TABS: readonly Tab[] = [
   "workspace",
@@ -266,13 +337,14 @@ export default function App() {
     messageProjection,
     setMessageProjection,
   ] =
-    useState<{
-      conversationId: number | null;
-      items: Message[];
-    }>({
+    useState<MessageProjection>({
       conversationId: null,
       items: [],
+      hasMore: false,
+      nextBeforeId: null,
     });
+
+  const [olderMessagesLoading, setOlderMessagesLoading] = useState(false);
 
   const [
     messageLoadFailure,
@@ -501,6 +573,8 @@ export default function App() {
         setMessageProjection({
           conversationId: null,
           items: [],
+          hasMore: false,
+          nextBeforeId: null,
         });
         setMessageLoadFailure(null);
         return;
@@ -529,8 +603,9 @@ export default function App() {
 
       try {
         const loaded =
-          await listMessages(
+          await listMessagePage(
             id,
+            { limit: 50 },
           );
 
         if (
@@ -540,10 +615,18 @@ export default function App() {
           return;
         }
 
-        setMessageProjection({
-          conversationId: id,
-          items: loaded,
-        });
+        setMessageProjection((projection) =>
+          mergeLatestMessagePage(
+            projection,
+            id,
+            {
+              conversationId: id,
+              items: loaded.items,
+              hasMore: loaded.hasMore,
+              nextBeforeId: loaded.nextBeforeId,
+            },
+          ),
+        );
         setMessageLoadFailure(null);
       } catch (error) {
         if (
@@ -740,6 +823,42 @@ export default function App() {
         await listPlugins(),
       );
     };
+
+  const loadOlderMessages = async () => {
+    const id = currentConversationIdRef.current;
+    if (
+      id == null ||
+      messageProjection.conversationId !== id ||
+      !messageProjection.hasMore ||
+      messageProjection.nextBeforeId == null ||
+      olderMessagesLoading
+    ) {
+      return;
+    }
+
+    const beforeId = messageProjection.nextBeforeId;
+    setOlderMessagesLoading(true);
+    try {
+      const page = await listMessagePage(id, { beforeId, limit: 50 });
+      if (currentConversationIdRef.current !== id) {
+        return;
+      }
+      setMessageProjection((projection) => {
+        if (projection.conversationId !== id) {
+          return projection;
+        }
+        const items = mergeMessageRows(projection.items, page.items);
+        return {
+          conversationId: id,
+          items,
+          hasMore: page.hasMore,
+          nextBeforeId: page.nextBeforeId,
+        };
+      });
+    } finally {
+      setOlderMessagesLoading(false);
+    }
+  };
 
   const loadTasks =
     async () => {
@@ -1238,6 +1357,17 @@ export default function App() {
                 }
                 messagesLoadError={
                   messagesLoadError
+                }
+                messageHasMore={
+                  current != null &&
+                  messageProjection.conversationId === current.id &&
+                  messageProjection.hasMore
+                }
+                olderMessagesLoading={
+                  olderMessagesLoading
+                }
+                loadOlderMessages={
+                  loadOlderMessages
                 }
                 tasks={
                   tasks

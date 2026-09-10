@@ -110,6 +110,18 @@ func New(
 		"/users/:userId/memories/:id",
 		deps.MemoryHandler.InternalDelete,
 	)
+	internal.GET(
+		"/users/:userId/conversations/:conversationId/memory-capsules",
+		deps.ConversationHandler.InternalMemoryCapsules,
+	)
+	internal.POST(
+		"/users/:userId/conversations/:conversationId/memory-capsules",
+		deps.ConversationHandler.InternalUpsertMemoryCapsule,
+	)
+	internal.GET(
+		"/users/:userId/conversations/:conversationId/memory-compaction-window",
+		deps.ConversationHandler.InternalCompactionWindow,
+	)
 
 	registerInternalDurableRuntimeRoutes(internal, deps)
 

@@ -441,6 +441,179 @@ func (s *ConversationService) Messages(
 	return messages, err
 }
 
+// ConversationMessagePage is the durable browser-history projection. It is
+// deliberately separate from Runtime context windows: every conversation row
+// stays queryable even when model context is bounded for latency/token safety.
+type ConversationMessagePage struct {
+	Items        []model.Message `json:"items"`
+	HasMore      bool            `json:"hasMore"`
+	NextBeforeID *int64          `json:"nextBeforeId"`
+}
+
+func (s *ConversationService) MessagePage(
+	ctx context.Context,
+	uid int64,
+	id int64,
+	beforeID int64,
+	limit int,
+) (*ConversationMessagePage, error) {
+	if beforeID < 0 {
+		return nil, ErrInvalidInput
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	items, hasMore, err := s.messages.ListMessagesBefore(ctx, uid, id, beforeID, limit)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var nextBeforeID *int64
+	if hasMore && len(items) > 0 {
+		value := items[0].ID
+		nextBeforeID = &value
+	}
+
+	return &ConversationMessagePage{
+		Items:        items,
+		HasMore:      hasMore,
+		NextBeforeID: nextBeforeID,
+	}, nil
+}
+
+func (s *ConversationService) conversationMemoryRepository() (repository.ConversationMemoryRepository, error) {
+	repo, ok := s.messages.(repository.ConversationMemoryRepository)
+	if !ok {
+		return nil, errors.New("conversation memory repository unavailable")
+	}
+	return repo, nil
+}
+
+func (s *ConversationService) MemoryCapsules(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	limit int,
+) ([]model.ConversationMemoryCapsule, error) {
+	if uid <= 0 || conversationID <= 0 {
+		return nil, ErrInvalidInput
+	}
+	if limit <= 0 {
+		limit = 80
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	repo, err := s.conversationMemoryRepository()
+	if err != nil {
+		return nil, err
+	}
+	items, err := repo.ListConversationMemoryCapsules(ctx, uid, conversationID, limit)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
+	return items, err
+}
+
+func (s *ConversationService) UpsertMemoryCapsule(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	input model.ConversationMemoryCapsuleWrite,
+) (*model.ConversationMemoryCapsule, error) {
+	input.Summary = strings.TrimSpace(input.Summary)
+	input.SourceHash = strings.ToLower(strings.TrimSpace(input.SourceHash))
+	if uid <= 0 || conversationID <= 0 || input.StartMessageID <= 0 ||
+		input.EndMessageID < input.StartMessageID || input.Summary == "" ||
+		len([]rune(input.Summary)) > 4000 || len(input.SourceHash) != 64 {
+		return nil, ErrInvalidInput
+	}
+	if input.Importance < 0 || input.Importance > 1 ||
+		input.InputTokens < 0 || input.OutputTokens < 0 ||
+		len([]rune(input.CompactionModel)) > 160 {
+		return nil, ErrInvalidInput
+	}
+	if input.EstimatedCost != nil && *input.EstimatedCost < 0 {
+		return nil, ErrInvalidInput
+	}
+	trimList := func(values []string, maxItems int, maxChars int) []string {
+		result := make([]string, 0, min(len(values), maxItems))
+		for _, value := range values {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			runes := []rune(value)
+			if len(runes) > maxChars {
+				value = string(runes[:maxChars])
+			}
+			result = append(result, value)
+			if len(result) >= maxItems {
+				break
+			}
+		}
+		return result
+	}
+	input.Facts = trimList(input.Facts, 12, 500)
+	input.Decisions = trimList(input.Decisions, 10, 500)
+	input.OpenTasks = trimList(input.OpenTasks, 10, 500)
+	input.Entities = trimList(input.Entities, 16, 160)
+	input.Keywords = trimList(input.Keywords, 20, 80)
+
+	repo, err := s.conversationMemoryRepository()
+	if err != nil {
+		return nil, err
+	}
+	item, err := repo.UpsertConversationMemoryCapsule(ctx, uid, conversationID, input)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
+	return item, err
+}
+
+func (s *ConversationService) CompactionWindow(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	afterID int64,
+	minMessages int,
+	maxMessages int,
+	reserveRecent int,
+) (*model.ConversationCompactionWindow, error) {
+	if uid <= 0 || conversationID <= 0 || afterID < 0 ||
+		minMessages < 4 || maxMessages < minMessages || maxMessages > 40 ||
+		reserveRecent < 4 || reserveRecent > 40 {
+		return nil, ErrInvalidInput
+	}
+	repo, err := s.conversationMemoryRepository()
+	if err != nil {
+		return nil, err
+	}
+	items, err := repo.ConversationCompactionWindow(
+		ctx,
+		uid,
+		conversationID,
+		afterID,
+		minMessages,
+		maxMessages,
+		reserveRecent,
+	)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &model.ConversationCompactionWindow{Items: items}, nil
+}
+
 // =========================================================
 // Agent
 // =========================================================
@@ -1403,6 +1576,49 @@ func conversationIDValue(id *int64) int64 {
 	return *id
 }
 
+// toolApprovalSupersededByNewerTurn returns true when the conversation has
+// already accepted a newer user turn than the task that is asking for approval.
+//
+// Tool approvals are capability to perform a concrete side effect, so they must
+// remain owned by the turn that requested them. A late AUTH_REQUIRED result from
+// an older run must never become actionable after the user has moved the same
+// conversation forward with a newer request.
+func (s *TaskService) toolApprovalSupersededByNewerTurn(
+	ctx context.Context,
+	uid int64,
+	task *model.Task,
+) (bool, error) {
+	if task == nil || task.ConversationID == nil || strings.TrimSpace(task.RequestID) == "" {
+		return false, nil
+	}
+
+	history, err := s.messages.ListMessages(
+		ctx,
+		uid,
+		*task.ConversationID,
+		64,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	for index := len(history) - 1; index >= 0; index-- {
+		message := history[index]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") || message.RequestID == nil {
+			continue
+		}
+
+		requestID := strings.TrimSpace(*message.RequestID)
+		if requestID == "" {
+			continue
+		}
+
+		return requestID != strings.TrimSpace(task.RequestID), nil
+	}
+
+	return false, nil
+}
+
 func taskFinalizationContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	// Once Runtime has produced an authoritative result, final task/history
 	// persistence must not depend on the browser keeping the HTTP stream open.
@@ -1702,6 +1918,14 @@ func ShouldUseInteractiveFastPath(task string, attachmentIDs []int64) bool {
 		"github", "gitlab", "jira", "slack", "notion", "gmail", "outlook", "飞书", "钉钉", "企业微信",
 		"pull request", "issue", "use tool", "call tool", "order status", "shipping", "refund", "send email",
 
+		// Current-platform capability questions must reach the full Runtime.
+		// The fast path intentionally has no authoritative Tool/MCP/Agent
+		// capability snapshot, so answering product-self questions there would
+		// encourage stale-model guesses about menus, workflows or plugins.
+		"这个系统", "你这个系统", "当前系统", "这个平台", "当前平台", "当前界面",
+		"插件", "插件化", "工作流", "能力中心", "生态中心", "直接操作", "直接给我操作",
+		"plugin", "workflow", "marketplace", "registry", "capability",
+
 		// Generic capability intent. Custom HTTP tools cannot be known to the
 		// Control Plane fast-path classifier ahead of time, so action/data verbs
 		// route into full Runtime where the request-scoped capability resolver can
@@ -1751,9 +1975,13 @@ func ShouldUseInteractiveFastPath(task string, attachmentIDs []int64) bool {
 }
 
 func boundedInteractiveHistory(messages []model.Message) []runtimeclient.InteractiveMessage {
-	result := make([]runtimeclient.InteractiveMessage, 0, 8)
+	// Context is bounded independently from durable conversation history. Use a
+	// token-like character budget plus a turn cap instead of a tiny fixed 8-row
+	// window so long chats retain substantially more short conversational turns
+	// without replaying unbounded transcripts into the model.
+	result := make([]runtimeclient.InteractiveMessage, 0, 20)
 	budget := 6000
-	for i := len(messages) - 1; i >= 0 && len(result) < 8 && budget > 0; i-- {
+	for i := len(messages) - 1; i >= 0 && len(result) < 20 && budget > 0; i-- {
 		message := messages[i]
 		role := strings.ToLower(strings.TrimSpace(message.Role))
 		if role != "user" && role != "assistant" {
@@ -1779,7 +2007,7 @@ func boundedInteractiveHistory(messages []model.Message) []runtimeclient.Interac
 		} else {
 			content = string(runes)
 		}
-		budget -= len(runes)
+		budget -= len([]rune(content))
 		result = append(result, runtimeclient.InteractiveMessage{Role: role, Content: content})
 	}
 	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
@@ -1840,7 +2068,7 @@ func (s *TaskService) RunInteractiveStream(
 
 	var history []runtimeclient.InteractiveMessage
 	if in.ConversationID != nil {
-		previous, err := s.messages.ListMessages(ctx, uid, *in.ConversationID, 12)
+		previous, err := s.messages.ListMessages(ctx, uid, *in.ConversationID, 48)
 		if errors.Is(err, repository.ErrNotOwned) {
 			return nil, ErrNotFound
 		}
@@ -2510,7 +2738,7 @@ func (s *TaskService) Run(
 	// =====================================================
 	var history []runtimeclient.InteractiveMessage
 	if in.ConversationID != nil {
-		previous, historyErr := s.messages.ListMessages(ctx, uid, *in.ConversationID, 12)
+		previous, historyErr := s.messages.ListMessages(ctx, uid, *in.ConversationID, 48)
 		if errors.Is(historyErr, repository.ErrNotOwned) {
 			return nil, ErrNotFound
 		}
@@ -3016,6 +3244,18 @@ func (s *TaskService) Resume(
 		decision := strings.ToLower(supplement)
 		if decision != "approve" && decision != "reject" {
 			return nil, ErrInvalidInput
+		}
+
+		superseded, supersededErr := s.toolApprovalSupersededByNewerTurn(
+			ctx,
+			uid,
+			task,
+		)
+		if supersededErr != nil {
+			return nil, supersededErr
+		}
+		if superseded {
+			return nil, ErrConflict
 		}
 	}
 

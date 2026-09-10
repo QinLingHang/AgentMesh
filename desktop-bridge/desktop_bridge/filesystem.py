@@ -16,7 +16,7 @@ from .policy import DesktopPermissionError, PathPolicy
 class FileSystemService:
     def __init__(self, settings: Settings):
         self.settings = settings
-        self.policy = PathPolicy(settings.grants)
+        self.policy = PathPolicy(settings.grants, settings.access_mode)
 
     def _audit(self, operation: str, *, paths: list[Path], ok: bool, detail: dict[str, Any] | None = None) -> None:
         record = {

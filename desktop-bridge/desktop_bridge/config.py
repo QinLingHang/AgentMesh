@@ -1,10 +1,39 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+
+BRIDGE_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_local_env() -> None:
+    """Load bridge-local developer defaults without overriding real environment vars."""
+    explicit = str(os.getenv("DESKTOP_ENV_FILE") or "").strip()
+    candidates = [Path(explicit)] if explicit else [BRIDGE_ROOT / ".env.local", BRIDGE_ROOT / ".env"]
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        for raw_line in candidate.read_text(encoding="utf-8-sig").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if not key:
+                continue
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            os.environ.setdefault(key, value)
+        return
+
+
+_load_local_env()
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +56,8 @@ class Settings:
     max_write_bytes: int
     max_search_files: int
     max_search_results: int
+    access_mode: str = "restricted"
+    default_working_directory: Path | None = None
     auto_discover_executables: bool = True
     allowed_apps_json: str = "[]"
     allowed_tools_json: str = "[]"
@@ -47,7 +78,7 @@ def _bool(value: Any, default: bool = False) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _load_grants() -> tuple[PathGrant, ...]:
+def _restricted_grants() -> tuple[PathGrant, ...]:
     raw = os.getenv("DESKTOP_ALLOWED_ROOTS_JSON", "[]").strip() or "[]"
     try:
         payload = json.loads(raw)
@@ -79,21 +110,99 @@ def _load_grants() -> tuple[PathGrant, ...]:
     return tuple(grants)
 
 
+def _windows_fixed_drive_roots() -> tuple[Path, ...]:
+    if os.name != "nt":
+        return ()
+    roots: list[Path] = []
+    try:
+        get_logical_drives = ctypes.windll.kernel32.GetLogicalDrives
+        get_logical_drives.restype = ctypes.c_uint
+        get_drive_type = ctypes.windll.kernel32.GetDriveTypeW
+        get_drive_type.argtypes = [ctypes.c_wchar_p]
+        get_drive_type.restype = ctypes.c_uint
+        bitmask = int(get_logical_drives())
+        for index in range(26):
+            if not bitmask & (1 << index):
+                continue
+            root = f"{chr(ord('A') + index)}:\\"
+            # DRIVE_FIXED == 3. Network/removable/CD-ROM drives are intentionally
+            # excluded from Local Computer Mode unless the user switches to a
+            # restricted explicit grant.
+            if int(get_drive_type(root)) == 3:
+                roots.append(Path(root).resolve(strict=False))
+    except Exception:
+        return ()
+    return tuple(roots)
+
+
+def _local_computer_grants() -> tuple[PathGrant, ...]:
+    roots = list(_windows_fixed_drive_roots())
+    if not roots:
+        home = Path.home().expanduser().resolve(strict=False)
+        anchor = Path(home.anchor).resolve(strict=False) if home.anchor else home
+        roots = [anchor]
+    return tuple(
+        PathGrant(
+            path=root,
+            read=True,
+            # Mutation capability is present, but the Runtime tool contracts still
+            # require explicit approval for write/copy/move/delete operations.
+            write=True,
+            delete=True,
+            allow_sensitive=False,
+        )
+        for root in roots
+    )
+
+
+def _load_access() -> tuple[str, tuple[PathGrant, ...]]:
+    explicit_mode = str(os.getenv("DESKTOP_ACCESS_MODE", "") or "").strip().lower()
+    legacy_roots = str(os.getenv("DESKTOP_ALLOWED_ROOTS_JSON", "") or "").strip()
+
+    # Backward compatibility: existing V4.1/enterprise launchers that provide an
+    # explicit root allowlist but predate DESKTOP_ACCESS_MODE stay restricted.
+    # With neither setting present, the product default is Local Computer Mode.
+    if explicit_mode:
+        mode = explicit_mode
+    elif legacy_roots and legacy_roots not in {"[]", "null"}:
+        mode = "restricted"
+    else:
+        mode = "local"
+
+    if mode not in {"local", "restricted"}:
+        raise RuntimeError("DESKTOP_ACCESS_MODE must be local or restricted")
+    if mode == "local":
+        grants = _local_computer_grants()
+        if not grants:
+            raise RuntimeError("Local Computer Mode could not discover an accessible local root")
+        return mode, grants
+
+    grants = _restricted_grants()
+    if not grants:
+        raise RuntimeError("Restricted Desktop mode requires DESKTOP_ALLOWED_ROOTS_JSON")
+    return mode, grants
+
+
 def load_settings() -> Settings:
     host = os.getenv("DESKTOP_BRIDGE_HOST", "127.0.0.1").strip() or "127.0.0.1"
     if host not in {"127.0.0.1", "localhost", "::1"}:
         raise RuntimeError("Desktop Bridge must bind to loopback only")
 
+    access_mode, grants = _load_access()
+    default_working_directory = Path.home().expanduser().resolve(strict=False)
+
     return Settings(
         host=host,
         port=int(os.getenv("DESKTOP_BRIDGE_PORT", "9583")),
         token=os.getenv("DESKTOP_BRIDGE_TOKEN", "").strip(),
-        grants=_load_grants(),
-        audit_file=Path(os.getenv("DESKTOP_AUDIT_FILE", "./data/desktop-audit.jsonl")),
+        grants=grants,
+        audit_file=Path(os.getenv("DESKTOP_AUDIT_FILE", str(BRIDGE_ROOT / "data" / "desktop-audit.jsonl"))),
         max_read_bytes=max(1, int(os.getenv("DESKTOP_MAX_READ_BYTES", str(1_048_576)))),
         max_write_bytes=max(1, int(os.getenv("DESKTOP_MAX_WRITE_BYTES", str(2_097_152)))),
         max_search_files=max(1, int(os.getenv("DESKTOP_MAX_SEARCH_FILES", "2000"))),
         max_search_results=max(1, int(os.getenv("DESKTOP_MAX_SEARCH_RESULTS", "100"))),
+        access_mode=access_mode,
+        default_working_directory=default_working_directory,
         auto_discover_executables=_bool(os.getenv("DESKTOP_AUTO_DISCOVER_EXECUTABLES"), True),
         allowed_apps_json=os.getenv("DESKTOP_ALLOWED_APPS_JSON", "[]").strip() or "[]",
         allowed_tools_json=os.getenv("DESKTOP_ALLOWED_TOOLS_JSON", "[]").strip() or "[]",

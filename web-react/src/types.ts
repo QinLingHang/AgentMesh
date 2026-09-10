@@ -208,6 +208,12 @@ export type Message = {
   createdAt: string;
 };
 
+export type MessagePage = {
+  items: Message[];
+  hasMore: boolean;
+  nextBeforeId: number | null;
+};
+
 // =========================================================
 // Agent Capability Profile
 // =========================================================

@@ -10,6 +10,9 @@ import {
   Icon,
 } from "../../components/common/Icon";
 import {
+  lightDialogControlStyle,
+} from "../../components/common/lightDialogControlStyle";
+import {
   formatDate,
 } from "../../utils/format";
 
@@ -982,6 +985,7 @@ export function SessionRail({
 
                 <input
                   autoFocus
+                  style={lightDialogControlStyle}
                   value={
                     editor.title
                   }
@@ -1004,6 +1008,7 @@ export function SessionRail({
 
                   <input
                     autoFocus
+                    style={lightDialogControlStyle}
                     value={
                       editor.name
                     }
@@ -1026,6 +1031,7 @@ export function SessionRail({
                   </span>
 
                   <textarea
+                    style={lightDialogControlStyle}
                     value={
                       editor.description
                     }

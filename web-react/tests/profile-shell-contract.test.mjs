@@ -31,5 +31,5 @@ test("workspace keeps Enter submit, Shift+Enter newline, IME safety and newest-m
   assert.match(workspace, /e\.nativeEvent\.isComposing/);
   assert.doesNotMatch(workspace, /Ctrl \/ ⌘ \+ Enter/);
   assert.match(workspace, /messageScrollRef/);
-  assert.match(workspace, /scrollNode\.scrollTop\s*=\s*scrollNode\.scrollHeight/);
+  assert.match(workspace, /scrollNode\.scrollHeight\s*-\s*scrollNode\.clientHeight/);
 });

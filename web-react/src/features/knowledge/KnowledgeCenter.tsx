@@ -26,6 +26,9 @@ import {
   Icon,
 } from "../../components/common/Icon";
 import {
+  lightDialogControlStyle,
+} from "../../components/common/lightDialogControlStyle";
+import {
   formatDate,
 } from "../../utils/format";
 
@@ -2058,6 +2061,7 @@ export function KnowledgeCenter({
 
               <input
                 autoFocus
+                style={lightDialogControlStyle}
                 value={baseEditor.name}
                 maxLength={80}
                 disabled={baseBusy}
@@ -2078,6 +2082,7 @@ export function KnowledgeCenter({
               </span>
 
               <textarea
+                style={lightDialogControlStyle}
                 value={
                   baseEditor.description
                 }
@@ -2147,6 +2152,7 @@ export function KnowledgeCenter({
 
               <input
                 autoFocus
+                style={lightDialogControlStyle}
                 value={projectName}
                 maxLength={80}
                 disabled={projectBusy}
@@ -2165,6 +2171,7 @@ export function KnowledgeCenter({
               </span>
 
               <textarea
+                style={lightDialogControlStyle}
                 value={projectDescription}
                 maxLength={240}
                 rows={3}

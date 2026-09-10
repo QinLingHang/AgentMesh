@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -131,7 +132,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	_ = godotenv.Load()
+	loadLocalEnvironment()
 
 	accessMin, err := positiveInt(
 		"JWT_ACCESS_TTL_MINUTES",
@@ -584,6 +585,36 @@ func Load() (Config, error) {
 
 	return cfg,
 		nil
+}
+
+func loadLocalEnvironment() {
+	if explicit := strings.TrimSpace(os.Getenv("AGENTMESH_ENV_FILE")); explicit != "" {
+		_ = godotenv.Load(explicit)
+		return
+	}
+
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	for directory := workingDirectory; ; directory = filepath.Dir(directory) {
+		for _, name := range []string{".env.local", ".env"} {
+			candidate := filepath.Join(directory, name)
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				// godotenv.Load intentionally does not overwrite variables that are
+				// already present in the real process environment. Local files are
+				// therefore developer defaults, never production overrides.
+				_ = godotenv.Load(candidate)
+				return
+			}
+		}
+
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return
+		}
+	}
 }
 
 func env(

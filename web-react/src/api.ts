@@ -14,6 +14,7 @@ import type {
   MemoryCategory,
   MemorySourceType,
   Message,
+  MessagePage,
   Planner,
   PluginInfo,
   Project,
@@ -585,6 +586,23 @@ export const listMessages = (
   request<Message[]>(
     `/api/conversations/${id}/messages`,
   );
+
+export const listMessagePage = (
+  id: number,
+  options: {
+    beforeId?: number | null;
+    limit?: number;
+  } = {},
+) => {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit ?? 50));
+  if (options.beforeId != null) {
+    params.set("beforeId", String(options.beforeId));
+  }
+  return request<MessagePage>(
+    `/api/conversations/${id}/messages/page?${params.toString()}`,
+  );
+};
 
 
 // =========================================================

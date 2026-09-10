@@ -130,6 +130,21 @@ func TestP5ApprovalLifecycleIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if _, err := repo.CreateMessage(
+			ctx,
+			uid,
+			conversationID,
+			"user",
+			"fixture action",
+			"COMPLETED",
+			requestID,
+			map[string]any{
+				"taskId":       created.ID,
+				"runtimePhase": "run",
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
 		toolName := "cancel_order"
 		if protocol == "mcp" {
 			toolName = "mcp_pending_cancel_order"
@@ -222,6 +237,55 @@ func TestP5ApprovalLifecycleIntegration(t *testing.T) {
 		req = lastRequest()
 		if req.Task != "approve" || req.Continuation == nil || req.Continuation.Arguments["order_id"] != "ORDER-A" {
 			t.Fatalf("approve resume did not use exact persisted action: %+v", req)
+		}
+	})
+
+	t.Run("NewerConversationTurnInvalidatesOlderToolApproval", func(t *testing.T) {
+		stale := newApprovalTask(t, "stale-approval", "http", map[string]any{"order_id": "ORDER-STALE"})
+
+		newer, err := repo.CreateTask(ctx, model.Task{
+			UserID:         uid,
+			ConversationID: &conversationID,
+			RequestID:      "newer-turn",
+			TaskText:       "newer user turn",
+			Scheduler:      "greedy",
+			Planner:        "heuristic",
+			ExecutionMode:  "auto",
+			SynthesisMode:  "auto",
+		}, constraints)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := repo.CreateMessage(
+			ctx,
+			uid,
+			conversationID,
+			"user",
+			"newer user turn",
+			"COMPLETED",
+			"newer-turn",
+			map[string]any{
+				"taskId":       newer.ID,
+				"runtimePhase": "run",
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		mu.Lock()
+		requestCountBefore := len(requests)
+		mu.Unlock()
+
+		_, err = tasks.Resume(ctx, uid, stale.ID, "approve")
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("stale approval resume error=%v, want ErrConflict", err)
+		}
+
+		mu.Lock()
+		requestCountAfter := len(requests)
+		mu.Unlock()
+		if requestCountAfter != requestCountBefore {
+			t.Fatal("superseded approval reached Runtime")
 		}
 	})
 
