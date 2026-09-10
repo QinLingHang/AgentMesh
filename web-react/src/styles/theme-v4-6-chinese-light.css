@@ -30,3 +30,512 @@ pre,.markdown-answer pre,.markdown-body pre,.run-details-page pre,.trace-code,.c
 .agent-calm-card,.calm-search-field,.organization-chip,.governance-role-chip{background:#fff!important;color:#56615c!important;border-color:#dde3de!important}
 .agent-calm-card:hover{background:#fbfcfb!important}
 .calm-feedback.warning{background:#fff8e8!important;color:#8b6b2f!important;border-color:#ead9aa!important}
+/* =========================================================
+   Agent Drawer - Chinese Light Theme
+   Remove legacy dark styling
+   ========================================================= */
+
+.agent-drawer .drawer-head {
+  background: rgba(255, 255, 255, 0.98) !important;
+  border-bottom: 1px solid #e3ebe7 !important;
+  box-shadow: none !important;
+}
+
+.agent-drawer .drawer-agent {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+
+  padding: 0 !important;
+  margin: 0 !important;
+
+  color: #26352f !important;
+  background: transparent !important;
+  background-image: none !important;
+
+  border: 0 !important;
+  border-radius: 0 !important;
+
+  box-shadow: none !important;
+}
+
+.agent-drawer .drawer-avatar {
+  width: 40px;
+  height: 40px;
+
+  display: grid;
+  place-items: center;
+
+  color: #4f7568 !important;
+  background: #e8f1ed !important;
+  background-image: none !important;
+
+  border: 1px solid #d8e5df !important;
+  border-radius: 10px;
+
+  box-shadow: none !important;
+
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.agent-drawer .drawer-agent h2 {
+  margin: 0;
+
+  color: #26352f !important;
+
+  background: transparent !important;
+  background-image: none !important;
+
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.agent-drawer .drawer-agent p {
+  margin: 4px 0 0;
+
+  color: #82918a !important;
+
+  background: transparent !important;
+
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.agent-drawer .drawer-agent *,
+.agent-drawer .drawer-agent::before,
+.agent-drawer .drawer-agent::after {
+  text-shadow: none !important;
+}
+
+.agent-drawer .drawer-agent::before,
+.agent-drawer .drawer-agent::after {
+  background: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+}
+
+/* =========================================================
+   AgentMesh Desktop Agent Complete + Profile
+   ========================================================= */
+
+.app-shell-v3 .user-card {
+  grid-template-columns: minmax(0, 1fr) 34px;
+  gap: 8px;
+}
+
+.app-shell-v3 .user-profile-entry {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.app-shell-v3 .user-profile-copy {
+  min-width: 0;
+  display: block;
+}
+
+.app-shell-v3 .user-profile-entry:hover strong {
+  color: #315f50 !important;
+}
+
+.profile-page {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.profile-identity-card {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 24px;
+  border: 1px solid #dde6e1;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: 0 10px 28px rgba(35, 54, 47, 0.04);
+}
+
+.profile-avatar-large {
+  flex: 0 0 64px;
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  color: #446e60;
+  background: #e8f2ed;
+  border: 1px solid #d5e5de;
+  font-size: 18px;
+  font-weight: 750;
+}
+
+.profile-identity-copy h2 {
+  margin: 0;
+  color: #263630;
+  font-size: 22px;
+}
+
+.profile-identity-copy p {
+  margin: 5px 0 10px;
+  color: #7d8a84;
+  font-size: 13px;
+}
+
+.profile-account-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #66766f;
+  font-size: 12px;
+}
+
+.profile-account-state i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #aebcb6;
+}
+
+.profile-account-state.ok i {
+  background: #63ad91;
+}
+
+.profile-section {
+  margin-top: 18px;
+  padding: 22px 24px;
+  border: 1px solid #e0e7e3;
+  border-radius: 18px;
+  background: #ffffff;
+}
+
+.profile-section-head h2 {
+  margin: 4px 0 0;
+  color: #2d3b36;
+  font-size: 18px;
+}
+
+.profile-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.profile-metric-card {
+  padding: 18px;
+  border: 1px solid #e3e9e5;
+  border-radius: 14px;
+  background: #fafcfa;
+}
+
+.profile-metric-card strong,
+.profile-metric-card span {
+  display: block;
+}
+
+.profile-metric-card strong {
+  color: #315f50;
+  font-size: 24px;
+}
+
+.profile-metric-card span {
+  margin-top: 5px;
+  color: #7b8983;
+  font-size: 12px;
+}
+
+.profile-shortcut-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.profile-shortcut-grid button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid #e0e8e4;
+  border-radius: 14px;
+  background: #fafcfb;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-shortcut-grid button:hover {
+  border-color: #cbdcd4;
+  background: #f4f8f6;
+}
+
+.profile-shortcut-grid button > span {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #5a8575;
+  background: #eaf3ef;
+}
+
+.profile-shortcut-grid strong,
+.profile-shortcut-grid small {
+  display: block;
+}
+
+.profile-shortcut-grid strong {
+  color: #33423d;
+  font-size: 13px;
+}
+
+.profile-shortcut-grid small {
+  margin-top: 4px;
+  color: #819089;
+  line-height: 1.5;
+  font-size: 11px;
+}
+
+.desktop-agent-summary {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+  padding: 16px;
+  border: 1px solid #dce6e1;
+  border-radius: 16px;
+  background: #fbfdfc;
+}
+
+.desktop-agent-summary-icon {
+  width: 42px;
+  height: 42px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #547f70;
+  background: #e9f2ee;
+}
+
+.desktop-agent-summary-copy {
+  min-width: 0;
+}
+
+.desktop-agent-summary-copy strong,
+.desktop-agent-summary-copy small {
+  display: block;
+}
+
+.desktop-agent-summary-copy strong {
+  color: #2d3e38;
+  font-size: 14px;
+}
+
+.desktop-agent-summary-copy small {
+  margin-top: 4px;
+  color: #7d8b85;
+  line-height: 1.55;
+  font-size: 11.5px;
+}
+
+.desktop-agent-security-note {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 13px 14px;
+  border: 1px solid #dfe9e4;
+  border-radius: 13px;
+  color: #58766b;
+  background: #f3f8f5;
+}
+
+.desktop-agent-security-note div {
+  display: grid;
+  gap: 3px;
+}
+
+.desktop-agent-security-note strong {
+  color: #3b5d51;
+  font-size: 12px;
+}
+
+.desktop-agent-security-note span {
+  color: #718078;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.desktop-capability-groups {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.desktop-capability-group {
+  border: 1px solid #e0e8e4;
+  border-radius: 14px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.desktop-capability-group > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 15px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.desktop-capability-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.desktop-capability-group > summary span {
+  min-width: 0;
+}
+
+.desktop-capability-group > summary strong,
+.desktop-capability-group > summary small {
+  display: block;
+}
+
+.desktop-capability-group > summary strong {
+  color: #33433d;
+  font-size: 13px;
+}
+
+.desktop-capability-group > summary small {
+  margin-top: 3px;
+  color: #84918b;
+  font-size: 11px;
+}
+
+.desktop-capability-group > summary em {
+  flex: 0 0 auto;
+  color: #6c7c75;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.desktop-capability-tool-list {
+  border-top: 1px solid #edf1ef;
+}
+
+.desktop-capability-tool {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 15px;
+  border-bottom: 1px solid #f0f3f1;
+}
+
+.desktop-capability-tool:last-child {
+  border-bottom: 0;
+}
+
+.desktop-capability-tool > div {
+  min-width: 0;
+}
+
+.desktop-capability-tool strong,
+.desktop-capability-tool small {
+  display: block;
+}
+
+.desktop-capability-tool strong {
+  color: #35443f;
+  font-size: 12px;
+}
+
+.desktop-capability-tool small {
+  margin-top: 3px;
+  color: #85928c;
+  font-size: 10.5px;
+  line-height: 1.45;
+}
+
+.desktop-trace-list {
+  display: grid;
+  gap: 8px;
+}
+
+.desktop-trace-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid #e1e8e4;
+  border-radius: 12px;
+  background: #fbfcfb;
+}
+
+.desktop-trace-row-main {
+  min-width: 0;
+}
+
+.desktop-trace-kind {
+  display: inline-block;
+  margin-bottom: 4px;
+  color: #628276;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.desktop-trace-row strong,
+.desktop-trace-row small {
+  display: block;
+}
+
+.desktop-trace-row strong {
+  color: #33423d;
+  font-size: 12px;
+}
+
+.desktop-trace-row small {
+  margin-top: 3px;
+  color: #85928c;
+  font-size: 10.5px;
+}
+
+@media (max-width: 900px) {
+  .profile-metric-grid,
+  .profile-shortcut-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .desktop-agent-summary {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .desktop-agent-summary > .calm-status,
+  .desktop-agent-summary > .calm-button {
+    grid-column: 2;
+    justify-self: start;
+  }
+}
+
+@media (max-width: 640px) {
+  .profile-metric-grid,
+  .profile-shortcut-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .desktop-capability-tool {
+    grid-template-columns: 1fr auto;
+  }
+
+  .desktop-capability-tool .tool-risk-chip {
+    display: none;
+  }
+}

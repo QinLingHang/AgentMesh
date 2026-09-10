@@ -745,6 +745,19 @@ func TestP9SharedProjectExecutionUsesOwnerResourcesAndRecordsRuntimeUsage(t *tes
 	if _, err := governance.UpdateQuota(ctx, owner, project, model.ProjectQuota{RequestsPerMinute: 100, ConcurrentTasks: 10, MonthlyTokenLimit: 10000, MonthlyCostLimit: 100, DailyToolActionLimit: 100}); err != nil {
 		t.Fatal(err)
 	}
+	// Shared-project execution requires request-local BYOK just like production.
+	// Configure the Project owner's provider explicitly so this P9 regression
+	// continues to verify owner-scoped runtime resources without relying on any
+	// platform-global model credential.
+	providerSecret, err := governance.CreateSecret(ctx, owner, project, "P9_SHARED_MODEL_API_KEY", "MODEL_API_KEY", "sk-p9-shared-project-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := governance.UpsertProvider(ctx, owner, project, model.ProjectModelProvider{
+		Provider: "openai-compatible", BaseURL: "https://api.example.test/v1", ModelName: "p9-shared-owner-model", SecretID: &providerSecret.ID, Enabled: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	requestSeen := make(chan runtimeclient.ExecuteRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -780,6 +793,9 @@ func TestP9SharedProjectExecutionUsesOwnerResourcesAndRecordsRuntimeUsage(t *tes
 		}
 		if len(req.Agents) != 1 || req.Agents[0].ID != ownerAgent || req.Agents[0].UserID != owner {
 			t.Fatalf("shared execution did not use owner project Agent pool: %+v", req.Agents)
+		}
+		if req.ProjectModel == nil || req.ProjectModel.ModelName != "p9-shared-owner-model" || req.ProjectModel.APIKey != "sk-p9-shared-project-fixture" {
+			t.Fatalf("shared execution did not use owner project model provider: %+v", req.ProjectModel)
 		}
 	default:
 		t.Fatal("runtime request not observed")

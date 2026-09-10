@@ -2,6 +2,7 @@ import type { RunResult } from "../../types";
 import {
   formatCompactNumber,
   formatDurationMs,
+  formatMoney,
 } from "../../utils/format";
 
 function MetricCard({
@@ -91,6 +92,24 @@ export function OverviewMetricGrid({
           )} in · ${formatCompactNumber(
             o.modelOutputTokens,
           )} out`}
+        />
+
+        <MetricCard
+          label="Retrieval Mode"
+          value={(o.retrievalMode || "—").toUpperCase()}
+          hint={`${o.ragTextCandidates ?? 0} text · ${o.ragVisualCandidates ?? 0} visual`}
+        />
+
+        <MetricCard
+          label="RAG Latency"
+          value={formatDurationMs(o.ragLatencyMs ?? 0)}
+          hint={`${o.ragHits ?? 0} selected · ${o.ragContextHits ?? 0} context`}
+        />
+
+        <MetricCard
+          label="Model Cost"
+          value={o.modelCostKnown ? formatMoney(o.modelEstimatedCost) : "未配置"}
+          hint={`${o.modelProvider || "provider"} · ${o.modelName || "model"}`}
         />
 
         <MetricCard

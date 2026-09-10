@@ -96,9 +96,9 @@ class ScorecardInputs:
 def build_run_scorecard(inputs: ScorecardInputs) -> RunScorecard:
     """Build a deterministic, privacy-safe per-run scorecard.
 
-    P6 deliberately keeps the default evaluator deterministic so it can run in
-    production without introducing a second paid model call. A future LLM Judge
-    can implement the same contract and be compared against this baseline.
+    The per-run evaluator stays deterministic so production execution does not
+    automatically introduce a second paid model call. V2's explicit ModelJudge
+    uses a separate evaluation workflow and can be compared against this baseline.
     """
 
     trace = inputs.trace
@@ -147,6 +147,19 @@ def build_run_scorecard(inputs: ScorecardInputs) -> RunScorecard:
             else 0.0
         )
         rag_mode = "retrieved"
+
+    if not rag_requested:
+        citation_quality = 1.0
+    elif not inputs.citations:
+        citation_quality = 0.0
+    else:
+        citation_quality = _clamp(
+            sum(max(0.0, min(1.0, float(item.score))) for item in inputs.citations)
+            / len(inputs.citations)
+        )
+
+    correctness = answer_quality
+    task_completion = task_success
 
     tool_started = _count_trace(trace, kind="tool", title="Tool Started")
     tool_completed = _count_trace(trace, kind="tool", title="Tool Completed")
@@ -210,13 +223,15 @@ def build_run_scorecard(inputs: ScorecardInputs) -> RunScorecard:
         violations.append("quality_below_minimum")
 
     overall = _clamp(
-        0.25 * task_success
-        + 0.25 * answer_quality
+        0.20 * task_success
+        + 0.20 * answer_quality
+        + 0.10 * correctness
         + 0.15 * groundedness
-        + 0.10 * tool_reliability
-        + 0.10 * _clamp(rag_quality)
-        + 0.05 * _clamp(memory_contribution)
-        + 0.10 * _clamp(budget_compliance)
+        + 0.08 * citation_quality
+        + 0.08 * tool_reliability
+        + 0.07 * _clamp(rag_quality)
+        + 0.04 * _clamp(memory_contribution)
+        + 0.08 * _clamp(budget_compliance)
     )
 
     failure_category = _failure_category(trace)
@@ -234,6 +249,10 @@ def build_run_scorecard(inputs: ScorecardInputs) -> RunScorecard:
         taskSuccess=_clamp(task_success),
         answerQuality=answer_quality,
         groundedness=_clamp(groundedness),
+        correctness=_clamp(correctness),
+        citationQuality=_clamp(citation_quality),
+        taskCompletion=_clamp(task_completion),
+        judgeReason="deterministic runtime scorecard",
         toolReliability=tool_reliability,
         ragQuality=_clamp(rag_quality),
         memoryContribution=_clamp(memory_contribution),

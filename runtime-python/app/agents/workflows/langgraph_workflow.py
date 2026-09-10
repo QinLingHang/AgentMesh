@@ -201,16 +201,24 @@ class LangGraphAgentWorkflow:
                     or self._model
                 )
                 result = await ToolLoopRunner(
-                        model.gateway,
-                        model.model,
-                        request.tool_registry,
-                        settings.max_tool_iterations,
-                        max_retries=(
-                            settings.tool_max_retries
-                        ),
-                        retry_backoff_seconds=(
-                            settings.tool_retry_backoff_seconds
-                        ),
+                    model.gateway,
+                    model.model,
+                    request.tool_registry,
+                    settings.max_tool_iterations,
+                    max_retries=(
+                        settings.tool_max_retries
+                    ),
+                    retry_backoff_seconds=(
+                        settings.tool_retry_backoff_seconds
+                    ),
+                    vision_model=getattr(
+                        model,
+                        "vision_model",
+                        None,
+                    ),
+                    desktop_max_iterations=(
+                        settings.desktop_max_tool_iterations
+                    ),
                 ).run(
                     state["prompt"],
                     request.on_model_event,

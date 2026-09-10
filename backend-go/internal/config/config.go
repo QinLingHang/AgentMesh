@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -59,8 +60,11 @@ type Knowledge struct {
 type DurableRuntime struct {
 	Enabled                 bool
 	ControlPlaneBaseURL     string
+	DispatcherID            string
+	DispatcherLeaseDuration time.Duration
 	PollInterval            time.Duration
 	LeaseDuration           time.Duration
+	ExecutionLeaseDuration  time.Duration
 	WorkerStaleAfter        time.Duration
 	AcceptanceTimeout       time.Duration
 	RetryBackoff            time.Duration
@@ -128,7 +132,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
-	_ = godotenv.Load()
+	loadLocalEnvironment()
 
 	accessMin, err := positiveInt(
 		"JWT_ACCESS_TTL_MINUTES",
@@ -193,6 +197,14 @@ func Load() (Config, error) {
 	durableEnabled, err := strconv.ParseBool(env("DURABLE_RUNTIME_ENABLED", "true"))
 	if err != nil {
 		return Config{}, errors.New("DURABLE_RUNTIME_ENABLED must be true or false")
+	}
+	durableDispatcherLeaseSeconds, err := positiveInt("DURABLE_RUNTIME_DISPATCHER_LEASE_SECONDS", 5)
+	if err != nil {
+		return Config{}, err
+	}
+	durableExecutionLeaseSeconds, err := positiveInt("DURABLE_RUNTIME_EXECUTION_LEASE_SECONDS", 20)
+	if err != nil {
+		return Config{}, err
 	}
 	durablePollMS, err := positiveInt("DURABLE_RUNTIME_POLL_MS", 300)
 	if err != nil {
@@ -445,8 +457,11 @@ func Load() (Config, error) {
 		DurableRuntime: DurableRuntime{
 			Enabled:                 durableEnabled,
 			ControlPlaneBaseURL:     env("CONTROL_PLANE_INTERNAL_BASE_URL", "http://127.0.0.1:8086"),
+			DispatcherID:            env("DURABLE_RUNTIME_DISPATCHER_ID", "dispatcher-local-1"),
+			DispatcherLeaseDuration: time.Duration(durableDispatcherLeaseSeconds) * time.Second,
 			PollInterval:            time.Duration(durablePollMS) * time.Millisecond,
 			LeaseDuration:           time.Duration(durableLeaseSeconds) * time.Second,
+			ExecutionLeaseDuration:  time.Duration(durableExecutionLeaseSeconds) * time.Second,
 			WorkerStaleAfter:        time.Duration(durableWorkerStaleSeconds) * time.Second,
 			AcceptanceTimeout:       time.Duration(durableAcceptanceSeconds) * time.Second,
 			RetryBackoff:            time.Duration(durableRetryMS) * time.Millisecond,
@@ -570,6 +585,36 @@ func Load() (Config, error) {
 
 	return cfg,
 		nil
+}
+
+func loadLocalEnvironment() {
+	if explicit := strings.TrimSpace(os.Getenv("AGENTMESH_ENV_FILE")); explicit != "" {
+		_ = godotenv.Load(explicit)
+		return
+	}
+
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return
+	}
+
+	for directory := workingDirectory; ; directory = filepath.Dir(directory) {
+		for _, name := range []string{".env.local", ".env"} {
+			candidate := filepath.Join(directory, name)
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				// godotenv.Load intentionally does not overwrite variables that are
+				// already present in the real process environment. Local files are
+				// therefore developer defaults, never production overrides.
+				_ = godotenv.Load(candidate)
+				return
+			}
+		}
+
+		parent := filepath.Dir(directory)
+		if parent == directory {
+			return
+		}
+	}
 }
 
 func env(

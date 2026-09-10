@@ -106,7 +106,28 @@ class AdaptiveModelRouter:
         profile: TaskProfile,
         constraints: TaskConstraints,
     ) -> ModelRouteDecision:
-        runtimes = self._runtimes()
+        return self.route_candidates(
+            runtimes=self._runtimes(),
+            preferred_runtime=preferred_runtime,
+            profile=profile,
+            constraints=constraints,
+        )
+
+    def route_candidates(
+        self,
+        *,
+        runtimes: list[tuple[str, Any]],
+        preferred_runtime: str,
+        profile: TaskProfile,
+        constraints: TaskConstraints,
+    ) -> ModelRouteDecision:
+        """Route across an explicit runtime set.
+
+        P7 originally routed only process-global model plugins registered in the
+        RuntimeContext. The user BYOK model pool is request-local by design, so
+        this method reuses the exact same scoring/performance store without
+        mutating global runtime state or leaking credentials between users.
+        """
         if not runtimes:
             raise RuntimeError("no model runtime is registered")
 
@@ -125,18 +146,30 @@ class AdaptiveModelRouter:
                 selected_score=candidate.score,
                 degraded=not candidate.feasible,
                 mode="pinned",
-                reason="agent explicitly pinned a model runtime",
+                reason="request explicitly pinned a model runtime",
                 weights=objective_weights(profile),
                 candidates=[candidate],
             )
 
         scored = [
-            self._score_candidate(runtime_id, plugin, self.performance.get_or_seed(runtime_id, plugin), profile, constraints)
+            self._score_candidate(
+                runtime_id,
+                plugin,
+                self.performance.get_or_seed(runtime_id, plugin),
+                profile,
+                constraints,
+            )
             for runtime_id, plugin in runtimes
         ]
         feasible = [item for item in scored if item.feasible]
         pool = feasible or scored
-        selected = max(pool, key=lambda item: (item.score, item.runtime_id == "default", item.runtime_id))
+
+        def selection_key(item: ModelCandidateScore) -> tuple[float, bool, str]:
+            plugin = by_id[item.runtime_id]
+            preferred_default = bool(getattr(plugin, "routing_is_default", False)) or item.runtime_id == "default"
+            return item.score, preferred_default, item.runtime_id
+
+        selected = max(pool, key=selection_key)
         plugin = by_id[selected.runtime_id]
         return ModelRouteDecision(
             selected_runtime_id=selected.runtime_id,

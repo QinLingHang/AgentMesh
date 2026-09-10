@@ -1651,25 +1651,46 @@
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  padding: 0 11px;
-  background: #101922;
-  border: 1px solid var(--calm-line);
+
+  min-height: 48px;
+  padding: 0 13px;
+
+  color: #33463f;
+  background: #f7faf8;
+  border: 1px solid #dfe9e4;
   border-radius: 9px;
+
+  box-shadow: none;
+}
+
+.tool-confirm-calm > span {
+  color: #53665f;
+  font-size: 10px;
+  font-weight: 500;
 }
 
 .tool-confirm-calm input {
   width: 16px;
   height: 16px;
+  margin: 0;
+
+  accent-color: #5f8b7d;
+  cursor: pointer;
 }
 
 .tool-calm-row {
   min-height: 62px;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto auto auto auto;
+
   padding: 10px 11px;
-  background: #0f1821;
-  border: 1px solid var(--calm-line);
+
+  color: #33463f;
+  background: #ffffff;
+  border: 1px solid #dfe9e4;
   border-radius: 11px;
+
+  box-shadow: none;
 }
 
 .tool-calm-copy strong,

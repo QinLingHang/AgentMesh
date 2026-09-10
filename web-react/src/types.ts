@@ -131,6 +131,11 @@ export type KnowledgeFile = {
   storageKey: string;
   status: KnowledgeFileStatus | string;
   chunkCount: number;
+  textChunkCount: number;
+  visualEvidenceCount: number;
+  pageCount: number;
+  visualStatus: string;
+  visualErrorMessage?: string | null;
   errorMessage: string | null;
   indexedAt: string | null;
   createdAt: string;
@@ -160,6 +165,10 @@ export type RuntimeCitation = {
   chunkIndex: number | null;
   start: number | null;
   end: number | null;
+  pageNumber: number | null;
+  assetId: string | null;
+  modality: string | null;
+  visualType: string | null;
 };
 
 export type MessageAttachmentMetadata = {
@@ -197,6 +206,12 @@ export type Message = {
   requestId: string | null;
   metadata?: MessageMetadata;
   createdAt: string;
+};
+
+export type MessagePage = {
+  items: Message[];
+  hasMore: boolean;
+  nextBeforeId: number | null;
 };
 
 // =========================================================
@@ -336,6 +351,7 @@ export type TaskConstraints = {
   maxLatencyMs: number;
   maxCost: number;
   minQuality: number;
+  retryOnWorkerLoss?: boolean;
 };
 
 // =========================================================
@@ -350,6 +366,11 @@ export type TaskApproval = {
   requiresConfirmation: boolean;
   summary: string;
   argumentsPreview?: Record<string, unknown>;
+};
+
+export type ModelSelection = {
+  mode: "auto" | "manual";
+  serviceId?: number | null;
 };
 
 export type Task = {
@@ -369,6 +390,8 @@ export type Task = {
   executionMode?: string;
 
   synthesisMode?: string;
+
+  modelSelection?: ModelSelection;
 
   deliveryMode?: DeliveryMode | string;
 
@@ -417,6 +440,8 @@ export type AgentFeedback = {
 
 export type ObservabilitySummary = {
   modelCalls: number;
+  modelProvider: string;
+  modelName: string;
 
   modelInputTokens: number;
   modelOutputTokens: number;
@@ -445,6 +470,14 @@ export type ObservabilitySummary = {
   modelCostKnown: boolean;
   toolSuccesses: number;
   toolFailures: number;
+
+  retrievalMode: string;
+  ragLatencyMs: number;
+  ragRawHits: number;
+  ragHits: number;
+  ragContextHits: number;
+  ragTextCandidates: number;
+  ragVisualCandidates: number;
 };
 
 export type RunScorecard = {
@@ -454,6 +487,9 @@ export type RunScorecard = {
   taskSuccess: number;
   answerQuality: number;
   groundedness: number;
+  correctness: number;
+  citationQuality: number;
+  taskCompletion: number;
   toolReliability: number;
   ragQuality: number;
   memoryContribution: number;
@@ -463,6 +499,7 @@ export type RunScorecard = {
   modelEstimatedCost: number;
   modelTokens: number;
   failureCategory: string;
+  judgeReason: string;
   violations: string[];
   signals: Record<string, unknown>;
 };
@@ -526,7 +563,51 @@ export type RuntimeReliabilitySnapshot = {
   availableWorkers: number;
   drainingWorkers: number;
   circuitOpenWorkers: number;
+  nodes?: number;
+  availableNodes?: number;
+  staleNodes?: number;
+  totalCapacity?: number;
+  activeExecutions?: number;
+  utilizationPercent?: number;
+  dispatcherLeader?: boolean;
+  dispatcherEpoch?: number;
+  dispatcherLeaseRemainingMs?: number;
   oldestQueuedMs: number;
+};
+
+export type RuntimeNodeSummary = {
+  nodeId: string;
+  zone?: string;
+  version?: string;
+  capacity: number;
+  activeExecutions: number;
+  workerCount: number;
+  draining: boolean;
+  status: string;
+  lastHeartbeatAt: string;
+};
+
+export type RuntimeWorkerSummary = {
+  workerId: string;
+  nodeId: string;
+  zone?: string;
+  version?: string;
+  capacity: number;
+  activeExecutions: number;
+  authoritativeActive: number;
+  nodeCapacity: number;
+  nodeActiveExecutions: number;
+  schedulingScore: number;
+  draining: boolean;
+  status: string;
+  consecutiveFailures: number;
+  lastHeartbeatAt: string;
+};
+
+export type RuntimeTopologySnapshot = {
+  reliability: RuntimeReliabilitySnapshot;
+  nodes: RuntimeNodeSummary[];
+  workers: RuntimeWorkerSummary[];
 };
 
 // =========================================================
@@ -666,6 +747,34 @@ export type UserModelProviderInput = {
   apiKey: string;
   enabled: boolean;
 };
+
+export type UserModelService = {
+  id: number;
+  userId: number;
+  name: string;
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  visionModelName: string;
+  maskedHint: string;
+  enabled: boolean;
+  autoRoute: boolean;
+  isDefault: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+};
+
+export type UserModelServiceInput = {
+  name: string;
+  provider: string;
+  baseUrl: string;
+  modelName: string;
+  visionModelName: string;
+  apiKey: string;
+  enabled: boolean;
+  autoRoute: boolean;
+  isDefault: boolean;
+};
 export type AuditEvent = {
   id: number;
   projectId?: number | null;
@@ -677,6 +786,42 @@ export type AuditEvent = {
   metadata?: Record<string, unknown>;
   createdAt: string;
 };
+export type RunCostRecord = {
+  taskId: number;
+  userId: number;
+  projectId?: number | null;
+  provider: string;
+  modelName: string;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  costStatus: "actual" | "estimated" | "unavailable" | string;
+  createdAt: string;
+  updatedAt?: string | null;
+};
+
+export type CostBreakdown = {
+  provider: string;
+  modelName: string;
+  runs: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+};
+
+export type CostSummary = {
+  runCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  estimatedCost: number;
+  knownCostRuns: number;
+  unknownCostRuns: number;
+  breakdown: CostBreakdown[];
+};
+
 export type GovernanceOverview = {
   role: ProjectRole;
   members: ProjectMember[];
@@ -692,4 +837,129 @@ export type Organization = {
   name: string;
   createdAt: string;
   updatedAt: string;
+};
+
+// =========================================================
+// V4 Platform Ecosystem
+// =========================================================
+
+export type ServiceAccount = {
+  id: number;
+  projectId: number;
+  name: string;
+  keyPrefix: string;
+  scopes: string[];
+  status: string;
+  createdBy: number;
+  expiresAt?: string | null;
+  lastUsedAt?: string | null;
+  requestCount: number;
+  errorCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ServiceAccountCredential = {
+  serviceAccount: ServiceAccount;
+  apiKey: string;
+};
+
+export type EcosystemAgentTemplate = {
+  name: string;
+  description?: string;
+  endpoint: string;
+  protocol?: string;
+  capabilities: string[];
+  provider?: string;
+  modelName?: string;
+};
+
+export type EcosystemMCPTemplate = {
+  name: string;
+  transport?: string;
+  endpoint: string;
+  connectTimeoutMs?: number;
+  callTimeoutMs?: number;
+};
+
+export type EcosystemPluginTemplate = {
+  name: string;
+  description?: string;
+  runtime?: string;
+  entrypoint?: string;
+  capabilities?: string[];
+  configSchema?: Record<string, unknown>;
+};
+
+export type EcosystemPackageManifest = {
+  schemaVersion: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  permissions: string[];
+  agent?: EcosystemAgentTemplate;
+  mcp?: EcosystemMCPTemplate;
+  plugin?: EcosystemPluginTemplate;
+};
+
+export type EcosystemPackage = {
+  id: number;
+  ownerUserId: number;
+  slug: string;
+  name: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  summary: string;
+  description: string;
+  visibility: string;
+  status: string;
+  latestVersion?: string;
+  installCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EcosystemPackageVersion = {
+  id: number;
+  packageId: number;
+  version: string;
+  manifest: EcosystemPackageManifest;
+  checksum: string;
+  status: string;
+  createdBy: number;
+  createdAt: string;
+};
+
+export type EcosystemPackageDetail = {
+  package: EcosystemPackage;
+  versions: EcosystemPackageVersion[];
+};
+
+export type EcosystemPackageBundle = {
+  formatVersion: string;
+  package: EcosystemPackage;
+  version: EcosystemPackageVersion;
+};
+
+export type ProjectPackageInstallation = {
+  id: number;
+  projectId: number;
+  packageId: number;
+  versionId: number;
+  packageSlug: string;
+  packageName: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  version: string;
+  enabled: boolean;
+  config?: Record<string, unknown>;
+  resourceType?: string;
+  resourceId?: number | null;
+  installedBy: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type EcosystemOverview = {
+  publishedPackages: number;
+  agentPackages: number;
+  mcpPackages: number;
+  pluginPackages: number;
+  totalInstalls: number;
 };

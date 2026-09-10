@@ -20,8 +20,11 @@ import (
 type DurableRuntimeConfig struct {
 	Enabled                 bool
 	ControlPlaneBaseURL     string
+	DispatcherID            string
+	DispatcherLeaseDuration time.Duration
 	PollInterval            time.Duration
 	LeaseDuration           time.Duration
+	ExecutionLeaseDuration  time.Duration
 	WorkerStaleAfter        time.Duration
 	AcceptanceTimeout       time.Duration
 	RetryBackoff            time.Duration
@@ -43,12 +46,14 @@ type DurableRuntimeService struct {
 }
 
 type DurableExecutionCallback struct {
-	WorkerID      string                         `json:"workerId"`
-	ExecutionID   string                         `json:"executionId"`
-	LeaseToken    string                         `json:"leaseToken"`
-	Status        string                         `json:"status"`
-	Response      *runtimeclient.ExecuteResponse `json:"response,omitempty"`
-	ErrorCategory string                         `json:"errorCategory,omitempty"`
+	WorkerID        string                         `json:"workerId"`
+	ExecutionID     string                         `json:"executionId"`
+	LeaseToken      string                         `json:"leaseToken"`
+	FenceEpoch      int64                          `json:"fenceEpoch"`
+	DispatcherEpoch int64                          `json:"dispatcherEpoch"`
+	Status          string                         `json:"status"`
+	Response        *runtimeclient.ExecuteResponse `json:"response,omitempty"`
+	ErrorCategory   string                         `json:"errorCategory,omitempty"`
 }
 
 func NewDurableRuntimeService(
@@ -57,11 +62,20 @@ func NewDurableRuntimeService(
 	runtime *runtimeclient.Client,
 	cfg DurableRuntimeConfig,
 ) *DurableRuntimeService {
+	if strings.TrimSpace(cfg.DispatcherID) == "" {
+		cfg.DispatcherID = "dispatcher-local-1"
+	}
+	if cfg.DispatcherLeaseDuration <= 0 {
+		cfg.DispatcherLeaseDuration = 5 * time.Second
+	}
 	if cfg.PollInterval <= 0 {
 		cfg.PollInterval = 300 * time.Millisecond
 	}
 	if cfg.LeaseDuration <= 0 {
 		cfg.LeaseDuration = 15 * time.Second
+	}
+	if cfg.ExecutionLeaseDuration <= 0 {
+		cfg.ExecutionLeaseDuration = 20 * time.Second
 	}
 	if cfg.WorkerStaleAfter <= 0 {
 		cfg.WorkerStaleAfter = 20 * time.Second
@@ -101,6 +115,7 @@ func (s *DurableRuntimeService) Start(parent context.Context) {
 		defer s.wg.Done()
 		ticker := time.NewTicker(s.cfg.PollInterval)
 		defer ticker.Stop()
+		s.dispatchTick(ctx)
 		for {
 			select {
 			case <-ctx.Done():
@@ -118,6 +133,9 @@ func (s *DurableRuntimeService) Stop() {
 	}
 	s.cancel()
 	s.wg.Wait()
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	_ = s.repo.ReleaseRuntimeDispatcherLease(releaseCtx, s.cfg.DispatcherID)
+	cancel()
 	s.cancel = nil
 }
 
@@ -199,9 +217,11 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	}
 
 	if s.taskService.governance != nil {
-		if _, modelErr := s.taskService.resolveRequestModelRuntime(ctx, uid, projectRuntimeContext); modelErr != nil {
+		_, _, normalizedSelection, modelErr := s.taskService.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, in.ModelSelection)
+		if modelErr != nil {
 			return nil, modelErr
 		}
+		in.ModelSelection = normalizedSelection
 	}
 
 	snapshot, err := s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
@@ -250,7 +270,8 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
 		Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		Constraints: in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
+		ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+		Constraints:    in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
 	}
 	requestJSON, err := json.Marshal(req)
 	if err != nil {
@@ -261,7 +282,8 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID,
 		TaskText: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		DeliveryMode: "durable",
+		ModelSelection: in.ModelSelection,
+		DeliveryMode:   "durable",
 	}, in.Constraints, requestJSON, uuid.NewString(), time.Now().UTC().Add(s.cfg.JobDeadline), s.cfg.MaxAttempts)
 	if err != nil {
 		return nil, err
@@ -289,10 +311,36 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 	if !s.cfg.Enabled {
 		return
 	}
-	now := time.Now().UTC()
-	if _, err := s.repo.RecoverExpiredRuntimeLeases(ctx, now); err != nil {
-		log.Printf("p8 recover runtime leases: %v", err)
+
+	lease, leader, err := s.repo.AcquireRuntimeDispatcherLease(
+		ctx, s.cfg.DispatcherID, s.cfg.DispatcherLeaseDuration,
+	)
+	if err != nil {
+		log.Printf("v3 acquire dispatcher lease: %v", err)
+		return
 	}
+	if !leader {
+		return
+	}
+
+	now := time.Now().UTC()
+	staleBefore := now.Add(-s.cfg.WorkerStaleAfter)
+	if workers, nodes, topologyErr := s.repo.MarkStaleRuntimeTopology(ctx, staleBefore); topologyErr != nil {
+		log.Printf("v3 mark stale runtime topology: %v", topologyErr)
+	} else if workers > 0 || nodes > 0 {
+		log.Printf("v3 topology offline workers=%d nodes=%d", workers, nodes)
+	}
+	if _, err := s.repo.RecoverExpiredRuntimeLeases(ctx, now); err != nil {
+		log.Printf("v3 recover pre-accept runtime leases: %v", err)
+	}
+	if requeued, failed, recoverErr := s.repo.RecoverLostAcceptedRuntimeJobs(
+		ctx, now, s.cfg.RetryBackoff, 50,
+	); recoverErr != nil {
+		log.Printf("v3 recover accepted runtime executions: %v", recoverErr)
+	} else if requeued > 0 || failed > 0 {
+		log.Printf("v3 accepted execution recovery requeued=%d failed=%d", requeued, failed)
+	}
+
 	expired, err := s.repo.ListExpiredAcceptedRuntimeJobs(ctx, now, 50)
 	if err == nil {
 		for _, job := range expired {
@@ -300,13 +348,17 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 		}
 	}
 
-	workers, err := s.repo.ListAvailableRuntimeWorkers(ctx, now.Add(-s.cfg.WorkerStaleAfter), 32)
+	workers, err := s.repo.ListAvailableRuntimeWorkers(ctx, staleBefore, 64)
 	if err != nil {
-		log.Printf("p8 list workers: %v", err)
+		log.Printf("v3 list workers: %v", err)
 		return
 	}
+	dispatcherEpoch := int64(0)
+	if lease != nil {
+		dispatcherEpoch = lease.Epoch
+	}
 	for _, worker := range workers {
-		slots := worker.Capacity - worker.ActiveExecutions
+		slots := worker.Capacity - worker.AuthoritativeActive
 		if slots < 1 {
 			continue
 		}
@@ -314,22 +366,56 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 			leaseToken := uuid.NewString()
 			job, requestJSON, err := s.repo.ClaimNextRuntimeJob(ctx, worker.WorkerID, leaseToken, s.cfg.LeaseDuration)
 			if err != nil {
-				log.Printf("p8 claim job: %v", err)
+				log.Printf("v3 claim job: %v", err)
 				break
 			}
 			if job == nil {
-				return
+				// Capacity may have changed after the worker list snapshot. Do not
+				// stop the whole dispatcher; another node may still have capacity.
+				break
 			}
-			s.dispatchOne(ctx, worker, job, leaseToken, requestJSON)
+			s.dispatchOne(ctx, worker, job, leaseToken, dispatcherEpoch, requestJSON)
 		}
 	}
 }
 
-func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.RuntimeWorker, job *model.RuntimeJob, leaseToken string, requestJSON []byte) {
+func (s *DurableRuntimeService) dispatchOne(
+	ctx context.Context,
+	worker model.RuntimeWorker,
+	job *model.RuntimeJob,
+	leaseToken string,
+	dispatcherEpoch int64,
+	requestJSON []byte,
+) {
 	var req runtimeclient.ExecuteRequest
 	if err := json.Unmarshal(requestJSON, &req); err != nil {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "invalid durable runtime payload")
 		return
+	}
+
+	// Rehydrate recent conversation context at dispatch time instead of
+	// persisting it inside the durable queue payload.  The queued user message
+	// has already been stored in MySQL, so exclude that current request from
+	// history to avoid duplicating req.Task.
+	if req.ConversationID != nil {
+		recent, historyErr := s.taskService.messages.ListMessages(
+			ctx, job.UserID, *req.ConversationID, 12,
+		)
+		if historyErr != nil {
+			_ = s.repo.FailRuntimeJob(ctx, job.ID, "conversation history unavailable")
+			return
+		}
+		filtered := recent[:0]
+		for _, message := range recent {
+			isCurrent := message.RequestID != nil &&
+				*message.RequestID == req.RequestID &&
+				strings.EqualFold(strings.TrimSpace(message.Role), "user")
+			if isCurrent {
+				continue
+			}
+			filtered = append(filtered, message)
+		}
+		req.History = boundedInteractiveHistory(filtered)
 	}
 
 	if len(req.AttachmentIDs) > 0 {
@@ -367,12 +453,15 @@ func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.Ru
 	}
 	agents, tools, mcps = filterProjectRuntimeResources(projectContext, agents, tools, mcps)
 	if s.taskService.governance != nil {
-		projectModel, modelErr := s.taskService.resolveRequestModelRuntime(ctx, job.UserID, projectContext)
+		selection := model.ModelSelection{Mode: req.ModelSelection.Mode, ServiceID: req.ModelSelection.ServiceID}
+		modelPool, projectModel, normalizedSelection, modelErr := s.taskService.resolveRequestModelRuntimePool(ctx, job.UserID, projectContext, selection)
 		if modelErr != nil {
 			_ = s.repo.FailRuntimeJob(ctx, job.ID, "model provider unavailable")
 			return
 		}
 		req.ProjectModel = projectModel
+		req.ModelPool = modelPool
+		req.ModelSelection = runtimeclient.ModelSelection{Mode: normalizedSelection.Mode, ServiceID: normalizedSelection.ServiceID}
 	}
 	if len(agents) == 0 {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "project runtime has no enabled agents")
@@ -390,6 +479,7 @@ func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.Ru
 	acceptCtx, cancel := runtimeclient.AcceptanceTimeout(ctx, s.cfg.AcceptanceTimeout)
 	accepted, dispatchErr := s.runtime.SubmitDurableExecution(acceptCtx, worker.Endpoint, runtimeclient.DurableExecutionEnvelope{
 		JobID: job.ID, ExecutionID: job.ExecutionID, LeaseToken: leaseToken,
+		FenceEpoch: job.FenceEpoch, DispatcherEpoch: dispatcherEpoch,
 		CallbackURL: callbackURL, Request: req,
 	})
 	cancel()
@@ -427,11 +517,26 @@ func (s *DurableRuntimeService) dispatchOne(ctx context.Context, worker model.Ru
 	}
 }
 
-func (s *DurableRuntimeService) Heartbeat(ctx context.Context, worker model.RuntimeWorker) error {
+func (s *DurableRuntimeService) Heartbeat(
+	ctx context.Context,
+	worker model.RuntimeWorker,
+	leases []model.RuntimeExecutionLeaseRef,
+) error {
 	if strings.TrimSpace(worker.WorkerID) == "" || strings.TrimSpace(worker.Endpoint) == "" {
 		return ErrInvalidInput
 	}
-	return s.repo.HeartbeatRuntimeWorker(ctx, worker)
+	worker.WorkerID = strings.TrimSpace(worker.WorkerID)
+	worker.NodeID = strings.TrimSpace(worker.NodeID)
+	if worker.NodeID == "" {
+		worker.NodeID = worker.WorkerID
+	}
+	if err := s.repo.HeartbeatRuntimeWorker(ctx, worker); err != nil {
+		return err
+	}
+	_, err := s.repo.RenewRuntimeExecutionLeases(
+		ctx, worker.WorkerID, leases, s.cfg.ExecutionLeaseDuration,
+	)
+	return err
 }
 
 func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callback DurableExecutionCallback) error {
@@ -443,6 +548,13 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		return ErrNotFound
 	}
 	if job.Status == "COMPLETED" || job.Status == "CANCELED" || job.Status == "FAILED" {
+		return nil
+	}
+
+	// V3 adds a monotonic fence epoch on top of the random lease token. Older
+	// P8 workers omit it (zero) and remain compatible; V3 workers must match the
+	// current assignment so callbacks from a recovered stale node are ignored.
+	if callback.FenceEpoch != 0 && callback.FenceEpoch != job.FenceEpoch {
 		return nil
 	}
 
@@ -478,12 +590,22 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		return ErrNotFound
 	}
 	response := callback.Response
-	response.Trace = append([]map[string]any{durableReliabilityTrace(job, callback.WorkerID, "completed")}, response.Trace...)
-	if s.taskService.governance != nil && s.taskService.projectRuntime != nil && task.ConversationID != nil {
+	response.Trace = append([]map[string]any{durableReliabilityTrace(
+		job, callback.WorkerID, callback.DispatcherEpoch, "completed",
+	)}, response.Trace...)
+
+	var projectID *int64
+	if s.taskService.projectRuntime != nil && task.ConversationID != nil {
 		if projectCtx, resolveErr := s.taskService.projectRuntime.ResolveForConversation(ctx, job.UserID, *task.ConversationID); resolveErr == nil && projectCtx != nil {
-			s.taskService.governance.RecordUsage(ctx, projectCtx.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+			id := projectCtx.ProjectID
+			projectID = &id
+			if s.taskService.governance != nil {
+				s.taskService.governance.RecordUsage(ctx, projectCtx.ProjectID, int64(response.Observability.ModelTotalTokens), response.EstimatedCost, int64(response.Observability.ToolCalls))
+			}
 		}
 	}
+	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability, response.EstimatedCost)
+
 	runtimeStatus := normalizeRuntimeStatus(response.Status)
 
 	if runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED" {
@@ -492,20 +614,26 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 			return errors.New("runtime suspended without continuation")
 		}
 		continuation := runtimeContinuationToModel(response.Continuation)
-		if err := s.taskService.tasks.SuspendTask(ctx, job.UserID, job.TaskID, runtimeStatus, response.Answer, continuation,
-			response.SelectedAgents, response.Trace, response.DAG, response.ElapsedMS, response.EstimatedCost); err != nil {
-			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime suspension")
-			return err
-		}
+		var assistantMessage *repository.AssistantMessageWrite
 		if task.ConversationID != nil {
-			_, _ = s.taskService.messages.CreateMessage(ctx, job.UserID, *task.ConversationID, "assistant", response.Answer,
-				runtimeStatus, task.RequestID, map[string]any{
+			assistantMessage = &repository.AssistantMessageWrite{
+				UserID: job.UserID, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: runtimeStatus, RequestID: task.RequestID,
+				Metadata: map[string]any{
 					"taskId": task.ID, "runtimePhase": "durable_suspended", "deliveryMode": "durable",
 					"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
 					"taskProfile": response.TaskProfile, "observability": response.Observability,
 					"scorecard": response.Scorecard, "agentFeedback": response.AgentFeedback,
 					"citations": normalizeRuntimeCitations(response.Citations),
-				})
+				},
+			}
+		}
+		if err := s.taskService.suspendTaskWithAssistant(ctx, repository.TaskSuspensionWrite{
+			UserID: job.UserID, TaskID: job.TaskID, ConversationID: conversationIDValue(task.ConversationID), Status: runtimeStatus, Result: response.Answer, Continuation: continuation,
+			Selected: response.SelectedAgents, Trace: response.Trace, DAG: response.DAG,
+			LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+		}, assistantMessage); err != nil {
+			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime suspension and assistant history")
+			return err
 		}
 		return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
 	}
@@ -513,9 +641,25 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	if runtimeStatus != "COMPLETED" {
 		return s.repo.FailRuntimeJob(ctx, jobID, "unsupported runtime status")
 	}
-	if err := s.taskService.tasks.CompleteTask(ctx, job.UserID, job.TaskID, response.Answer, response.SelectedAgents,
-		response.Trace, response.DAG, response.ElapsedMS, response.EstimatedCost); err != nil {
-		_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime completion")
+	var assistantMessage *repository.AssistantMessageWrite
+	if task.ConversationID != nil {
+		assistantMessage = &repository.AssistantMessageWrite{
+			UserID: job.UserID, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: task.RequestID,
+			Metadata: map[string]any{
+				"taskId": task.ID, "runtimePhase": "durable_completed", "deliveryMode": "durable",
+				"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
+				"taskProfile": response.TaskProfile, "scheduler": task.Scheduler, "planner": task.Planner,
+				"executionMode": task.ExecutionMode, "synthesisMode": task.SynthesisMode,
+				"observability": response.Observability, "scorecard": response.Scorecard,
+				"agentFeedback": response.AgentFeedback, "citations": normalizeRuntimeCitations(response.Citations),
+			},
+		}
+	}
+	if err := s.taskService.completeTaskWithAssistant(ctx, repository.TaskCompletionWrite{
+		UserID: job.UserID, TaskID: job.TaskID, ConversationID: conversationIDValue(task.ConversationID), Result: response.Answer, Selected: response.SelectedAgents,
+		Trace: response.Trace, DAG: response.DAG, LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
+	}, assistantMessage); err != nil {
+		_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime completion and assistant history")
 		return err
 	}
 	if err := s.taskService.agents.RecordAgentFeedback(ctx, job.UserID, task.RequestID, response.AgentFeedback); err != nil {
@@ -523,33 +667,29 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		// completed user task into an execution replay.
 		log.Printf("p8 agent feedback persistence failed: %v", err)
 	}
-	if task.ConversationID != nil {
-		_, _ = s.taskService.messages.CreateMessage(ctx, job.UserID, *task.ConversationID, "assistant", response.Answer,
-			"COMPLETED", task.RequestID, map[string]any{
-				"taskId": task.ID, "runtimePhase": "durable_completed", "deliveryMode": "durable",
-				"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
-				"taskProfile": response.TaskProfile, "scheduler": task.Scheduler, "planner": task.Planner,
-				"executionMode": task.ExecutionMode, "synthesisMode": task.SynthesisMode,
-				"observability": response.Observability, "scorecard": response.Scorecard,
-				"agentFeedback": response.AgentFeedback, "citations": normalizeRuntimeCitations(response.Citations),
-			})
-	}
 	return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
 }
 
-func durableReliabilityTrace(job *model.RuntimeJob, workerID, status string) map[string]any {
-	detail, _ := json.Marshal(map[string]any{
-		"deliveryMode":   "durable",
-		"jobId":          job.ID,
-		"executionId":    job.ExecutionID,
-		"workerId":       workerID,
-		"attempt":        job.AttemptCount,
-		"maxAttempts":    job.MaxAttempts,
-		"dispatchStatus": status,
-	})
+func durableReliabilityTrace(job *model.RuntimeJob, workerID string, dispatcherEpoch int64, status string) map[string]any {
+	detail := map[string]any{
+		"deliveryMode":      "durable",
+		"jobId":             job.ID,
+		"executionId":       job.ExecutionID,
+		"workerId":          workerID,
+		"fenceEpoch":        job.FenceEpoch,
+		"dispatcherEpoch":   dispatcherEpoch,
+		"attempt":           job.AttemptCount,
+		"maxAttempts":       job.MaxAttempts,
+		"failoverRetrySafe": job.FailoverRetrySafe,
+		"dispatchStatus":    status,
+	}
+	if job.NodeID != nil {
+		detail["nodeId"] = *job.NodeID
+	}
+	encoded, _ := json.Marshal(detail)
 	return map[string]any{
 		"kind": "reliability", "title": "Durable Runtime Dispatch", "status": "completed",
-		"detail": string(detail), "elapsedMs": 0,
+		"detail": string(encoded), "elapsedMs": 0,
 	}
 }
 
@@ -578,5 +718,29 @@ func (s *DurableRuntimeService) Reliability(ctx context.Context) (*model.Runtime
 	if !s.cfg.Enabled {
 		return &model.RuntimeReliabilitySnapshot{Enabled: false}, nil
 	}
-	return s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	snapshot, err := s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	if err != nil {
+		return nil, err
+	}
+	if lease, leaseErr := s.repo.RuntimeDispatcherLease(ctx); leaseErr == nil && lease != nil {
+		snapshot.DispatcherLeader = lease.HolderID == s.cfg.DispatcherID && lease.LeaseUntil.After(time.Now().UTC())
+	}
+	return snapshot, nil
+}
+
+func (s *DurableRuntimeService) Topology(ctx context.Context) (*model.RuntimeTopologySnapshot, error) {
+	if !s.cfg.Enabled {
+		return &model.RuntimeTopologySnapshot{
+			Reliability: model.RuntimeReliabilitySnapshot{Enabled: false},
+			Nodes:       []model.RuntimeNode{}, Workers: []model.RuntimeWorker{},
+		}, nil
+	}
+	topology, err := s.repo.RuntimeTopologySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
+	if err != nil {
+		return nil, err
+	}
+	if lease, leaseErr := s.repo.RuntimeDispatcherLease(ctx); leaseErr == nil && lease != nil {
+		topology.Reliability.DispatcherLeader = lease.HolderID == s.cfg.DispatcherID && lease.LeaseUntil.After(time.Now().UTC())
+	}
+	return topology, nil
 }

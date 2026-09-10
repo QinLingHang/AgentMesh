@@ -4,6 +4,10 @@ from app.memory import (
     MemoryMessage,
     RetrievedLongTermMemory,
 )
+from app.memory.conversation_context import (
+    RetrievedConversationMemory,
+    render_retrieved_conversation_memories,
+)
 
 from app.rag import (
     EvidenceProvenance,
@@ -18,6 +22,9 @@ def build_agent_context(
     memory_messages: list[
         MemoryMessage
     ],
+    conversation_memories: list[
+        RetrievedConversationMemory
+    ] | None = None,
     retrieval_hits: list[
         RetrievalHit
     ],
@@ -136,6 +143,28 @@ def build_agent_context(
                     + "\n".join(memory_parts)
                 )
             )
+            sections.append(
+                (
+                    "[Conversation Continuity Policy]\n"
+                    "- Treat short follow-ups such as 继续/可以/好的/然后呢/展开 as referring to the most recent turn unless the user clearly changes topic.\n"
+                    "- Prefer the newest user/assistant exchange over older conversation topics.\n"
+                    "- Do not invent a new topic merely because the current task is short or underspecified."
+                )
+            )
+
+    # =====================================================
+    # Older Conversation Memory Capsules
+    #
+    # Raw recent messages always win. Capsules are durable compressed hints
+    # selected for the current query, not a replacement for the full MySQL log.
+    # =====================================================
+
+    if conversation_memories:
+        rendered_conversation_memory = render_retrieved_conversation_memories(
+            conversation_memories
+        )
+        if rendered_conversation_memory:
+            sections.append(rendered_conversation_memory)
 
     # =====================================================
     # User-global Long-term Memory
@@ -508,6 +537,18 @@ def _build_evidence_identity_lines(
                 )
             )
         )
+
+    if evidence.page_number is not None:
+        lines.append("page_number=" + str(evidence.page_number))
+
+    if evidence.modality is not None:
+        lines.append("modality=" + evidence.modality)
+
+    if evidence.visual_type is not None:
+        lines.append("visual_type=" + evidence.visual_type)
+
+    if evidence.asset_id is not None:
+        lines.append("asset_id=" + evidence.asset_id)
 
     return lines
 

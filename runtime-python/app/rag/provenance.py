@@ -32,6 +32,15 @@ _TRANSIENT_METADATA_KEYS: set[str] = {
     "preRerankScore",
     "modelRerankScore",
     "ragDiagnostics",
+
+    # V2 visual semantic payload may contain text extracted from user files.
+    # Public citation provenance carries only bounded identity metadata; raw
+    # visual analysis details remain inside the retrieval document/context.
+    "visibleText",
+    "entities",
+    "relationships",
+    "keyFacts",
+    "visionMetadata",
 }
 
 
@@ -110,6 +119,26 @@ class EvidenceProvenance:
 
     end: (
         int
+        | None
+    ) = None
+
+    page_number: (
+        int
+        | None
+    ) = None
+
+    asset_id: (
+        str
+        | None
+    ) = None
+
+    modality: (
+        str
+        | None
+    ) = None
+
+    visual_type: (
+        str
         | None
     ) = None
 
@@ -276,6 +305,38 @@ def build_evidence_provenance(
                     _as_optional_int(
                         raw_metadata.get(
                             "end"
+                        )
+                    )
+                ),
+
+                page_number=(
+                    _as_optional_int(
+                        raw_metadata.get(
+                            "pageNumber"
+                        )
+                    )
+                ),
+
+                asset_id=(
+                    _as_optional_str(
+                        raw_metadata.get(
+                            "assetId"
+                        )
+                    )
+                ),
+
+                modality=(
+                    _as_optional_str(
+                        raw_metadata.get(
+                            "modality"
+                        )
+                    )
+                ),
+
+                visual_type=(
+                    _as_optional_str(
+                        raw_metadata.get(
+                            "visualType"
                         )
                     )
                 ),

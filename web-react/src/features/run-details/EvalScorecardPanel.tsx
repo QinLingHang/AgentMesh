@@ -90,9 +90,12 @@ export function EvalScorecardPanel({
       </div>
 
       <div className="p6-eval-grid">
-        <EvalMetric label="任务完成度" value={percent(scorecard.taskSuccess)} detail="最终任务是否顺利完成" />
+        <EvalMetric label="任务完成度" value={percent(scorecard.taskSuccess)} detail="运行状态与最终任务完成情况" />
+        <EvalMetric label="Judge 任务完成" value={percent(scorecard.taskCompletion ?? scorecard.taskSuccess)} detail="V2 结构化评测的任务完成维度" />
         <EvalMetric label="回答质量" value={percent(scorecard.answerQuality)} detail="智能体质量评估结果" />
+        <EvalMetric label="正确性" value={percent(scorecard.correctness ?? scorecard.answerQuality)} detail="回答与任务目标的一致程度" />
         <EvalMetric label="事实依据充分度" value={percent(scorecard.groundedness)} detail="知识检索与引用依据" />
+        <EvalMetric label="引用质量" value={percent(scorecard.citationQuality ?? scorecard.groundedness)} detail="引用是否来自本次选中证据并保持可追溯" />
         <EvalMetric label="工具可靠性" value={percent(scorecard.toolReliability)} detail="工具与外部服务执行可靠性" />
         <EvalMetric label="知识检索质量" value={percent(scorecard.ragQuality)} detail="检索证据与引用质量" />
         <EvalMetric label="记忆贡献" value={percent(scorecard.memoryContribution)} detail="用户长期记忆使用情况" />
@@ -106,6 +109,15 @@ export function EvalScorecardPanel({
         />
         <EvalMetric label="模型用量" value={formatCompactNumber(scorecard.modelTokens)} detail="所有模型调用累计用量" />
       </div>
+
+      {scorecard.judgeReason && (
+        <div className="p6-eval-violations">
+          <strong>评测说明</strong>
+          <div>
+            <span>{scorecard.judgeReason}</span>
+          </div>
+        </div>
+      )}
 
       {scorecard.violations.length > 0 && (
         <div className="p6-eval-violations">

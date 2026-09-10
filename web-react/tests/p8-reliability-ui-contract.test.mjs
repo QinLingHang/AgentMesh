@@ -29,9 +29,9 @@ test("Tasks surface queue health and allow cancel only for active durable tasks"
   assert.match(tasks, /reliability\.queueDepth/);
   assert.match(tasks, /reliability\.availableWorkers/);
   assert.match(tasks, /reliability\.circuitOpenWorkers/);
-  assert.match(tasks, /task\.deliveryMode === "durable"/);
-  assert.match(tasks, /task\.status === "QUEUED"/);
-  assert.match(tasks, /task\.status === "RUNNING"/);
+  assert.match(tasks, /task\.deliveryMode\s*===\s*"durable"/);
+  assert.match(tasks, /task\.status\s*===\s*"QUEUED"/);
+  assert.match(tasks, /task\.status\s*===\s*"RUNNING"/);
   assert.match(tasks, /onCancelTask/);
   assert.match(api, /\/api\/tasks\/\$\{taskId\}\/cancel/);
   assert.match(api, /\/api\/runtime\/reliability/);

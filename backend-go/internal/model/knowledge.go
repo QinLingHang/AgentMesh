@@ -70,6 +70,16 @@ type KnowledgeFile struct {
 
 	ChunkCount int `json:"chunkCount"`
 
+	TextChunkCount int `json:"textChunkCount"`
+
+	VisualEvidenceCount int `json:"visualEvidenceCount"`
+
+	PageCount int `json:"pageCount"`
+
+	VisualStatus string `json:"visualStatus"`
+
+	VisualErrorMessage *string `json:"visualErrorMessage,omitempty"`
+
 	ErrorMessage *string `json:"errorMessage"`
 
 	IndexedAt *time.Time `json:"indexedAt"`
@@ -77,6 +87,18 @@ type KnowledgeFile struct {
 	CreatedAt time.Time `json:"createdAt"`
 
 	UpdatedAt time.Time `json:"updatedAt"`
+}
+
+// KnowledgeIndexResult is the persistence-facing summary of one knowledge
+// ingestion run.  It intentionally lives in the domain model so repository
+// code does not depend on the HTTP runtime client package.
+type KnowledgeIndexResult struct {
+	ChunkCount          int
+	TextChunkCount      int
+	VisualEvidenceCount int
+	PageCount           int
+	VisualStatus        string
+	VisualError         string
 }
 
 type RuntimeKnowledgeScope struct {

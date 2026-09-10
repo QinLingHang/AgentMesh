@@ -1,0 +1,7 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+psutil>=6,<8
+Pillow>=10,<12
+PyAutoGUI>=0.9.54,<1
+pywinauto>=0.6.9,<1; platform_system == "Windows"
+pywin32>=308; platform_system == "Windows"

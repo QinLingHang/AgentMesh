@@ -144,6 +144,11 @@ class TaskConstraints(
         alias="minQuality",
     )
 
+    retry_on_worker_loss: bool = Field(
+        default=False,
+        alias="retryOnWorkerLoss",
+    )
+
 RuntimeStatus = Literal[
     "SUBMITTED",
     "RUNNING",
@@ -229,11 +234,22 @@ class RuntimeContinuation(
 class ProjectModelRuntime(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    service_id: int | None = Field(default=None, alias="serviceId")
+    service_name: str | None = Field(default=None, alias="serviceName")
     provider: str = "openai-compatible"
     base_url: str = Field(alias="baseUrl")
     model_name: str = Field(alias="modelName")
     vision_model_name: str | None = Field(default=None, alias="visionModelName")
     api_key: SecretStr = Field(alias="apiKey")
+    auto_route: bool = Field(default=True, alias="autoRoute")
+    is_default: bool = Field(default=False, alias="isDefault")
+
+
+class ModelSelection(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["auto", "manual"] = "auto"
+    service_id: int | None = Field(default=None, alias="serviceId")
 
 class RuntimeAttachment(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -258,8 +274,12 @@ class InteractiveStreamRequest(BaseModel):
     request_id: str
     conversation_id: int | None = Field(default=None, alias="conversationId")
     task: str = Field(min_length=1, max_length=20000)
-    history: list[InteractiveMessage] = Field(default_factory=list, max_length=10)
+    history: list[InteractiveMessage] = Field(default_factory=list, max_length=48)
     project_model: ProjectModelRuntime | None = Field(default=None, alias="projectModel")
+    model_pool: list[ProjectModelRuntime] = Field(default_factory=list, alias="modelPool", max_length=32)
+    model_selection: ModelSelection = Field(default_factory=ModelSelection, alias="modelSelection")
+    scheduler: Literal["fixed", "capability", "greedy", "adaptive"] = "adaptive"
+    constraints: TaskConstraints = Field(default_factory=TaskConstraints)
     attachments: list[RuntimeAttachment] = Field(default_factory=list, max_length=6)
 
 
@@ -288,9 +308,27 @@ class RuntimeRequest(
         alias="projectModel",
     )
 
+    model_pool: list[ProjectModelRuntime] = Field(
+        default_factory=list,
+        alias="modelPool",
+        max_length=32,
+    )
+
+    model_selection: ModelSelection = Field(
+        default_factory=ModelSelection,
+        alias="modelSelection",
+    )
+
     task: str = Field(
         min_length=1,
         max_length=20000,
+    )
+
+    # Recent authoritative conversation history supplied by the Go control
+    # plane.  It spans both interactive-stream and full-runtime turns.
+    history: list[InteractiveMessage] = Field(
+        default_factory=list,
+        max_length=48,
     )
 
     scheduler: Literal[
@@ -571,6 +609,51 @@ class ObservabilitySummary(
         alias="modelCostKnown",
     )
 
+    model_provider: str = Field(
+        default="",
+        alias="modelProvider",
+    )
+
+    model_name: str = Field(
+        default="",
+        alias="modelName",
+    )
+
+    retrieval_mode: str = Field(
+        default="",
+        alias="retrievalMode",
+    )
+
+    rag_latency_ms: int = Field(
+        default=0,
+        alias="ragLatencyMs",
+    )
+
+    rag_raw_hits: int = Field(
+        default=0,
+        alias="ragRawHits",
+    )
+
+    rag_hits: int = Field(
+        default=0,
+        alias="ragHits",
+    )
+
+    rag_context_hits: int = Field(
+        default=0,
+        alias="ragContextHits",
+    )
+
+    rag_text_candidates: int = Field(
+        default=0,
+        alias="ragTextCandidates",
+    )
+
+    rag_visual_candidates: int = Field(
+        default=0,
+        alias="ragVisualCandidates",
+    )
+
     tool_successes: int = Field(
         default=0,
         alias="toolSuccesses",
@@ -620,6 +703,23 @@ class RunScorecard(
     )
 
     groundedness: float = 0.0
+
+    correctness: float = 0.0
+
+    citation_quality: float = Field(
+        default=0.0,
+        alias="citationQuality",
+    )
+
+    task_completion: float = Field(
+        default=0.0,
+        alias="taskCompletion",
+    )
+
+    judge_reason: str = Field(
+        default="",
+        alias="judgeReason",
+    )
 
     tool_reliability: float = Field(
         default=0.0,
@@ -746,6 +846,41 @@ class RuntimeCitation(
         int
         | None
     ) = None
+
+    page_number: (
+        int
+        | None
+    ) = Field(
+        default=None,
+        alias="pageNumber",
+        exclude_if=lambda value: value is None,
+    )
+
+    asset_id: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        alias="assetId",
+        exclude_if=lambda value: value is None,
+    )
+
+    modality: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    visual_type: (
+        str
+        | None
+    ) = Field(
+        default=None,
+        alias="visualType",
+        exclude_if=lambda value: value is None,
+    )
 
 class RuntimeResponse(
     BaseModel

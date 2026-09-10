@@ -239,6 +239,11 @@ type TaskConstraints struct {
 	MaxCost float64 `json:"maxCost"`
 
 	MinQuality float64 `json:"minQuality"`
+
+	// RetryOnWorkerLoss is opt-in because replay after a worker accepted an
+	// execution is safe only for idempotent/read-only workloads. V3 uses this
+	// flag to reassign a task after the worker execution lease expires.
+	RetryOnWorkerLoss bool `json:"retryOnWorkerLoss,omitempty"`
 }
 
 // =========================================================
@@ -382,6 +387,8 @@ type Task struct {
 	ExecutionMode string `json:"executionMode"`
 
 	SynthesisMode string `json:"synthesisMode"`
+
+	ModelSelection ModelSelection `json:"modelSelection"`
 
 	// direct keeps the historical synchronous request path. durable is P8's
 	// queued/leased worker path and is persisted with the task.

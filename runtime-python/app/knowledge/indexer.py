@@ -4,8 +4,8 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from app.knowledge.parser import parse_document_bytes
-from app.rag.ingestion import chunk_text
+from app.multimodal.contracts import VisionAnalyzer
+from app.multimodal.ingestion import MultimodalIngestionResult, ingest_multimodal_document
 from app.rag.runtime import RetrievalDocument
 
 
@@ -21,27 +21,12 @@ class KnowledgeIndexInput:
 
 
 class KnowledgeIndexer:
-    def __init__(self, backend) -> None:
+    def __init__(self, backend, vision_analyzer: VisionAnalyzer | None = None) -> None:
         self.backend = backend
+        self.vision_analyzer = vision_analyzer
 
-    async def index(
-        self,
-        request: KnowledgeIndexInput,
-        content: bytes,
-    ) -> int:
-        text = parse_document_bytes(
-            extension=request.extension,
-            content=content,
-        )
-
-        await self.delete(
-            user_id=request.user_id,
-            knowledge_base_id=request.knowledge_base_id,
-            knowledge_file_id=request.knowledge_file_id,
-        )
-
-        project_id = request.project_id
-        base_metadata: dict[str, Any] = {
+    def _base_metadata(self, request: KnowledgeIndexInput) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
             "userId": request.user_id,
             "knowledgeBaseId": request.knowledge_base_id,
             "knowledgeFileId": request.knowledge_file_id,
@@ -49,57 +34,54 @@ class KnowledgeIndexer:
             "documentType": request.extension,
             "checksumSha256": request.checksum_sha256,
         }
-        if project_id is not None:
-            base_metadata["projectId"] = project_id
+        if request.project_id is not None:
+            metadata["projectId"] = request.project_id
+        return metadata
 
-        generated = chunk_text(
-            text=text,
-            source=request.original_name,
-            metadata=base_metadata,
-            chunk_size=500,
-            overlap=100,
+    async def index_detailed(
+        self,
+        request: KnowledgeIndexInput,
+        content: bytes,
+        *,
+        vision_analyzer_override: VisionAnalyzer | None = None,
+    ) -> MultimodalIngestionResult:
+        await self.delete(
+            user_id=request.user_id,
+            knowledge_base_id=request.knowledge_base_id,
+            knowledge_file_id=request.knowledge_file_id,
         )
 
-        documents: list[RetrievalDocument] = []
-        for index, item in enumerate(generated):
-            metadata = {
-                **base_metadata,
-                **dict(item.metadata),
-                "chunkIndex": int(item.metadata.get("chunkIndex", index)),
-            }
-            metadata.setdefault("start", max(0, index * 400))
-            metadata.setdefault(
-                "end",
-                metadata["start"] + len(item.text),
-            )
+        result = await ingest_multimodal_document(
+            content=content,
+            extension=request.extension,
+            source=request.original_name,
+            base_metadata=self._base_metadata(request),
+            vision_analyzer=(vision_analyzer_override or self.vision_analyzer),
+        )
 
-            documents.append(
-                RetrievalDocument(
-                    id=(
-                        f"kb{request.knowledge_base_id}_"
-                        f"file{request.knowledge_file_id}_"
-                        f"chunk{index}"
-                    ),
-                    text=item.text,
-                    source=request.original_name,
-                    metadata=metadata,
-                )
-            )
-
-        if not documents:
-            raise ValueError("knowledge document produced zero chunks")
-
+        documents: list[RetrievalDocument] = result.documents
         upsert = getattr(self.backend, "upsert_documents", None)
         if upsert is not None:
             count = await upsert(documents)
-            return int(count or len(documents))
+            if int(count or len(documents)) <= 0:
+                raise RuntimeError("configured RAG backend returned zero indexed evidence")
+            return result
 
         add_documents = getattr(self.backend, "add_documents", None)
         if add_documents is not None:
             add_documents(documents)
-            return len(documents)
+            return result
 
         raise RuntimeError("configured RAG backend does not support ingestion")
+
+    async def index(
+        self,
+        request: KnowledgeIndexInput,
+        content: bytes,
+    ) -> int:
+        """Backward-compatible P1 contract: return total indexed evidence count."""
+        result = await self.index_detailed(request, content)
+        return result.stats.total_documents
 
     async def delete(
         self,
@@ -108,6 +90,20 @@ class KnowledgeIndexer:
         knowledge_base_id: int,
         knowledge_file_id: int,
     ) -> None:
+        # Prefer the backend's public deletion contract when available. This is
+        # important for persistent/hybrid backends: inspecting a private
+        # in-memory cache must never short-circuit deletion from Milvus.
+        delete_documents = getattr(self.backend, "delete_documents", None)
+        if delete_documents is not None:
+            await delete_documents(
+                filters={
+                    "userId": user_id,
+                    "knowledgeBaseId": knowledge_base_id,
+                    "knowledgeFileId": knowledge_file_id,
+                }
+            )
+            return
+
         # In-memory deterministic baseline.
         memory = getattr(self.backend, "_documents", None)
         if isinstance(memory, dict):
@@ -122,17 +118,13 @@ class KnowledgeIndexer:
                 memory.pop(key, None)
             return
 
-        client = (
-            getattr(self.backend, "client", None)
-            or getattr(self.backend, "_client", None)
-        )
-        collection_name = (
-            getattr(self.backend, "collection_name", None)
-            or getattr(self.backend, "_collection_name", None)
-        )
+        # Compatibility fallback for older Milvus-like backends. Keep the
+        # expression aligned with the current explicit collection schema:
+        # user_id is a top-level INT64 field; knowledge IDs live in metadata.
+        client = getattr(self.backend, "client", None) or getattr(self.backend, "_client", None)
+        collection_name = getattr(self.backend, "collection_name", None) or getattr(self.backend, "_collection_name", None)
 
         if client is None or not collection_name:
-            # No collection has been initialized yet: nothing to delete.
             return
 
         delete = getattr(client, "delete", None)
@@ -140,26 +132,17 @@ class KnowledgeIndexer:
             return
 
         expression = (
-            f"userId == {int(user_id)} and "
-            f"knowledgeBaseId == {int(knowledge_base_id)} and "
-            f"knowledgeFileId == {int(knowledge_file_id)}"
+            f"user_id == {int(user_id)} and "
+            f'metadata["knowledgeBaseId"] == {int(knowledge_base_id)} and '
+            f'metadata["knowledgeFileId"] == {int(knowledge_file_id)}'
         )
 
         def do_delete() -> None:
             try:
-                delete(
-                    collection_name=collection_name,
-                    filter=expression,
-                )
+                delete(collection_name=collection_name, filter=expression)
             except TypeError:
-                delete(
-                    collection_name,
-                    filter=expression,
-                )
-            except Exception as exc:
-                text = str(exc).lower()
-                if "not exist" in text or "not found" in text:
-                    return
-                raise
+                delete(collection_name, filter=expression)
 
+        # Do not translate schema/filter errors into success. A failed delete
+        # must propagate so the Control Plane cannot report a false cleanup.
         await asyncio.to_thread(do_delete)

@@ -59,8 +59,51 @@ function AttachmentChips({ items }: { items: MessageAttachmentMetadata[] }) {
   );
 }
 
+function orderMessagesByTurn(messages: Message[]): Message[] {
+  // Storage insertion order can differ from conversational turn order when a
+  // slow assistant/tool result finishes after the user has already submitted a
+  // newer turn. requestId is the durable turn ownership key shared by the user
+  // and assistant rows. Grouping by the owning user-message id keeps late
+  // results next to their original turn instead of presenting them as an answer
+  // to a newer question.
+  const turnAnchor = new Map<string, number>();
+
+  for (const message of messages) {
+    const requestId = message.requestId?.trim();
+    if (!requestId || message.role !== "user") continue;
+    const current = turnAnchor.get(requestId);
+    if (current == null || message.id < current) {
+      turnAnchor.set(requestId, message.id);
+    }
+  }
+
+  for (const message of messages) {
+    const requestId = message.requestId?.trim();
+    if (!requestId || turnAnchor.has(requestId)) continue;
+    turnAnchor.set(requestId, message.id);
+  }
+
+  return [...messages].sort((left, right) => {
+    const leftRequestId = left.requestId?.trim() || null;
+    const rightRequestId = right.requestId?.trim() || null;
+    const leftAnchor = leftRequestId ? turnAnchor.get(leftRequestId) ?? left.id : left.id;
+    const rightAnchor = rightRequestId ? turnAnchor.get(rightRequestId) ?? right.id : right.id;
+    if (leftAnchor !== rightAnchor) return leftAnchor - rightAnchor;
+    if (leftRequestId && leftRequestId === rightRequestId && left.role !== right.role) {
+      if (left.role === "user") return -1;
+      if (right.role === "user") return 1;
+    }
+    return left.id - right.id;
+  });
+}
+
 export function MessageHistory({
   messages,
+  messagesLoading = false,
+  messagesLoadError = "",
+  hasMoreHistory = false,
+  loadingOlderHistory = false,
+  onLoadOlderHistory,
   tasks,
   latestRun,
   openDetails,
@@ -72,6 +115,11 @@ export function MessageHistory({
   streamingPhase = "",
 }: {
   messages: Message[];
+  messagesLoading?: boolean;
+  messagesLoadError?: string;
+  hasMoreHistory?: boolean;
+  loadingOlderHistory?: boolean;
+  onLoadOlderHistory?: () => Promise<void> | void;
   tasks: Task[];
   latestRun: RunResult | null;
   openDetails: (result: RunResult) => void;
@@ -82,7 +130,45 @@ export function MessageHistory({
   streamingAnswer?: string;
   streamingPhase?: string;
 }) {
-  const lastAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
+  const orderedMessages = useMemo(() => orderMessagesByTurn(messages), [messages]);
+  const lastAssistantId = [...orderedMessages].reverse().find((message) => message.role === "assistant")?.id;
+
+  if (messagesLoading) {
+    return (
+      <div className="conversation-flow" data-testid="message-history-loading" role="status" aria-live="polite">
+        <article className="agent-result agent-result-working">
+          <header>
+            <div>
+              <span className="result-mark">AM</span>
+              <div>
+                <strong>正在加载会话记录…</strong>
+                <small>正在读取这个会话的最新消息</small>
+              </div>
+            </div>
+            <span className="result-state-pill running"><i />加载中</span>
+          </header>
+        </article>
+      </div>
+    );
+  }
+
+  if (messagesLoadError) {
+    return (
+      <div className="conversation-flow" data-testid="message-history-error" role="alert">
+        <article className="agent-result">
+          <header>
+            <div>
+              <span className="result-mark">!</span>
+              <div>
+                <strong>会话记录暂时无法加载</strong>
+                <small>{messagesLoadError}</small>
+              </div>
+            </div>
+          </header>
+        </article>
+      </div>
+    );
+  }
 
   if (messages.length === 0 && !working && !pendingPrompt) {
     return <WorkspaceWelcome onSelect={onSelectPrompt} />;
@@ -90,10 +176,28 @@ export function MessageHistory({
 
   return (
     <div className="conversation-flow">
-      {messages.slice(-20).map((message) => {
+      {hasMoreHistory && (
+        <div className="history-load-earlier" data-testid="message-history-load-earlier">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={loadingOlderHistory}
+            onClick={() => { void onLoadOlderHistory?.(); }}
+          >
+            {loadingOlderHistory ? "正在加载更早记录…" : "加载更早的会话记录"}
+          </button>
+        </div>
+      )}
+
+      {orderedMessages.map((message) => {
         if (message.role === "user") {
           return (
-            <div className="user-message-row" key={message.id}>
+            <div
+              className="user-message-row"
+              data-testid="message-user"
+              data-message-id={message.id}
+              key={message.id}
+            >
               <div>
                 <span className="message-label">你</span>
                 <div className="user-message">{message.content}</div>
@@ -103,7 +207,9 @@ export function MessageHistory({
           );
         }
 
-        const isLatest = message.id === lastAssistantId && latestRun !== null;
+        const isLatest = latestRun !== null
+          ? message.requestId != null && message.requestId === latestRun.task.requestId
+          : message.id === lastAssistantId;
         const historicalRun = reconstructHistoricalRun(message, tasks);
         const displayRun = isLatest && latestRun ? latestRun : historicalRun;
         const persistedCitations = extractMessageCitations(message);
@@ -111,7 +217,12 @@ export function MessageHistory({
         const citations = liveCitations.length > 0 ? liveCitations : persistedCitations;
 
         return (
-          <article className="agent-result" key={message.id}>
+          <article
+            className="agent-result"
+            data-testid="message-assistant"
+            data-message-id={message.id}
+            key={message.id}
+          >
             <header>
               <div>
                 <span className="result-mark">AM</span>
@@ -135,7 +246,10 @@ export function MessageHistory({
       })}
 
       {pendingPrompt && !messages.some((message) => message.role === "user" && message.content === pendingPrompt) && (
-        <div className="user-message-row optimistic-message">
+        <div
+          className="user-message-row optimistic-message"
+          data-testid="message-user-optimistic"
+        >
           <div>
             <span className="message-label">你</span>
             <div className="user-message">{pendingPrompt}</div>

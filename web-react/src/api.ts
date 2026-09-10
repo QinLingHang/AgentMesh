@@ -2,6 +2,8 @@ import type {
   Agent,
   Conversation,
   ConversationAttachment,
+  CostSummary,
+  RunCostRecord,
   DeliveryMode,
   ExecutionMode,
   KnowledgeBase,
@@ -12,13 +14,23 @@ import type {
   MemoryCategory,
   MemorySourceType,
   Message,
+  MessagePage,
   Planner,
   PluginInfo,
   Project,
   ProjectRuntimeConfig,
   RunResult,
   RuntimeReliabilitySnapshot,
+  RuntimeTopologySnapshot,
   Scheduler,
+  ServiceAccount,
+  ServiceAccountCredential,
+  EcosystemOverview,
+  EcosystemPackage,
+  EcosystemPackageBundle,
+  EcosystemPackageDetail,
+  EcosystemPackageManifest,
+  ProjectPackageInstallation,
   SynthesisMode,
   Task,
   Tool,
@@ -201,8 +213,17 @@ export function friendlyApiError(
   fallback = "操作失败，请稍后重试。",
 ) {
   if (error instanceof ApiError) {
-    if (error.message.trim() === "model provider not configured") {
-      return "请先在模型设置中配置你自己的 API Key。";
+    const normalizedMessage = error.message.trim();
+
+    if (
+      error.code === 50210 ||
+      /runtime returned\s+\d+|internal server error/i.test(normalizedMessage)
+    ) {
+      return "Agent Runtime 执行失败，请稍后重试；如果持续失败，请查看运行详情或服务日志。";
+    }
+
+    if (normalizedMessage === "model provider not configured") {
+      return "请先在模型设置中启用至少一个可用模型服务。";
     }
 
     if (error.status === 401) {
@@ -219,7 +240,10 @@ export function friendlyApiError(
 
     if (error.status === 409) {
       if (error.code === 40920) {
-        return "请先在模型设置中配置你自己的 API Key。";
+        return "请先在模型设置中启用至少一个可用模型服务。";
+      }
+      if (error.code === 40921) {
+        return "请至少将一个已启用的个人模型服务加入自动路由，或在工作台手动指定模型。";
       }
       if (error.code === 40930) {
         return "当前项目已经属于另一个团队。一个项目同时只能属于一个团队；如需更换团队，请先完成项目迁移。";
@@ -562,6 +586,23 @@ export const listMessages = (
   request<Message[]>(
     `/api/conversations/${id}/messages`,
   );
+
+export const listMessagePage = (
+  id: number,
+  options: {
+    beforeId?: number | null;
+    limit?: number;
+  } = {},
+) => {
+  const params = new URLSearchParams();
+  params.set("limit", String(options.limit ?? 50));
+  if (options.beforeId != null) {
+    params.set("beforeId", String(options.beforeId));
+  }
+  return request<MessagePage>(
+    `/api/conversations/${id}/messages/page?${params.toString()}`,
+  );
+};
 
 
 // =========================================================
@@ -1006,6 +1047,11 @@ export const getRuntimeReliability = () =>
     "/api/runtime/reliability",
   );
 
+export const getRuntimeTopology = () =>
+  request<RuntimeTopologySnapshot>(
+    "/api/runtime/topology",
+  );
+
 // =========================================================
 // Conversation Attachments
 // Request-local files/images. These are not knowledge-base ingestion.
@@ -1108,11 +1154,15 @@ export type RunTaskRequest = {
 
   deliveryMode: DeliveryMode;
 
+  modelSelection?: import("./types").ModelSelection;
+
   maxLatencyMs: number;
 
   maxCost: number;
 
   minQuality: number;
+
+  retryOnWorkerLoss?: boolean;
 
   attachmentIds?: number[];
 };
@@ -1150,11 +1200,13 @@ export async function runTaskStream(
       planner: input.planner,
       executionMode: input.executionMode,
       synthesisMode: input.synthesisMode,
+      modelSelection: input.modelSelection ?? { mode: "auto" },
       attachmentIds: input.attachmentIds ?? [],
       constraints: {
         maxLatencyMs: input.maxLatencyMs,
         maxCost: input.maxCost,
         minQuality: input.minQuality,
+        retryOnWorkerLoss: input.retryOnWorkerLoss ?? false,
       },
     }),
   });
@@ -1195,7 +1247,7 @@ export async function runTaskStream(
         if (message === "model provider not configured") {
           throw new ApiError(message, 409, 40920);
         }
-        throw new ApiError(message, 422, null);
+        throw new ApiError(message, 502, 50210);
       }
       if (event.type === "result" && event.result) finalResult = event.result;
     }
@@ -1208,7 +1260,7 @@ export async function runTaskStream(
       if (event.type === "error") {
         const message = event.message || "任务执行失败";
         if (message === "model provider not configured") throw new ApiError(message, 409, 40920);
-        throw new ApiError(message, 422, null);
+        throw new ApiError(message, 502, 50210);
       }
     } catch (error) {
       if (error instanceof ApiError) throw error;
@@ -1247,6 +1299,9 @@ export const runTask = (
         synthesisMode:
           input.synthesisMode,
 
+        modelSelection:
+          input.modelSelection ?? { mode: "auto" },
+
         attachmentIds:
           input.attachmentIds ?? [],
 
@@ -1259,6 +1314,9 @@ export const runTask = (
 
           minQuality:
             input.minQuality,
+
+          retryOnWorkerLoss:
+            input.retryOnWorkerLoss ?? false,
         },
       }),
     },
@@ -1343,6 +1401,26 @@ export const seedDemoTools = () =>
     },
   );
 
+export const seedDesktopTools = () =>
+  request<Tool[]>(
+    "/api/tools/seed-desktop",
+    {
+      method: "POST",
+    },
+  );
+
+export const updateTool = (
+  id: number,
+  tool: Partial<Tool>,
+) =>
+  request<Tool>(
+    `/api/tools/${id}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(tool),
+    },
+  );
+
 export const deleteTool = (
   id: number,
 ) =>
@@ -1412,6 +1490,28 @@ export const discoverMCPTools =
 // =========================================================
 // Personal model provider / BYOK
 // =========================================================
+export async function listUserModelServices() {
+  return request<import("./types").UserModelService[]>("/api/me/model-services");
+}
+
+export async function createUserModelService(input: import("./types").UserModelServiceInput) {
+  return request<import("./types").UserModelService>("/api/me/model-services", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateUserModelService(id: number, input: import("./types").UserModelServiceInput) {
+  return request<import("./types").UserModelService>(`/api/me/model-services/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function deleteUserModelService(id: number) {
+  return request<void>(`/api/me/model-services/${id}`, { method: "DELETE" });
+}
+
 export async function getUserModelProvider() {
   return request<import("./types").UserModelProvider | null>("/api/me/model-provider");
 }
@@ -1432,6 +1532,36 @@ export async function deleteUserModelProvider() {
 // =========================================================
 export async function getProjectGovernance(projectId: number) {
   return request<import("./types").GovernanceOverview>(`/api/projects/${projectId}/governance`);
+}
+
+export type CostSummaryQuery = {
+  from?: string;
+  to?: string;
+  provider?: string;
+  model?: string;
+};
+
+function costSummaryParams(query?: CostSummaryQuery) {
+  const params = new URLSearchParams();
+  if (query?.from) params.set("from", query.from);
+  if (query?.to) params.set("to", query.to);
+  if (query?.provider) params.set("provider", query.provider);
+  if (query?.model) params.set("model", query.model);
+  return params.toString();
+}
+
+export async function getUserCostSummary(query?: CostSummaryQuery) {
+  const params = costSummaryParams(query);
+  return request<CostSummary>(`/api/costs/summary${params ? `?${params}` : ""}`);
+}
+
+export async function getProjectCostSummary(projectId: number, query?: CostSummaryQuery) {
+  const params = costSummaryParams(query);
+  return request<CostSummary>(`/api/projects/${projectId}/costs${params ? `?${params}` : ""}`);
+}
+
+export async function getRunCost(taskId: number) {
+  return request<RunCostRecord>(`/api/tasks/${taskId}/cost`);
 }
 export async function addProjectMember(projectId: number, email: string, role: string) {
   return request<import("./types").ProjectMember>(`/api/projects/${projectId}/members`, {
@@ -1475,3 +1605,160 @@ export async function addOrganizationMember(organizationId: number, email: strin
 export async function bindOrganizationProject(organizationId: number, projectId: number) {
   return request<void>(`/api/organizations/${organizationId}/projects/${projectId}`, { method: "PUT" });
 }
+
+
+// =========================================================
+// V4 Platform Ecosystem
+// =========================================================
+
+export const getEcosystemOverview = () =>
+  request<EcosystemOverview>(
+    "/api/ecosystem/overview",
+  );
+
+export const searchEcosystemPackages = (
+  query = "",
+  kind = "",
+) => {
+  const params = new URLSearchParams();
+  if (query.trim()) params.set("q", query.trim());
+  if (kind.trim()) params.set("kind", kind.trim());
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  return request<EcosystemPackage[]>(`/api/ecosystem/marketplace${suffix}`);
+};
+
+export const getEcosystemPackage = (slug: string) =>
+  request<EcosystemPackageDetail>(
+    `/api/ecosystem/packages/${encodeURIComponent(slug)}`,
+  );
+
+export const createEcosystemPackage = (input: {
+  slug: string;
+  name: string;
+  kind: "AGENT" | "MCP" | "PLUGIN";
+  summary: string;
+  description: string;
+  visibility: "PUBLIC" | "PRIVATE";
+  version: string;
+  manifest: EcosystemPackageManifest;
+  publish: boolean;
+}) =>
+  request<EcosystemPackageDetail>(
+    "/api/ecosystem/packages",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
+
+export const validateEcosystemPackage = (
+  kind: string,
+  manifest: EcosystemPackageManifest,
+) =>
+  request<{
+    valid: boolean;
+    kind: string;
+    schemaVersion: string;
+    permissions: string[];
+    checksum: string;
+  }>(
+    "/api/ecosystem/packages/validate",
+    {
+      method: "POST",
+      body: JSON.stringify({ kind, manifest }),
+    },
+  );
+
+export const exportEcosystemPackage = (
+  slug: string,
+  version = "",
+) => {
+  const suffix = version ? `?version=${encodeURIComponent(version)}` : "";
+  return request<EcosystemPackageBundle>(
+    `/api/ecosystem/packages/${encodeURIComponent(slug)}/export${suffix}`,
+  );
+};
+
+export const importEcosystemPackage = (
+  bundle: EcosystemPackageBundle,
+) =>
+  request<EcosystemPackageDetail>(
+    "/api/ecosystem/import",
+    {
+      method: "POST",
+      body: JSON.stringify(bundle),
+    },
+  );
+
+export const listProjectInstallations = (
+  projectId: number,
+) =>
+  request<ProjectPackageInstallation[]>(
+    `/api/projects/${projectId}/ecosystem/installations`,
+  );
+
+export const installEcosystemPackage = (
+  projectId: number,
+  slug: string,
+  version = "",
+  config: Record<string, unknown> = {},
+) =>
+  request<ProjectPackageInstallation>(
+    `/api/projects/${projectId}/ecosystem/installations`,
+    {
+      method: "POST",
+      body: JSON.stringify({ slug, version, config }),
+    },
+  );
+
+export const setProjectInstallationEnabled = (
+  projectId: number,
+  installationId: number,
+  enabled: boolean,
+) =>
+  request<ProjectPackageInstallation>(
+    `/api/projects/${projectId}/ecosystem/installations/${installationId}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ enabled }),
+    },
+  );
+
+export const deleteProjectInstallation = (
+  projectId: number,
+  installationId: number,
+) =>
+  request<void>(
+    `/api/projects/${projectId}/ecosystem/installations/${installationId}`,
+    { method: "DELETE" },
+  );
+
+export const listServiceAccounts = (
+  projectId: number,
+) =>
+  request<ServiceAccount[]>(
+    `/api/projects/${projectId}/service-accounts`,
+  );
+
+export const createServiceAccount = (
+  projectId: number,
+  name: string,
+  scopes: string[],
+  expiresAt?: string | null,
+) =>
+  request<ServiceAccountCredential>(
+    `/api/projects/${projectId}/service-accounts`,
+    {
+      method: "POST",
+      body: JSON.stringify({ name, scopes, expiresAt: expiresAt || null }),
+    },
+  );
+
+export const revokeServiceAccount = (
+  projectId: number,
+  serviceAccountId: number,
+) =>
+  request<void>(
+    `/api/projects/${projectId}/service-accounts/${serviceAccountId}`,
+    { method: "DELETE" },
+  );

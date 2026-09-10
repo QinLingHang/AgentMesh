@@ -17,11 +17,13 @@ import (
 // and a Python worker. The callback is authenticated with the same internal
 // token; browsers never see this object.
 type DurableExecutionEnvelope struct {
-	JobID       int64          `json:"jobId"`
-	ExecutionID string         `json:"executionId"`
-	LeaseToken  string         `json:"leaseToken"`
-	CallbackURL string         `json:"callbackUrl"`
-	Request     ExecuteRequest `json:"request"`
+	JobID           int64          `json:"jobId"`
+	ExecutionID     string         `json:"executionId"`
+	LeaseToken      string         `json:"leaseToken"`
+	FenceEpoch      int64          `json:"fenceEpoch"`
+	DispatcherEpoch int64          `json:"dispatcherEpoch"`
+	CallbackURL     string         `json:"callbackUrl"`
+	Request         ExecuteRequest `json:"request"`
 }
 
 type DurableExecutionAccepted struct {

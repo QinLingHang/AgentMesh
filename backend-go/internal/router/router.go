@@ -41,6 +41,10 @@ type Dependencies struct {
 
 	GovernanceHandler *handler.GovernanceHandler
 
+	EcosystemHandler *handler.EcosystemHandler
+
+	PublicAPIHandler *handler.PublicAPIHandler
+
 	JWT *security.JWTManager
 
 	DB *sql.DB
@@ -106,8 +110,22 @@ func New(
 		"/users/:userId/memories/:id",
 		deps.MemoryHandler.InternalDelete,
 	)
+	internal.GET(
+		"/users/:userId/conversations/:conversationId/memory-capsules",
+		deps.ConversationHandler.InternalMemoryCapsules,
+	)
+	internal.POST(
+		"/users/:userId/conversations/:conversationId/memory-capsules",
+		deps.ConversationHandler.InternalUpsertMemoryCapsule,
+	)
+	internal.GET(
+		"/users/:userId/conversations/:conversationId/memory-compaction-window",
+		deps.ConversationHandler.InternalCompactionWindow,
+	)
 
 	registerInternalDurableRuntimeRoutes(internal, deps)
+
+	registerPublicAPIRoutes(r, deps)
 
 	api := r.Group(
 		"/api",
@@ -191,6 +209,8 @@ func New(
 	registerDurableRuntimeRoutes(protected, deps)
 
 	registerGovernanceRoutes(protected, deps)
+
+	registerEcosystemRoutes(protected, deps)
 
 	// Task history deletion is not rate-limited as task execution.
 	// It still passes JWT tenant authentication.

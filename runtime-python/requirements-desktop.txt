@@ -1,0 +1,7 @@
+# Optional Windows dependencies for AgentMesh Runtime embedded Local Computer tools.
+# Install once into the same Python interpreter used to run runtime-python.
+psutil>=6,<8
+Pillow>=10,<12
+PyAutoGUI>=0.9.54,<1
+pywinauto>=0.6.9,<1; platform_system == "Windows"
+pywin32>=308; platform_system == "Windows"

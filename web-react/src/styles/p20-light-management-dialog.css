@@ -1,0 +1,39 @@
+/*
+ * P20 management-dialog light-surface guard.
+ *
+ * Legacy theme layers can still apply high-specificity / !important dark
+ * form-control rules. React inline styles cannot override an author
+ * !important rule, so this narrow override is deliberately imported after
+ * all legacy theme layers.
+ *
+ * Scope is limited to management-dialog editable controls. It does not alter
+ * global inputs, auth screens, run details, or unrelated surfaces.
+ */
+.workspace-management-dialog .field input:not([type="checkbox"]):not([type="radio"]):not([type="file"]),
+.workspace-management-dialog .field textarea,
+.workspace-management-dialog .field select {
+  background: #ffffff !important;
+  background-color: #ffffff !important;
+  color: #24312e !important;
+  border-color: #d6e0dc !important;
+  box-shadow: none !important;
+  caret-color: #3f776b !important;
+  color-scheme: light !important;
+  -webkit-text-fill-color: #24312e !important;
+}
+
+.workspace-management-dialog .field input:not([type="checkbox"]):not([type="radio"]):not([type="file"])::placeholder,
+.workspace-management-dialog .field textarea::placeholder {
+  color: #84918d !important;
+  -webkit-text-fill-color: #84918d !important;
+  opacity: 1;
+}
+
+.workspace-management-dialog .field input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):disabled,
+.workspace-management-dialog .field textarea:disabled,
+.workspace-management-dialog .field select:disabled {
+  background: #f4f7f6 !important;
+  background-color: #f4f7f6 !important;
+  color: #6f7c78 !important;
+  -webkit-text-fill-color: #6f7c78 !important;
+}

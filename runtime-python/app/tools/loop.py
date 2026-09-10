@@ -27,6 +27,12 @@ from app.tools.approval import (
 from app.tools.registry import (
     ToolRegistry,
 )
+from app.tools.desktop import (
+    desktop_screenshot_attachment,
+    desktop_trace_arguments,
+    desktop_trace_result,
+    is_desktop_tool_name,
+)
 
 
 SENSITIVE = (
@@ -38,6 +44,7 @@ SENSITIVE = (
     "secret",
     "credential",
     "otp",
+    "base64",
 )
 
 
@@ -116,21 +123,28 @@ class ToolLoopRunner:
         ) = None,
         max_retries: int = 1,
         retry_backoff_seconds: float = 0.1,
+        vision_model: str | None = None,
+        desktop_max_iterations: int | None = None,
     ):
         self.gateway = gateway
 
         self.model = model
+        self.vision_model = str(vision_model or "").strip() or None
 
         self.registry = (
             registry
         )
 
-        self.max_iterations = (
-            max(
-                1,
-                max_iterations,
+        requested_iterations = max(1, max_iterations)
+        if (
+            desktop_max_iterations is not None
+            and any(is_desktop_tool_name(tool.name) for tool in registry.list())
+        ):
+            requested_iterations = max(
+                requested_iterations,
+                int(desktop_max_iterations),
             )
-        )
+        self.max_iterations = requested_iterations
 
         # =================================================
         # Approval Grant
@@ -187,8 +201,17 @@ class ToolLoopRunner:
                 role="system",
 
                 content=(
-                    "You are an AgentMesh "
-                    "Runtime execution model."
+                    "You are an AgentMesh Runtime execution model. "
+                    "The tools exposed in this turn were selected by AgentMesh "
+                    "because they are relevant to the user's goal. When an "
+                    "available tool can directly observe or perform what the "
+                    "user requested, use it instead of claiming that the "
+                    "capability is unavailable. High-risk tools should still "
+                    "be called when needed; Runtime will enforce approval. If a "
+                    "tool observation reports an error, do not repeat the same "
+                    "failed call unchanged; correct the arguments, choose another "
+                    "relevant capability, or explain the authorization/service "
+                    "boundary to the user."
                 ),
             ),
 
@@ -236,15 +259,23 @@ class ToolLoopRunner:
             if tool.enabled
         ]
 
+        pending_model_attachments = list(attachments or [])
+
         for iteration in range(
             self.max_iterations
         ):
+            request_attachments = pending_model_attachments
+            pending_model_attachments = []
+            request_model = self.model
+            if iteration > 0 and request_attachments and self.vision_model:
+                request_model = self.vision_model
+
             response = (
                 await self.gateway
                 .generate(
                     ModelRequest(
                         model=(
-                            self.model
+                            request_model
                         ),
 
                         messages=(
@@ -257,9 +288,7 @@ class ToolLoopRunner:
 
                         temperature=0.2,
                         attachments=(
-                            list(attachments or [])
-                            if iteration == 0
-                            else []
+                            request_attachments
                         ),
                     ),
 
@@ -344,7 +373,10 @@ class ToolLoopRunner:
 
                     arguments=(
                         safe(
-                            call.arguments
+                            desktop_trace_arguments(
+                                call.name,
+                                call.arguments,
+                            )
                         )
                     ),
                 )
@@ -567,7 +599,53 @@ class ToolLoopRunner:
                         },
                     )
 
+                    # Desktop Bridge failures are local environment/
+                    # authorization observations, not Runtime transport
+                    # failures. Feed them back to the model so it can explain
+                    # an unauthorized path, unavailable bridge, or invalid
+                    # desktop arguments without turning /execute into HTTP 500.
+                    # Preserve the existing failure-isolation/rescheduler
+                    # semantics for non-desktop Tool/MCP failures.
+                    if is_desktop_tool_name(call.name):
+                        messages.append(
+                            ModelMessage(
+                                role="tool",
+                                tool_call_id=call.id,
+                                content=json.dumps(
+                                    {
+                                        "ok": False,
+                                        "error": {
+                                            "type": exc.error_type.value,
+                                            "message": str(exc),
+                                        },
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                        )
+                        continue
+
                     raise exc
+
+                result_for_model = result
+                screenshot_attachment, screenshot_metadata = (
+                    desktop_screenshot_attachment(result)
+                    if call.name == "local.ui.screen.capture"
+                    else (None, result)
+                )
+                if screenshot_attachment is not None:
+                    result_for_model = screenshot_metadata
+                    if self.vision_model:
+                        pending_model_attachments = [screenshot_attachment]
+                    elif isinstance(result_for_model, dict):
+                        result_for_model = {
+                            **result_for_model,
+                            "visionAvailable": False,
+                            "reason": (
+                                "No explicit vision model is configured for the selected "
+                                "model service. Prefer Windows UI Automation tools instead."
+                            ),
+                        }
 
                 emit(
                     "Tool Completed",
@@ -582,7 +660,12 @@ class ToolLoopRunner:
                     ),
 
                     result=(
-                        safe(result)
+                        safe(
+                            desktop_trace_result(
+                                call.name,
+                                result_for_model,
+                            )
+                        )
                     ),
                 )
 
@@ -596,7 +679,7 @@ class ToolLoopRunner:
 
                         content=(
                             json.dumps(
-                                result,
+                                result_for_model,
                                 ensure_ascii=False,
                             )
                         ),

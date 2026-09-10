@@ -1,0 +1,537 @@
+/* AgentMesh V4 — Platform Ecosystem */
+
+.tab-ecosystem .app-main {
+  background: #f7f8f5 !important;
+}
+
+.ecosystem-page {
+  --eco-panel: #ffffff;
+  --eco-panel-soft: #f8faf8;
+  --eco-line: #dde3de;
+  --eco-line-strong: #cfd8d2;
+  --eco-text: #29312e;
+  --eco-text-2: #56615c;
+  --eco-muted: #7f8984;
+  --eco-accent: #5f8d7e;
+  --eco-accent-soft: #edf4f0;
+  --eco-purple-soft: #f2eff9;
+  --eco-blue-soft: #edf4fa;
+  color: var(--eco-text);
+}
+
+.ecosystem-head {
+  align-items: flex-end;
+}
+
+.ecosystem-project-select {
+  min-width: 240px;
+  display: grid;
+  gap: 7px;
+}
+
+.ecosystem-project-select > span,
+.ecosystem-form-card label > span {
+  color: var(--eco-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+
+.ecosystem-project-select select,
+.ecosystem-toolbar select,
+.ecosystem-form-card input,
+.ecosystem-form-card select,
+.ecosystem-form-card textarea,
+.ecosystem-manifest-card textarea,
+.ecosystem-search input {
+  border: 1px solid var(--eco-line);
+  border-radius: 10px;
+  background: #fff !important;
+  color: var(--eco-text) !important;
+}
+
+.ecosystem-project-select select {
+  min-height: 42px;
+  padding: 0 12px;
+}
+
+.ecosystem-notice {
+  margin: -8px 0 18px;
+  padding: 11px 14px;
+  border-radius: 10px;
+  font-size: 12px;
+  white-space: pre-line;
+}
+
+.ecosystem-notice.success {
+  color: #3f705f;
+  border: 1px solid #d3e7dc;
+  background: #eef7f2;
+}
+
+.ecosystem-notice.error {
+  color: #b45d62;
+  border: 1px solid #f1d3d3;
+  background: #fff3f3;
+}
+
+.ecosystem-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.ecosystem-metrics > div {
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding: 16px 18px;
+  border: 1px solid var(--eco-line);
+  border-radius: 14px;
+  background: var(--eco-panel);
+}
+
+.ecosystem-metrics span,
+.ecosystem-metrics small,
+.ecosystem-install-resource span,
+.ecosystem-account-row > div > span {
+  color: var(--eco-muted);
+  font-size: 11px;
+}
+
+.ecosystem-metrics strong {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.ecosystem-tabs {
+  display: flex;
+  gap: 7px;
+  padding: 6px;
+  margin-bottom: 18px;
+  border: 1px solid var(--eco-line);
+  border-radius: 13px;
+  background: var(--eco-panel);
+}
+
+.ecosystem-tabs button {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--eco-text-2);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.ecosystem-tabs button:hover,
+.ecosystem-tabs button.active {
+  color: #456e61;
+  border-color: #d7e5dd;
+  background: var(--eco-accent-soft);
+}
+
+.ecosystem-section {
+  min-height: 420px;
+  padding: 20px;
+  border: 1px solid var(--eco-line);
+  border-radius: 16px;
+  background: var(--eco-panel);
+}
+
+.ecosystem-section-head,
+.ecosystem-toolbar,
+.ecosystem-package-top,
+.ecosystem-card-actions,
+.ecosystem-row-actions,
+.ecosystem-manifest-head,
+.ecosystem-sdk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ecosystem-section-head {
+  margin-bottom: 18px;
+}
+
+.ecosystem-section-head h2,
+.ecosystem-form-card h3,
+.ecosystem-sdk-card h3 {
+  margin: 0;
+}
+
+.ecosystem-section-head p {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
+.ecosystem-toolbar {
+  justify-content: flex-start;
+  margin-bottom: 18px;
+}
+
+.ecosystem-search {
+  min-width: min(480px, 55vw);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--eco-line);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.ecosystem-search input {
+  flex: 1;
+  min-height: 40px;
+  padding: 0;
+  border: 0 !important;
+  outline: none;
+}
+
+.ecosystem-toolbar select {
+  min-height: 42px;
+  padding: 0 11px;
+}
+
+.ecosystem-package-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(250px, 1fr));
+  gap: 12px;
+}
+
+.ecosystem-package-card {
+  min-height: 238px;
+  display: flex;
+  flex-direction: column;
+  padding: 18px;
+  border: 1px solid var(--eco-line);
+  border-radius: 14px;
+  background: var(--eco-panel-soft);
+  transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease;
+}
+
+.ecosystem-package-card:hover {
+  transform: translateY(-1px);
+  border-color: var(--eco-line-strong);
+  box-shadow: 0 10px 24px rgba(55, 72, 64, .06);
+}
+
+.ecosystem-package-card h3 {
+  margin: 16px 0 7px;
+  font-size: 17px;
+}
+
+.ecosystem-package-card p {
+  flex: 1;
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.ecosystem-kind,
+.ecosystem-version {
+  display: inline-flex;
+  align-items: center;
+  min-height: 25px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.ecosystem-kind.kind-agent {
+  color: #4f6e61;
+  background: #eaf3ee;
+}
+
+.ecosystem-kind.kind-mcp {
+  color: #4d6780;
+  background: var(--eco-blue-soft);
+}
+
+.ecosystem-kind.kind-plugin {
+  color: #665b7d;
+  background: var(--eco-purple-soft);
+}
+
+.ecosystem-version {
+  color: var(--eco-muted);
+  background: #f0f2ef;
+}
+
+.ecosystem-package-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 15px 0 13px;
+  color: var(--eco-muted);
+  font-size: 10px;
+}
+
+.ecosystem-card-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.ecosystem-list {
+  display: grid;
+  gap: 9px;
+}
+
+.ecosystem-install-row,
+.ecosystem-account-row {
+  min-height: 72px;
+  display: grid;
+  align-items: center;
+  gap: 14px;
+  padding: 13px 15px;
+  border: 1px solid var(--eco-line);
+  border-radius: 12px;
+  background: var(--eco-panel-soft);
+}
+
+.ecosystem-install-row {
+  grid-template-columns: minmax(270px, 1.6fr) minmax(150px, .8fr) auto auto;
+}
+
+.ecosystem-account-row {
+  grid-template-columns: minmax(310px, 1.6fr) 70px 70px minmax(180px, 1fr) auto auto;
+}
+
+.ecosystem-install-main {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+}
+
+.ecosystem-install-main > div,
+.ecosystem-account-row > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.ecosystem-install-main small,
+.ecosystem-account-row small {
+  color: var(--eco-muted);
+  font-size: 10px;
+}
+
+.ecosystem-install-resource,
+.ecosystem-account-row > div:not(:first-child) {
+  display: grid;
+  gap: 4px;
+}
+
+.ecosystem-install-resource strong,
+.ecosystem-account-row > div:not(:first-child) strong {
+  color: var(--eco-text-2) !important;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.ecosystem-api-grid,
+.ecosystem-publisher-grid {
+  display: grid;
+  grid-template-columns: minmax(320px, .8fr) minmax(420px, 1.2fr);
+  gap: 13px;
+  margin-bottom: 16px;
+}
+
+.ecosystem-form-card,
+.ecosystem-sdk-card,
+.ecosystem-manifest-card {
+  padding: 18px;
+  border: 1px solid var(--eco-line);
+  border-radius: 14px;
+  background: var(--eco-panel-soft);
+}
+
+.ecosystem-form-card {
+  display: grid;
+  gap: 13px;
+}
+
+.ecosystem-form-card label {
+  display: grid;
+  gap: 6px;
+}
+
+.ecosystem-form-card input,
+.ecosystem-form-card select,
+.ecosystem-form-card textarea {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 11px;
+}
+
+.ecosystem-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 7px;
+  padding: 0;
+  border: 0;
+}
+
+.ecosystem-scope-grid legend {
+  margin-bottom: 6px;
+  color: var(--eco-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ecosystem-scope-grid label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--eco-line);
+  border-radius: 9px;
+  background: #fff;
+}
+
+.ecosystem-scope-grid input {
+  width: auto;
+  min-height: 0;
+}
+
+.ecosystem-scope-grid label > span {
+  display: grid;
+  gap: 2px;
+}
+
+.ecosystem-scope-grid small {
+  color: var(--eco-muted);
+  font-size: 9px;
+}
+
+.ecosystem-sdk-card {
+  display: grid;
+  gap: 10px;
+}
+
+.ecosystem-sdk-card pre {
+  overflow: auto;
+  margin: 0;
+  padding: 13px;
+  border: 1px solid var(--eco-line);
+  border-radius: 10px;
+  background: #f1f3f0 !important;
+  color: #35423d !important;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.ecosystem-key-reveal {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 16px;
+  padding: 14px;
+  border: 1px solid #d8e5dc;
+  border-radius: 12px;
+  background: #eef7f2;
+}
+
+.ecosystem-key-reveal > div {
+  display: grid;
+  gap: 3px;
+}
+
+.ecosystem-key-reveal span {
+  color: #698076;
+  font-size: 11px;
+}
+
+.ecosystem-key-reveal code {
+  overflow-wrap: anywhere;
+  padding: 10px;
+  border: 1px dashed #bfd3c7;
+  border-radius: 8px;
+  background: #fff;
+  color: #31594b;
+  font-size: 11px;
+}
+
+.ecosystem-manifest-card {
+  display: grid;
+  grid-template-rows: auto minmax(340px, 1fr) auto;
+  gap: 10px;
+}
+
+.ecosystem-manifest-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.ecosystem-manifest-head small {
+  color: var(--eco-muted);
+  font-size: 10px;
+}
+
+.ecosystem-manifest-card textarea {
+  width: 100%;
+  min-height: 340px;
+  resize: vertical;
+  padding: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.ecosystem-import-action input {
+  display: none;
+}
+
+.ecosystem-empty {
+  min-height: 190px;
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px dashed var(--eco-line-strong);
+  border-radius: 13px;
+  background: var(--eco-panel-soft);
+  color: var(--eco-muted);
+}
+
+.ecosystem-empty strong {
+  color: var(--eco-text-2) !important;
+}
+
+.ecosystem-empty span {
+  font-size: 11px;
+}
+
+@media (max-width: 1080px) {
+  .ecosystem-metrics { grid-template-columns: repeat(3, 1fr); }
+  .ecosystem-package-grid { grid-template-columns: repeat(2, 1fr); }
+  .ecosystem-api-grid,
+  .ecosystem-publisher-grid { grid-template-columns: 1fr; }
+  .ecosystem-install-row,
+  .ecosystem-account-row { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 720px) {
+  .ecosystem-head { align-items: stretch; }
+  .ecosystem-project-select { min-width: 0; width: 100%; }
+  .ecosystem-metrics { grid-template-columns: repeat(2, 1fr); }
+  .ecosystem-tabs { overflow-x: auto; }
+  .ecosystem-tabs button { flex: 0 0 auto; }
+  .ecosystem-toolbar { align-items: stretch; flex-direction: column; }
+  .ecosystem-search { min-width: 0; width: 100%; }
+  .ecosystem-package-grid { grid-template-columns: 1fr; }
+  .ecosystem-scope-grid { grid-template-columns: 1fr; }
+  .ecosystem-install-row,
+  .ecosystem-account-row { grid-template-columns: 1fr; }
+}

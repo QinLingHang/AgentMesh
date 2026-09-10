@@ -26,6 +26,9 @@ import {
   Icon,
 } from "../../components/common/Icon";
 import {
+  lightDialogControlStyle,
+} from "../../components/common/lightDialogControlStyle";
+import {
   formatDate,
 } from "../../utils/format";
 
@@ -39,6 +42,10 @@ const ALLOWED_EXTENSIONS =
     "txt",
     "md",
     "markdown",
+    "png",
+    "jpg",
+    "jpeg",
+    "webp",
   ]);
 
 type KnowledgeTab =
@@ -99,6 +106,32 @@ function isPending(
     status !== "READY" &&
     status !== "ERROR"
   );
+}
+
+function visualStatusLabel(
+  status?: string,
+) {
+  switch (
+    String(status ?? "")
+      .trim()
+      .toLowerCase()
+  ) {
+    case "completed":
+      return "视觉完成";
+    case "partial":
+      return "视觉部分完成";
+    case "failed":
+      return "视觉降级";
+    case "disabled":
+      return "视觉未启用";
+    case "empty":
+      return "无视觉证据";
+    case "not_applicable":
+    case "":
+      return "";
+    default:
+      return `视觉${status}`;
+  }
 }
 
 function statusLabel(
@@ -173,7 +206,7 @@ function validateFile(
       ),
     )
   ) {
-    return "暂时只支持 PDF、DOCX、TXT、Markdown。";
+    return "暂时只支持 PDF、DOCX、TXT、Markdown、PNG、JPEG、WEBP。";
   }
 
   if (file.size <= 0) {
@@ -234,7 +267,7 @@ function friendlyError(
     if (
       error.status === 415
     ) {
-      return "暂时只支持 PDF、DOCX、TXT、Markdown。";
+      return "暂时只支持 PDF、DOCX、TXT、Markdown、PNG、JPEG、WEBP。";
     }
 
     if (
@@ -1658,6 +1691,20 @@ export function KnowledgeCenter({
                             </strong>
 
                             <small>.{file.extension}</small>
+
+                              <small className="knowledge-v2-evidence-summary">
+                                {`文本 ${file.textChunkCount ?? file.chunkCount ?? 0} 段`}
+                                {` · 图片 ${file.visualEvidenceCount ?? 0} 张`}
+                                {(file.pageCount ?? 0) > 0
+                                  ? ` · ${file.pageCount} 页`
+                                  : ""}
+                                {visualStatusLabel(file.visualStatus)
+                                  ? ` · ${visualStatusLabel(file.visualStatus)}`
+                                  : ""}
+                                {file.visualErrorMessage
+                                  ? " · 图片内容暂未解析"
+                                  : ""}
+                              </small>
                           </div>
                         </div>
                       </td>
@@ -1892,7 +1939,7 @@ export function KnowledgeCenter({
               className="project-file-input"
               type="file"
               multiple
-              accept=".pdf,.docx,.txt,.md,.markdown"
+              accept=".pdf,.docx,.txt,.md,.markdown,.png,.jpg,.jpeg,.webp"
               disabled={uploading}
               onChange={(event) =>
                 chooseFiles(
@@ -2014,6 +2061,7 @@ export function KnowledgeCenter({
 
               <input
                 autoFocus
+                style={lightDialogControlStyle}
                 value={baseEditor.name}
                 maxLength={80}
                 disabled={baseBusy}
@@ -2034,6 +2082,7 @@ export function KnowledgeCenter({
               </span>
 
               <textarea
+                style={lightDialogControlStyle}
                 value={
                   baseEditor.description
                 }
@@ -2103,6 +2152,7 @@ export function KnowledgeCenter({
 
               <input
                 autoFocus
+                style={lightDialogControlStyle}
                 value={projectName}
                 maxLength={80}
                 disabled={projectBusy}
@@ -2121,6 +2171,7 @@ export function KnowledgeCenter({
               </span>
 
               <textarea
+                style={lightDialogControlStyle}
                 value={projectDescription}
                 maxLength={240}
                 rows={3}

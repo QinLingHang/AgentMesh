@@ -60,6 +60,15 @@ function normalizeCitation(
       ? value.end
       : null;
 
+  const pageNumber =
+    typeof value.pageNumber === "number" ? value.pageNumber : null;
+  const assetId =
+    typeof value.assetId === "string" ? value.assetId : null;
+  const modality =
+    typeof value.modality === "string" ? value.modality : null;
+  const visualType =
+    typeof value.visualType === "string" ? value.visualType : null;
+
   return {
     citationId,
     label,
@@ -70,6 +79,10 @@ function normalizeCitation(
     chunkIndex,
     start,
     end,
+    pageNumber,
+    assetId,
+    modality,
+    visualType,
   };
 }
 
@@ -102,12 +115,14 @@ function citationMetaText(
     );
   }
 
-  if (
-    citation.chunkIndex !== null
-  ) {
-    parts.push(
-      `Chunk ${citation.chunkIndex}`,
-    );
+  if (citation.pageNumber !== null) {
+    parts.push(`Page ${citation.pageNumber}`);
+  }
+
+  if (citation.modality && citation.modality !== "text") {
+    parts.push(citation.visualType || citation.modality);
+  } else if (citation.chunkIndex !== null) {
+    parts.push(`Chunk ${citation.chunkIndex}`);
   }
 
   parts.push(

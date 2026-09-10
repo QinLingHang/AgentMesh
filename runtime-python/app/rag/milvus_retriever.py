@@ -351,6 +351,50 @@ class MilvusRetriever:
         )
 
     # =====================================================
+    # Deletion
+    # =====================================================
+
+    async def delete_documents(
+        self,
+        *,
+        filters: dict[str, Any],
+    ) -> int:
+        """Delete documents through the same schema-aware filter contract as retrieval.
+
+        Knowledge metadata lives partly in explicit Milvus columns (``user_id``)
+        and partly in the JSON ``metadata`` field. Keeping delete filter building in
+        the retriever prevents the ingestion/retrieval/delete paths from drifting.
+        """
+
+        milvus_filter = self._build_filter(filters)
+        if not milvus_filter:
+            raise ValueError("milvus delete requires at least one trusted filter")
+
+        await self.ensure_collection()
+        client = self._get_client()
+
+        def do_delete():
+            try:
+                return client.delete(
+                    collection_name=self.collection_name,
+                    filter=milvus_filter,
+                )
+            except TypeError:
+                # Compatibility with clients that accept collection_name
+                # positionally while still using the same filter expression.
+                return client.delete(
+                    self.collection_name,
+                    filter=milvus_filter,
+                )
+
+        result = await asyncio.to_thread(do_delete)
+        if isinstance(result, dict):
+            return int(result.get("delete_count", 0) or 0)
+
+        delete_count = getattr(result, "delete_count", 0)
+        return int(delete_count or 0)
+
+    # =====================================================
     # Retrieval
     # =====================================================
 
@@ -557,6 +601,52 @@ class MilvusRetriever:
                 (
                     "user_id == "
                     f"{user_id}"
+                )
+            )
+
+        # -------------------------------------------------
+        # KnowledgeBase isolation
+        #
+        # KnowledgeBase id lives inside the JSON metadata field. ScopedRetriever
+        # supplies this trusted integer after the Control Plane resolves the
+        # request's allowed knowledge bases.
+        # -------------------------------------------------
+
+        if (
+            "knowledgeBaseId"
+            in filters
+        ):
+            knowledge_base_id = int(
+                filters[
+                    "knowledgeBaseId"
+                ]
+            )
+
+            expressions.append(
+                (
+                    'metadata["knowledgeBaseId"] == '
+                    f"{knowledge_base_id}"
+                )
+            )
+
+        # -------------------------------------------------
+        # KnowledgeFile isolation
+        # -------------------------------------------------
+
+        if (
+            "knowledgeFileId"
+            in filters
+        ):
+            knowledge_file_id = int(
+                filters[
+                    "knowledgeFileId"
+                ]
+            )
+
+            expressions.append(
+                (
+                    'metadata["knowledgeFileId"] == '
+                    f"{knowledge_file_id}"
                 )
             )
 

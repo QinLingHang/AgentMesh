@@ -394,6 +394,11 @@ func scanKnowledgeFile(
 		&file.StorageKey,
 		&file.Status,
 		&file.ChunkCount,
+		&file.TextChunkCount,
+		&file.VisualEvidenceCount,
+		&file.PageCount,
+		&file.VisualStatus,
+		&file.VisualErrorMessage,
 		&file.ErrorMessage,
 		&file.IndexedAt,
 		&file.CreatedAt,
@@ -427,6 +432,11 @@ const knowledgeFileSelect = `
 		f.storage_key,
 		f.status,
 		f.chunk_count,
+		f.text_chunk_count,
+		f.visual_evidence_count,
+		f.page_count,
+		f.visual_status,
+		f.visual_error_message,
 		f.error_message,
 		f.indexed_at,
 		f.created_at,
@@ -757,6 +767,11 @@ func (r *MySQL) PrepareKnowledgeFileReindex(
 		SET
 			status = 'UPLOADED',
 			chunk_count = 0,
+			text_chunk_count = 0,
+			visual_evidence_count = 0,
+			page_count = 0,
+			visual_status = 'not_applicable',
+			visual_error_message = NULL,
 			error_message = NULL,
 			indexed_at = NULL,
 			updated_at = CURRENT_TIMESTAMP(6)
@@ -790,6 +805,11 @@ func (r *MySQL) MarkKnowledgeFileIndexing(
 		SET
 			status = 'INDEXING',
 			chunk_count = 0,
+			text_chunk_count = 0,
+			visual_evidence_count = 0,
+			page_count = 0,
+			visual_status = 'not_applicable',
+			visual_error_message = NULL,
 			error_message = NULL,
 			indexed_at = NULL,
 			updated_at = CURRENT_TIMESTAMP(6)
@@ -807,8 +827,16 @@ func (r *MySQL) CompleteKnowledgeFileIndex(
 	ctx context.Context,
 	uid int64,
 	fileID int64,
-	chunkCount int,
+	result model.KnowledgeIndexResult,
 ) error {
+	visualStatus := result.VisualStatus
+	if visualStatus == "" {
+		visualStatus = "not_applicable"
+	}
+	var visualError any
+	if result.VisualError != "" {
+		visualError = result.VisualError
+	}
 	_, err := r.db.ExecContext(
 		ctx,
 		`
@@ -816,13 +844,23 @@ func (r *MySQL) CompleteKnowledgeFileIndex(
 		SET
 			status = 'READY',
 			chunk_count = ?,
+			text_chunk_count = ?,
+			visual_evidence_count = ?,
+			page_count = ?,
+			visual_status = ?,
+			visual_error_message = ?,
 			error_message = NULL,
 			indexed_at = CURRENT_TIMESTAMP(6),
 			updated_at = CURRENT_TIMESTAMP(6)
 		WHERE id = ?
 		  AND user_id = ?
 		`,
-		chunkCount,
+		result.ChunkCount,
+		result.TextChunkCount,
+		result.VisualEvidenceCount,
+		result.PageCount,
+		visualStatus,
+		visualError,
 		fileID,
 		uid,
 	)
@@ -847,6 +885,11 @@ func (r *MySQL) FailKnowledgeFileIndex(
 		SET
 			status = 'ERROR',
 			chunk_count = 0,
+			text_chunk_count = 0,
+			visual_evidence_count = 0,
+			page_count = 0,
+			visual_status = 'failed',
+			visual_error_message = NULL,
 			error_message = ?,
 			indexed_at = NULL,
 			updated_at = CURRENT_TIMESTAMP(6)

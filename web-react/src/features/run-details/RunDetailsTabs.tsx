@@ -4,15 +4,27 @@ import type { RunResult } from "../../types";
 
 export type RunDetailTab =
   | "overview"
+  | "capability"
   | "rag"
   | "agent-dag"
   | "memory"
   | "tool-mcp"
+  | "desktop"
   | "eval"
   | "routing"
   | "reliability"
   | "trace"
   | "feedback";
+
+function capabilityEventCount(
+  result: RunResult,
+) {
+  return result.trace.filter(
+    (event) =>
+      event.kind === "capability_discovery",
+  ).length;
+}
+
 
 function ragEventCount(
   result: RunResult,
@@ -36,6 +48,21 @@ function toolMcpEventCount(
       event.kind === "mcp" ||
       event.kind === "approval",
   ).length;
+}
+
+
+function desktopEventCount(
+  result: RunResult,
+) {
+  return result.trace.filter((event) => {
+    if (event.kind !== "tool") return false;
+    try {
+      const detail = JSON.parse(event.detail) as { tool?: unknown };
+      return typeof detail.tool === "string" && detail.tool.startsWith("local.");
+    } catch {
+      return false;
+    }
+  }).length;
 }
 
 
@@ -92,6 +119,11 @@ export function RunDetailsTabs({
       label: "概览",
     },
     {
+      id: "capability",
+      label: "能力发现",
+      count: capabilityEventCount(result),
+    },
+    {
       id: "rag",
       label: "知识检索",
       count: ragEventCount(
@@ -118,6 +150,11 @@ export function RunDetailsTabs({
       count: toolMcpEventCount(
         result,
       ),
+    },
+    {
+      id: "desktop",
+      label: "本机执行",
+      count: desktopEventCount(result),
     },
     {
       id: "eval",
@@ -158,6 +195,7 @@ export function RunDetailsTabs({
         (tab) => (
           <button
             key={tab.id}
+            data-testid={`run-details-tab-${tab.id}`}
             className={
               active === tab.id
                 ? "active"

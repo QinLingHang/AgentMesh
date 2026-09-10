@@ -33,3 +33,35 @@ test("Run Details Tool & MCP observability includes approval events", () => {
   assert.match(panel, /event\.kind === "approval"/);
   assert.match(panel, /human approval/);
 });
+
+test("Workspace treats persisted task state as authoritative over stale approval snapshots", () => {
+  const workspace = read("src/features/workspace/Workspace.tsx");
+  assert.match(workspace, /persistedLatestRunTask/);
+  assert.match(workspace, /persistedWaitingTask \?\?\s*latestWaitingTask/s);
+  assert.match(workspace, /setLatestRunState\(null\)/);
+  assert.match(workspace, /已刷新最新任务状态/);
+});
+
+
+test("Workspace binds approval UI to the newest task and newest turn in the conversation", () => {
+  const workspace = read("src/features/workspace/Workspace.tsx");
+
+  assert.match(workspace, /function latestTaskForConversation/);
+  assert.match(workspace, /latestConversationTask\.id === latestRun\.task\.id/);
+  assert.match(workspace, /submissionEpochByConversationRef/);
+  assert.match(workspace, /isLatestSubmissionOwner/);
+  assert.match(workspace, /approvalTask\.conversationId !== approvalConversationId/);
+});
+
+test("Older waiting approvals are not rendered after a newer conversation task exists", () => {
+  const workspace = read("src/features/workspace/Workspace.tsx");
+
+  assert.match(
+    workspace,
+    /const persistedWaitingTask =\s*latestConversationTask &&\s*isWaitingStatus\(\s*latestConversationTask\.status/s,
+  );
+  assert.doesNotMatch(
+    workspace,
+    /tasks\.find\(\s*\(task\) =>\s*task\.conversationId ===\s*current\.id &&\s*isWaitingStatus/s,
+  );
+});

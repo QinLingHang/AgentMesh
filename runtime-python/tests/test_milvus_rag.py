@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from app.knowledge.indexer import KnowledgeIndexer
 from app.rag import (
     HashEmbeddingProvider,
     MilvusRetriever,
@@ -137,6 +138,8 @@ class FakeMilvusClient:
 
         self.search_kwargs = None
 
+        self.delete_kwargs = None
+
     def has_collection(
         self,
         *,
@@ -196,6 +199,18 @@ class FakeMilvusClient:
                 }
             ]
         ]
+
+    def delete(
+        self,
+        *,
+        collection_name,
+        filter,
+    ):
+        self.delete_kwargs = {
+            "collection_name": collection_name,
+            "filter": filter,
+        }
+        return {"delete_count": 1}
 
     def close(
         self,
@@ -356,3 +371,108 @@ async def test_milvus_retriever_search_uses_user_filter():
         ]
         == "user_id == 1"
     )
+
+
+def test_milvus_filter_combines_user_knowledge_base_and_escaped_source():
+    expression = MilvusRetriever._build_filter(
+        {
+            "userId": 7,
+            "knowledgeBaseId": 3,
+            "source": 'folder\\\"quoted".md',
+        }
+    )
+
+    assert "user_id == 7" in expression
+    assert 'metadata["knowledgeBaseId"] == 3' in expression
+    assert 'source == "folder' in expression
+    assert '\\\\' in expression
+    assert '\\\"' in expression
+
+
+def test_milvus_filter_rejects_non_integer_knowledge_base_id():
+    with pytest.raises((TypeError, ValueError)):
+        MilvusRetriever._build_filter(
+            {
+                "userId": 7,
+                "knowledgeBaseId": "not-an-id",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_milvus_retriever_delete_uses_schema_aware_knowledge_filter():
+    embedding = HashEmbeddingProvider(dimension=64)
+    client = FakeMilvusClient()
+    retriever = MilvusRetriever(
+        uri="http://unused",
+        collection_name="test_collection",
+        embedding=embedding,
+        client=client,
+    )
+
+    count = await retriever.delete_documents(
+        filters={
+            "userId": 2,
+            "knowledgeBaseId": 4,
+            "knowledgeFileId": 1,
+        }
+    )
+
+    assert count == 1
+    assert client.delete_kwargs == {
+        "collection_name": "test_collection",
+        "filter": (
+            'user_id == 2 and '
+            'metadata["knowledgeBaseId"] == 4 and '
+            'metadata["knowledgeFileId"] == 1'
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_milvus_retriever_delete_propagates_filter_or_provider_errors():
+    class FailingMilvusClient(FakeMilvusClient):
+        def delete(self, *, collection_name, filter):
+            raise RuntimeError("field mismatch from milvus")
+
+    retriever = MilvusRetriever(
+        uri="http://unused",
+        collection_name="test_collection",
+        embedding=HashEmbeddingProvider(dimension=64),
+        client=FailingMilvusClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="field mismatch from milvus"):
+        await retriever.delete_documents(
+            filters={
+                "userId": 2,
+                "knowledgeBaseId": 4,
+                "knowledgeFileId": 1,
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_knowledge_indexer_delegates_delete_to_backend_filter_contract():
+    class Backend:
+        def __init__(self):
+            self.filters = None
+
+        async def delete_documents(self, *, filters):
+            self.filters = dict(filters)
+            return 1
+
+    backend = Backend()
+    indexer = KnowledgeIndexer(backend)
+
+    await indexer.delete(
+        user_id=2,
+        knowledge_base_id=4,
+        knowledge_file_id=1,
+    )
+
+    assert backend.filters == {
+        "userId": 2,
+        "knowledgeBaseId": 4,
+        "knowledgeFileId": 1,
+    }

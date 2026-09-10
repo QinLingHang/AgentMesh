@@ -23,6 +23,7 @@ import (
 var ErrForbidden = errors.New("forbidden")
 var ErrQuotaExceeded = errors.New("quota exceeded")
 var ErrModelProviderNotConfigured = errors.New("model provider not configured")
+var ErrModelAutoRouteNotConfigured = errors.New("model auto route not configured")
 var ErrProjectAlreadyBound = errors.New("project already bound to another organization")
 
 type governanceRepository interface {
@@ -44,6 +45,9 @@ type governanceRepository interface {
 	GetProjectModelProvider(context.Context, int64) (*model.ProjectModelProvider, error)
 	AppendAudit(context.Context, model.AuditEvent) error
 	ListAudit(context.Context, int64, int) ([]model.AuditEvent, error)
+	RecordRunCost(context.Context, model.RunCostRecord) error
+	RunCostByTask(context.Context, int64, int64) (*model.RunCostRecord, error)
+	CostSummary(context.Context, int64, *int64, model.CostQuery) (model.CostSummary, error)
 	CreateOrganization(context.Context, int64, string) (*model.Organization, error)
 	ListOrganizations(context.Context, int64) ([]model.Organization, error)
 	OrganizationRole(context.Context, int64, int64) (string, error)
@@ -53,6 +57,15 @@ type governanceRepository interface {
 	UserModelProviderCiphertext(context.Context, int64) ([]byte, []byte, error)
 	UpsertUserModelProvider(context.Context, model.UserModelProvider, []byte, []byte) (*model.UserModelProvider, error)
 	DeleteUserModelProvider(context.Context, int64) (bool, error)
+	ListUserModelServices(context.Context, int64) ([]model.UserModelService, error)
+	UserModelServiceByID(context.Context, int64, int64) (*model.UserModelService, error)
+	UserModelServiceCiphertext(context.Context, int64, int64) ([]byte, []byte, error)
+	CreateUserModelService(context.Context, model.UserModelService, []byte, []byte) (*model.UserModelService, error)
+	UpdateUserModelService(context.Context, model.UserModelService, []byte, []byte) (*model.UserModelService, error)
+	DeleteUserModelService(context.Context, int64, int64) (bool, error)
+	ClearUserModelDefault(context.Context, int64, int64) error
+	SetFirstUserModelServiceDefault(context.Context, int64) error
+	DeleteAllUserModelServices(context.Context, int64) (int64, error)
 }
 
 type GovernanceService struct {
@@ -390,6 +403,62 @@ func (s *GovernanceService) RecordUsage(ctx context.Context, projectID, tokens i
 	_ = s.repo.RecordProjectUsage(ctx, projectID, tokens, cost, toolActions)
 }
 
+func (s *GovernanceService) RecordRunCost(ctx context.Context, record model.RunCostRecord) {
+	if record.TaskID <= 0 || record.UserID <= 0 {
+		return
+	}
+	if record.CostStatus == "" {
+		if record.EstimatedCost > 0 {
+			record.CostStatus = "estimated"
+		} else {
+			record.CostStatus = "unavailable"
+		}
+	}
+	_ = s.repo.RecordRunCost(ctx, record)
+}
+
+func (s *GovernanceService) RunCost(ctx context.Context, uid, taskID int64) (*model.RunCostRecord, error) {
+	if uid <= 0 || taskID <= 0 {
+		return nil, ErrInvalidInput
+	}
+	item, err := s.repo.RunCostByTask(ctx, uid, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if item == nil {
+		return nil, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *GovernanceService) CostSummary(
+	ctx context.Context,
+	uid int64,
+	projectID *int64,
+	query model.CostQuery,
+) (model.CostSummary, error) {
+	if uid <= 0 {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	query.Provider = strings.TrimSpace(query.Provider)
+	query.ModelName = strings.TrimSpace(query.ModelName)
+	if len(query.Provider) > 64 || len(query.ModelName) > 191 {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	if query.From != nil && query.To != nil && !query.From.Before(*query.To) {
+		return model.CostSummary{}, ErrInvalidInput
+	}
+	if projectID != nil {
+		if *projectID <= 0 {
+			return model.CostSummary{}, ErrInvalidInput
+		}
+		if _, err := s.RequireRole(ctx, uid, *projectID, "VIEWER"); err != nil {
+			return model.CostSummary{}, err
+		}
+	}
+	return s.repo.CostSummary(ctx, uid, projectID, query)
+}
+
 func secretFingerprint(value string) string {
 	h := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(h[:8])
@@ -410,162 +479,441 @@ func (s *GovernanceService) ResolveProjectModelRuntime(ctx context.Context, uid,
 	if err != nil {
 		return nil, err
 	}
-	return &runtimeclient.ProjectModelRuntime{Provider: p.Provider, BaseURL: p.BaseURL, ModelName: p.ModelName, VisionModelName: p.ModelName, APIKey: key}, nil
+	return &runtimeclient.ProjectModelRuntime{Provider: p.Provider, BaseURL: p.BaseURL, ModelName: p.ModelName, APIKey: key}, nil
 }
 
 func userModelAAD(uid int64) []byte {
 	return []byte(fmt.Sprintf("agentmesh:user:%d:model-provider", uid))
 }
 
-func (s *GovernanceService) GetUserModelProvider(ctx context.Context, uid int64) (*model.UserModelProvider, error) {
-	if uid <= 0 {
-		return nil, ErrInvalidInput
-	}
-	return s.repo.GetUserModelProvider(ctx, uid)
+func userModelServiceAAD(uid int64, serviceKey string) []byte {
+	return []byte(fmt.Sprintf("agentmesh:user:%d:model-service:%s", uid, serviceKey))
 }
 
-func (s *GovernanceService) UpsertUserModelProvider(ctx context.Context, uid int64, input model.UserModelProviderInput) (*model.UserModelProvider, error) {
-	if uid <= 0 {
-		return nil, ErrInvalidInput
+func newUserModelServiceKey() (string, error) {
+	value := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, value); err != nil {
+		return "", err
 	}
-
-	provider := strings.TrimSpace(input.Provider)
-	baseURL := strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
-	modelName := strings.TrimSpace(input.ModelName)
-	visionModelName := strings.TrimSpace(input.VisionModelName)
-	apiKey := strings.TrimSpace(input.APIKey)
-
-	if provider == "" || len(provider) > 40 || modelName == "" || len(modelName) > 120 || len(visionModelName) > 120 || validateProviderURL(baseURL) != nil {
-		return nil, ErrInvalidInput
-	}
-	if visionModelName == "" {
-		visionModelName = modelName
-	}
-
-	existing, err := s.repo.GetUserModelProvider(ctx, uid)
-	if err != nil {
-		return nil, err
-	}
-
-	var ciphertext []byte
-	var nonce []byte
-	maskedHint := ""
-
-	if apiKey != "" {
-		if len(apiKey) > 16000 {
-			return nil, ErrInvalidInput
-		}
-		nonce = make([]byte, s.aead.NonceSize())
-		if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-			return nil, err
-		}
-		ciphertext = s.aead.Seal(nil, nonce, []byte(apiKey), userModelAAD(uid))
-		maskedHint = maskHint(apiKey)
-	} else {
-		if existing == nil {
-			return nil, ErrInvalidInput
-		}
-		ciphertext, nonce, err = s.repo.UserModelProviderCiphertext(ctx, uid)
-		if err != nil {
-			return nil, err
-		}
-		if len(ciphertext) == 0 || len(nonce) == 0 {
-			return nil, ErrInvalidInput
-		}
-		maskedHint = existing.MaskedHint
-	}
-
-	item := model.UserModelProvider{
-		UserID:          uid,
-		Provider:        provider,
-		BaseURL:         baseURL,
-		ModelName:       modelName,
-		VisionModelName: visionModelName,
-		MaskedHint:      maskedHint,
-		Enabled:         input.Enabled,
-	}
-
-	saved, err := s.repo.UpsertUserModelProvider(ctx, item, ciphertext, nonce)
-	if err != nil {
-		return nil, err
-	}
-
-	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
-		ProjectID:    nil,
-		ActorUserID:  uid,
-		Action:       "user.model_provider.upsert",
-		ResourceType: "user_model_provider",
-		ResourceID:   strconv.FormatInt(uid, 10),
-		Result:       "SUCCESS",
-		Metadata: safeAuditMetadata(map[string]any{
-			"provider":        provider,
-			"baseUrl":         baseURL,
-			"modelName":       modelName,
-			"visionModelName": visionModelName,
-			"apiKey":          "[REDACTED]",
-		}),
-	})
-
-	return saved, nil
+	encoded := hex.EncodeToString(value)
+	return fmt.Sprintf("%s-%s-%s-%s-%s", encoded[:8], encoded[8:12], encoded[12:16], encoded[16:20], encoded[20:]), nil
 }
 
-func (s *GovernanceService) DeleteUserModelProvider(ctx context.Context, uid int64) error {
-	if uid <= 0 {
-		return ErrInvalidInput
+func userModelServiceName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "qwen":
+		return "我的通义千问"
+	case "openai", "openai-compatible", "openai_compatible":
+		return "我的 OpenAI"
+	default:
+		return "默认模型服务"
 	}
-	deleted, err := s.repo.DeleteUserModelProvider(ctx, uid)
-	if err != nil {
-		return err
-	}
-	if !deleted {
-		return ErrNotFound
-	}
-	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
-		ProjectID:    nil,
-		ActorUserID:  uid,
-		Action:       "user.model_provider.delete",
-		ResourceType: "user_model_provider",
-		ResourceID:   strconv.FormatInt(uid, 10),
-		Result:       "SUCCESS",
-	})
-	return nil
 }
 
-func (s *GovernanceService) ResolveUserModelRuntime(ctx context.Context, uid int64) (*runtimeclient.ProjectModelRuntime, error) {
+func normalizeModelSelection(selection model.ModelSelection) (model.ModelSelection, error) {
+	selection.Mode = strings.ToLower(strings.TrimSpace(selection.Mode))
+	if selection.Mode == "" {
+		selection.Mode = "auto"
+	}
+	switch selection.Mode {
+	case "auto":
+		selection.ServiceID = nil
+		return selection, nil
+	case "manual":
+		if selection.ServiceID == nil || *selection.ServiceID <= 0 {
+			return model.ModelSelection{}, ErrInvalidInput
+		}
+		return selection, nil
+	default:
+		return model.ModelSelection{}, ErrInvalidInput
+	}
+}
+
+func normalizeUserModelServiceInput(input model.UserModelServiceInput) (model.UserModelServiceInput, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	input.Provider = strings.TrimSpace(input.Provider)
+	input.BaseURL = strings.TrimRight(strings.TrimSpace(input.BaseURL), "/")
+	input.ModelName = strings.TrimSpace(input.ModelName)
+	input.VisionModelName = strings.TrimSpace(input.VisionModelName)
+	input.APIKey = strings.TrimSpace(input.APIKey)
+
+	if input.Name == "" || len(input.Name) > 120 ||
+		input.Provider == "" || len(input.Provider) > 40 ||
+		input.ModelName == "" || len(input.ModelName) > 120 ||
+		len(input.VisionModelName) > 120 || validateProviderURL(input.BaseURL) != nil ||
+		len(input.APIKey) > 16000 {
+		return model.UserModelServiceInput{}, ErrInvalidInput
+	}
+	return input, nil
+}
+
+func (s *GovernanceService) encryptUserModelServiceKey(uid int64, serviceKey, apiKey string) ([]byte, []byte, string, error) {
+	if strings.TrimSpace(apiKey) == "" {
+		return nil, nil, "", ErrInvalidInput
+	}
+	nonce := make([]byte, s.aead.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, "", err
+	}
+	plain := []byte(strings.TrimSpace(apiKey))
+	ciphertext := s.aead.Seal(nil, nonce, plain, userModelServiceAAD(uid, serviceKey))
+	return ciphertext, nonce, maskHint(string(plain)), nil
+}
+
+func (s *GovernanceService) decryptUserModelServiceKey(ctx context.Context, uid int64, item model.UserModelService) (string, error) {
+	ciphertext, nonce, err := s.repo.UserModelServiceCiphertext(ctx, uid, item.ID)
+	if err != nil {
+		return "", err
+	}
+	if len(ciphertext) == 0 || len(nonce) == 0 {
+		return "", ErrModelProviderNotConfigured
+	}
+	plain, err := s.aead.Open(nil, nonce, ciphertext, userModelServiceAAD(uid, item.ServiceKey))
+	if err != nil {
+		return "", errors.New("user model service secret decryption failed")
+	}
+	return string(plain), nil
+}
+
+// ensureUserModelServices performs a one-time, request-safe migration from the
+// legacy single-provider row into the multi-service pool. The compatibility
+// HTTP contract is served from the pool afterwards, so the old encrypted row
+// is removed and cannot resurrect a deliberately deleted final service.
+func (s *GovernanceService) ensureUserModelServices(ctx context.Context, uid int64) ([]model.UserModelService, error) {
 	if uid <= 0 {
 		return nil, ErrInvalidInput
 	}
-	item, err := s.repo.GetUserModelProvider(ctx, uid)
-	if err != nil {
-		return nil, err
+	items, err := s.repo.ListUserModelServices(ctx, uid)
+	if err != nil || len(items) > 0 {
+		return items, err
 	}
-	if item == nil || !item.Enabled {
-		return nil, ErrModelProviderNotConfigured
+
+	legacy, err := s.repo.GetUserModelProvider(ctx, uid)
+	if err != nil || legacy == nil {
+		return items, err
 	}
 	ciphertext, nonce, err := s.repo.UserModelProviderCiphertext(ctx, uid)
 	if err != nil {
 		return nil, err
 	}
 	if len(ciphertext) == 0 || len(nonce) == 0 {
-		return nil, ErrModelProviderNotConfigured
+		return items, nil
 	}
 	plain, err := s.aead.Open(nil, nonce, ciphertext, userModelAAD(uid))
 	if err != nil {
-		return nil, errors.New("user model secret decryption failed")
+		return nil, errors.New("legacy user model secret decryption failed")
+	}
+
+	serviceKey := fmt.Sprintf("legacy-%d", uid)
+	newCiphertext, newNonce, masked, err := s.encryptUserModelServiceKey(uid, serviceKey, string(plain))
+	if err != nil {
+		return nil, err
+	}
+	created, err := s.repo.CreateUserModelService(ctx, model.UserModelService{
+		ServiceKey:      serviceKey,
+		UserID:          uid,
+		Name:            userModelServiceName(legacy.Provider),
+		Provider:        legacy.Provider,
+		BaseURL:         legacy.BaseURL,
+		ModelName:       legacy.ModelName,
+		VisionModelName: legacy.VisionModelName,
+		MaskedHint:      masked,
+		Enabled:         legacy.Enabled,
+		AutoRoute:       true,
+		IsDefault:       true,
+	}, newCiphertext, newNonce)
+	if err != nil {
+		// A concurrent request may have completed the same migration. Re-read the
+		// pool before surfacing a failure.
+		items, readErr := s.repo.ListUserModelServices(ctx, uid)
+		if readErr == nil && len(items) > 0 {
+			return items, nil
+		}
+		return nil, err
+	}
+
+	// The compatibility HTTP contract now reads from user_model_services, so the
+	// legacy row must be removed after a successful migration. Keeping it would
+	// resurrect a deliberately deleted last service on the next list request.
+	legacyDeleted, deleteErr := s.repo.DeleteUserModelProvider(ctx, uid)
+	if deleteErr != nil || !legacyDeleted {
+		if created != nil {
+			_, _ = s.repo.DeleteUserModelService(ctx, uid, created.ID)
+		}
+		if deleteErr != nil {
+			return nil, deleteErr
+		}
+		return nil, errors.New("legacy user model migration cleanup failed")
+	}
+
+	return s.repo.ListUserModelServices(ctx, uid)
+}
+
+func (s *GovernanceService) ListUserModelServices(ctx context.Context, uid int64) ([]model.UserModelService, error) {
+	return s.ensureUserModelServices(ctx, uid)
+}
+
+func (s *GovernanceService) CreateUserModelService(ctx context.Context, uid int64, input model.UserModelServiceInput) (*model.UserModelService, error) {
+	if uid <= 0 {
+		return nil, ErrInvalidInput
+	}
+	input, err := normalizeUserModelServiceInput(input)
+	if err != nil || input.APIKey == "" {
+		return nil, ErrInvalidInput
+	}
+	existing, err := s.ensureUserModelServices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	serviceKey, err := newUserModelServiceKey()
+	if err != nil {
+		return nil, err
+	}
+	ciphertext, nonce, masked, err := s.encryptUserModelServiceKey(uid, serviceKey, input.APIKey)
+	if err != nil {
+		return nil, err
+	}
+	makeDefault := input.Enabled && (input.IsDefault || len(existing) == 0)
+	if makeDefault {
+		if err := s.repo.ClearUserModelDefault(ctx, uid, 0); err != nil {
+			return nil, err
+		}
+	}
+	item, err := s.repo.CreateUserModelService(ctx, model.UserModelService{
+		ServiceKey:      serviceKey,
+		UserID:          uid,
+		Name:            input.Name,
+		Provider:        input.Provider,
+		BaseURL:         input.BaseURL,
+		ModelName:       input.ModelName,
+		VisionModelName: input.VisionModelName,
+		MaskedHint:      masked,
+		Enabled:         input.Enabled,
+		AutoRoute:       input.AutoRoute,
+		IsDefault:       makeDefault,
+	}, ciphertext, nonce)
+	if err != nil {
+		return nil, err
+	}
+	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
+		ProjectID: nil, ActorUserID: uid, Action: "user.model_service.create",
+		ResourceType: "user_model_service", ResourceID: strconv.FormatInt(item.ID, 10), Result: "SUCCESS",
+		Metadata: safeAuditMetadata(map[string]any{
+			"name": item.Name, "provider": item.Provider, "baseUrl": item.BaseURL,
+			"modelName": item.ModelName, "visionModelName": item.VisionModelName,
+			"autoRoute": item.AutoRoute, "isDefault": item.IsDefault, "apiKey": "[REDACTED]",
+		}),
+	})
+	return item, nil
+}
+
+func (s *GovernanceService) UpdateUserModelService(ctx context.Context, uid, id int64, input model.UserModelServiceInput) (*model.UserModelService, error) {
+	if uid <= 0 || id <= 0 {
+		return nil, ErrInvalidInput
+	}
+	input, err := normalizeUserModelServiceInput(input)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.ensureUserModelServices(ctx, uid); err != nil {
+		return nil, err
+	}
+	existing, err := s.repo.UserModelServiceByID(ctx, uid, id)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		return nil, ErrNotFound
+	}
+
+	ciphertext, nonce, err := s.repo.UserModelServiceCiphertext(ctx, uid, id)
+	if err != nil {
+		return nil, err
+	}
+	masked := existing.MaskedHint
+	if input.APIKey != "" {
+		ciphertext, nonce, masked, err = s.encryptUserModelServiceKey(uid, existing.ServiceKey, input.APIKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if len(ciphertext) == 0 || len(nonce) == 0 {
+		return nil, ErrInvalidInput
+	}
+
+	item := *existing
+	item.Name = input.Name
+	item.Provider = input.Provider
+	item.BaseURL = input.BaseURL
+	item.ModelName = input.ModelName
+	item.VisionModelName = input.VisionModelName
+	item.MaskedHint = masked
+	item.Enabled = input.Enabled
+	item.AutoRoute = input.AutoRoute
+	item.IsDefault = input.IsDefault && input.Enabled
+
+	saved, err := s.repo.UpdateUserModelService(ctx, item, ciphertext, nonce)
+	if err != nil {
+		return nil, err
+	}
+	if saved == nil {
+		return nil, ErrNotFound
+	}
+	if saved.IsDefault {
+		if err := s.repo.ClearUserModelDefault(ctx, uid, saved.ID); err != nil {
+			return nil, err
+		}
+	}
+	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
+		ProjectID: nil, ActorUserID: uid, Action: "user.model_service.update",
+		ResourceType: "user_model_service", ResourceID: strconv.FormatInt(saved.ID, 10), Result: "SUCCESS",
+		Metadata: safeAuditMetadata(map[string]any{
+			"name": saved.Name, "provider": saved.Provider, "baseUrl": saved.BaseURL,
+			"modelName": saved.ModelName, "visionModelName": saved.VisionModelName,
+			"autoRoute": saved.AutoRoute, "isDefault": saved.IsDefault, "apiKey": "[REDACTED]",
+		}),
+	})
+	return s.repo.UserModelServiceByID(ctx, uid, id)
+}
+
+func (s *GovernanceService) DeleteUserModelService(ctx context.Context, uid, id int64) error {
+	if uid <= 0 || id <= 0 {
+		return ErrInvalidInput
+	}
+	if _, err := s.ensureUserModelServices(ctx, uid); err != nil {
+		return err
+	}
+	item, err := s.repo.UserModelServiceByID(ctx, uid, id)
+	if err != nil {
+		return err
+	}
+	if item == nil {
+		return ErrNotFound
+	}
+	deleted, err := s.repo.DeleteUserModelService(ctx, uid, id)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return ErrNotFound
+	}
+	if item.IsDefault {
+		if err := s.repo.SetFirstUserModelServiceDefault(ctx, uid); err != nil {
+			return err
+		}
+	}
+	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
+		ProjectID: nil, ActorUserID: uid, Action: "user.model_service.delete",
+		ResourceType: "user_model_service", ResourceID: strconv.FormatInt(id, 10), Result: "SUCCESS",
+	})
+	return nil
+}
+
+func (s *GovernanceService) modelRuntimeForService(ctx context.Context, uid int64, item model.UserModelService) (*runtimeclient.ProjectModelRuntime, error) {
+	key, err := s.decryptUserModelServiceKey(ctx, uid, item)
+	if err != nil {
+		return nil, err
 	}
 	return &runtimeclient.ProjectModelRuntime{
+		ServiceID:       item.ID,
+		ServiceName:     item.Name,
 		Provider:        item.Provider,
 		BaseURL:         item.BaseURL,
 		ModelName:       item.ModelName,
 		VisionModelName: item.VisionModelName,
-		APIKey:          string(plain),
+		APIKey:          key,
+		AutoRoute:       item.AutoRoute,
+		IsDefault:       item.IsDefault,
 	}, nil
 }
 
-// ResolveRequestModelRuntime makes user BYOK the default for authenticated
-// requests. A shared Project provider is only a fallback when the user has not
-// configured a personal provider. There is intentionally no platform-owner API
-// key fallback here.
+func (s *GovernanceService) ResolveUserModelRuntimePool(ctx context.Context, uid int64, selection model.ModelSelection) ([]runtimeclient.ProjectModelRuntime, error) {
+	selection, err := normalizeModelSelection(selection)
+	if err != nil {
+		return nil, err
+	}
+	items, err := s.ensureUserModelServices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	enabled := make([]model.UserModelService, 0, len(items))
+	for _, item := range items {
+		if item.Enabled {
+			enabled = append(enabled, item)
+		}
+	}
+	if len(enabled) == 0 {
+		return nil, ErrModelProviderNotConfigured
+	}
+
+	selected := enabled
+	if selection.Mode == "manual" {
+		selected = nil
+		for _, item := range enabled {
+			if selection.ServiceID != nil && item.ID == *selection.ServiceID {
+				selected = []model.UserModelService{item}
+				break
+			}
+		}
+		if len(selected) == 0 {
+			return nil, ErrNotFound
+		}
+	} else {
+		selected = selected[:0]
+		for _, item := range enabled {
+			if item.AutoRoute {
+				selected = append(selected, item)
+			}
+		}
+		if len(selected) == 0 {
+			// A user may intentionally remove every personal service from auto
+			// routing while keeping them available for manual selection. This is an
+			// explicit personal-policy state and must not silently fall back to a
+			// shared Project credential.
+			return nil, ErrModelAutoRouteNotConfigured
+		}
+	}
+
+	out := make([]runtimeclient.ProjectModelRuntime, 0, len(selected))
+	for _, item := range selected {
+		runtime, err := s.modelRuntimeForService(ctx, uid, item)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *runtime)
+	}
+	return out, nil
+}
+
+func (s *GovernanceService) ResolveUserModelRuntime(ctx context.Context, uid int64) (*runtimeclient.ProjectModelRuntime, error) {
+	items, err := s.ensureUserModelServices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	var chosen *model.UserModelService
+	for index := range items {
+		item := &items[index]
+		if !item.Enabled {
+			continue
+		}
+		if item.IsDefault {
+			chosen = item
+			break
+		}
+		if chosen == nil {
+			chosen = item
+		}
+	}
+	if chosen == nil {
+		return nil, ErrModelProviderNotConfigured
+	}
+	return s.modelRuntimeForService(ctx, uid, *chosen)
+}
+
+// ResolveRequestModelRuntime keeps the historical single-runtime contract for
+// subsystems such as knowledge ingestion. The default enabled personal service
+// wins; a shared Project provider remains the fallback when no personal service
+// is available.
 func (s *GovernanceService) ResolveRequestModelRuntime(ctx context.Context, uid int64, projectID *int64) (*runtimeclient.ProjectModelRuntime, error) {
 	personal, err := s.ResolveUserModelRuntime(ctx, uid)
 	if err == nil && personal != nil {
@@ -584,8 +932,128 @@ func (s *GovernanceService) ResolveRequestModelRuntime(ctx context.Context, uid 
 			return nil, projectErr
 		}
 	}
-
 	return nil, ErrModelProviderNotConfigured
+}
+
+// ResolveRequestModelRuntimePool is the task execution contract. Personal model
+// services form the request-local pool. A project provider is used only when the
+// user has no enabled personal service, preserving the existing BYOK boundary.
+func (s *GovernanceService) ResolveRequestModelRuntimePool(
+	ctx context.Context,
+	uid int64,
+	projectID *int64,
+	selection model.ModelSelection,
+) ([]runtimeclient.ProjectModelRuntime, *runtimeclient.ProjectModelRuntime, model.ModelSelection, error) {
+	normalized, err := normalizeModelSelection(selection)
+	if err != nil {
+		return nil, nil, model.ModelSelection{}, err
+	}
+	pool, personalErr := s.ResolveUserModelRuntimePool(ctx, uid, normalized)
+	if personalErr == nil && len(pool) > 0 {
+		return pool, nil, normalized, nil
+	}
+	if normalized.Mode == "manual" {
+		return nil, nil, normalized, personalErr
+	}
+	if personalErr != nil && !errors.Is(personalErr, ErrModelProviderNotConfigured) {
+		return nil, nil, normalized, personalErr
+	}
+
+	if projectID != nil && *projectID > 0 {
+		projectModel, projectErr := s.ResolveProjectModelRuntime(ctx, uid, *projectID)
+		if projectErr == nil && projectModel != nil {
+			return nil, projectModel, normalized, nil
+		}
+		if projectErr != nil && !errors.Is(projectErr, ErrInvalidInput) {
+			return nil, nil, normalized, projectErr
+		}
+	}
+	return nil, nil, normalized, ErrModelProviderNotConfigured
+}
+
+// -----------------------------------------------------------------------------
+// Legacy single-provider API compatibility
+// -----------------------------------------------------------------------------
+
+func (s *GovernanceService) GetUserModelProvider(ctx context.Context, uid int64) (*model.UserModelProvider, error) {
+	items, err := s.ensureUserModelServices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range items {
+		if item.IsDefault || len(items) == 1 {
+			return &model.UserModelProvider{
+				UserID: item.UserID, Provider: item.Provider, BaseURL: item.BaseURL,
+				ModelName: item.ModelName, VisionModelName: item.VisionModelName,
+				MaskedHint: item.MaskedHint, Enabled: item.Enabled,
+				CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+			}, nil
+		}
+	}
+	if len(items) > 0 {
+		item := items[0]
+		return &model.UserModelProvider{
+			UserID: item.UserID, Provider: item.Provider, BaseURL: item.BaseURL,
+			ModelName: item.ModelName, VisionModelName: item.VisionModelName,
+			MaskedHint: item.MaskedHint, Enabled: item.Enabled,
+			CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		}, nil
+	}
+	return nil, nil
+}
+
+func (s *GovernanceService) UpsertUserModelProvider(ctx context.Context, uid int64, input model.UserModelProviderInput) (*model.UserModelProvider, error) {
+	items, err := s.ensureUserModelServices(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	serviceInput := model.UserModelServiceInput{
+		Name: userModelServiceName(input.Provider), Provider: input.Provider,
+		BaseURL: input.BaseURL, ModelName: input.ModelName, VisionModelName: input.VisionModelName,
+		APIKey: input.APIKey, Enabled: input.Enabled, AutoRoute: true, IsDefault: true,
+	}
+	if len(items) == 0 {
+		if strings.TrimSpace(serviceInput.APIKey) == "" {
+			return nil, ErrInvalidInput
+		}
+		if _, err = s.CreateUserModelService(ctx, uid, serviceInput); err != nil {
+			return nil, err
+		}
+	} else {
+		id := items[0].ID
+		for _, item := range items {
+			if item.IsDefault {
+				id = item.ID
+				break
+			}
+		}
+		if _, err = s.UpdateUserModelService(ctx, uid, id, serviceInput); err != nil {
+			return nil, err
+		}
+	}
+	return s.GetUserModelProvider(ctx, uid)
+}
+
+func (s *GovernanceService) DeleteUserModelProvider(ctx context.Context, uid int64) error {
+	if uid <= 0 {
+		return ErrInvalidInput
+	}
+	count, err := s.repo.DeleteAllUserModelServices(ctx, uid)
+	if err != nil {
+		return err
+	}
+	legacyDeleted, legacyErr := s.repo.DeleteUserModelProvider(ctx, uid)
+	if legacyErr != nil {
+		return legacyErr
+	}
+	if count == 0 && !legacyDeleted {
+		return ErrNotFound
+	}
+	_ = s.repo.AppendAudit(ctx, model.AuditEvent{
+		ProjectID: nil, ActorUserID: uid, Action: "user.model_provider.delete",
+		ResourceType: "user_model_provider", ResourceID: strconv.FormatInt(uid, 10), Result: "SUCCESS",
+	})
+	return nil
 }
 
 func (s *GovernanceService) CreateOrganization(ctx context.Context, uid int64, name string) (*model.Organization, error) {

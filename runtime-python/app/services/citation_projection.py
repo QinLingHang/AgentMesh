@@ -185,6 +185,26 @@ def project_used_citations(
                     evidence
                     .end
                 ),
+
+                page_number=(
+                    evidence
+                    .page_number
+                ),
+
+                asset_id=(
+                    evidence
+                    .asset_id
+                ),
+
+                modality=(
+                    evidence
+                    .modality
+                ),
+
+                visual_type=(
+                    evidence
+                    .visual_type
+                ),
             )
         )
 

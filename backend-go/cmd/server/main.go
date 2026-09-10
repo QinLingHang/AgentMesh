@@ -209,6 +209,16 @@ func main() {
 	taskS.SetGovernanceService(governanceS)
 	taskS.SetAttachmentService(attachmentS)
 
+	ecosystemS := service.NewEcosystemService(
+		store,
+		governanceS,
+		convS,
+		projectS,
+		taskS,
+		agentS,
+		mcpS,
+	)
+
 	durableRuntimeS := service.NewDurableRuntimeService(
 		store,
 		taskS,
@@ -216,8 +226,11 @@ func main() {
 		service.DurableRuntimeConfig{
 			Enabled:                 cfg.DurableRuntime.Enabled,
 			ControlPlaneBaseURL:     cfg.DurableRuntime.ControlPlaneBaseURL,
+			DispatcherID:            cfg.DurableRuntime.DispatcherID,
+			DispatcherLeaseDuration: cfg.DurableRuntime.DispatcherLeaseDuration,
 			PollInterval:            cfg.DurableRuntime.PollInterval,
 			LeaseDuration:           cfg.DurableRuntime.LeaseDuration,
+			ExecutionLeaseDuration:  cfg.DurableRuntime.ExecutionLeaseDuration,
 			WorkerStaleAfter:        cfg.DurableRuntime.WorkerStaleAfter,
 			AcceptanceTimeout:       cfg.DurableRuntime.AcceptanceTimeout,
 			RetryBackoff:            cfg.DurableRuntime.RetryBackoff,
@@ -280,6 +293,9 @@ func main() {
 
 	governanceH := handler.NewGovernanceHandler(governanceS)
 
+	ecosystemH := handler.NewEcosystemHandler(ecosystemS)
+	publicAPIH := handler.NewPublicAPIHandler(ecosystemS)
+
 	taskH := handler.NewTaskHandler(
 		taskS,
 	)
@@ -317,6 +333,10 @@ func main() {
 			MCPServerHandler: mcpH,
 
 			GovernanceHandler: governanceH,
+
+			EcosystemHandler: ecosystemH,
+
+			PublicAPIHandler: publicAPIH,
 
 			JWT: jwt,
 

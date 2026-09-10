@@ -30,6 +30,7 @@ export function LatestRunMeta({
 
       <button
         className="run-detail-link"
+        data-testid="run-details-open"
         onClick={openDetails}
         type="button"
       >

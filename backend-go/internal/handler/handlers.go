@@ -151,13 +151,24 @@ func domain(
 
 	case errors.Is(
 		err,
+		service.ErrModelAutoRouteNotConfigured,
+	):
+		fail(
+			c,
+			http.StatusConflict,
+			40921,
+			"请至少将一个已启用的个人模型服务加入自动路由",
+		)
+
+	case errors.Is(
+		err,
 		service.ErrModelProviderNotConfigured,
 	):
 		fail(
 			c,
 			http.StatusConflict,
 			40920,
-			"请先在模型设置中配置你自己的 API Key",
+			"请先在模型设置中启用至少一个可用模型服务",
 		)
 
 	case errors.Is(err, service.ErrAttachmentLimit):
@@ -194,6 +205,12 @@ func domain(
 			40911,
 			"资源已存在",
 		)
+
+	case errors.Is(err, service.ErrPackageValidation):
+		fail(c, http.StatusBadRequest, 40012, "生态包清单校验失败，请检查权限、端点和 Manifest")
+
+	case errors.Is(err, service.ErrIdempotencyConflict):
+		fail(c, http.StatusConflict, 40940, "幂等键已被其他请求占用或请求内容不一致")
 
 	default:
 		fail(
@@ -674,6 +691,41 @@ func (h *ConversationHandler) Messages(
 	)
 }
 
+func (h *ConversationHandler) MessagePage(c *gin.Context) {
+	id, valid := idParam(c)
+	if !valid {
+		return
+	}
+
+	limit := 50
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			fail(c, http.StatusBadRequest, 40010, "分页参数不合法")
+			return
+		}
+		limit = parsed
+	}
+
+	var beforeID int64
+	if raw := strings.TrimSpace(c.Query("beforeId")); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			fail(c, http.StatusBadRequest, 40010, "分页游标不合法")
+			return
+		}
+		beforeID = parsed
+	}
+
+	page, err := h.s.MessagePage(c, uid(c), id, beforeID, limit)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+
+	ok(c, page)
+}
+
 // =========================================================
 // Agent
 // =========================================================
@@ -863,6 +915,8 @@ type runReq struct {
 
 	SynthesisMode string `json:"synthesisMode"`
 
+	ModelSelection model.ModelSelection `json:"modelSelection"`
+
 	AttachmentIDs []int64 `json:"attachmentIds"`
 
 	Constraints model.TaskConstraints `json:"constraints"`
@@ -901,6 +955,7 @@ func (h *TaskHandler) RunStream(c *gin.Context) {
 		Planner:        req.Planner,
 		ExecutionMode:  req.ExecutionMode,
 		SynthesisMode:  req.SynthesisMode,
+		ModelSelection: req.ModelSelection,
 		AttachmentIDs:  req.AttachmentIDs,
 		Constraints:    req.Constraints,
 	}
@@ -969,6 +1024,8 @@ func (h *TaskHandler) Run(
 			ExecutionMode: req.ExecutionMode,
 
 			SynthesisMode: req.SynthesisMode,
+
+			ModelSelection: req.ModelSelection,
 
 			AttachmentIDs: req.AttachmentIDs,
 
