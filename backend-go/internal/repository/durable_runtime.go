@@ -205,7 +205,7 @@ func (r *MySQL) HeartbeatRuntimeWorker(ctx context.Context, worker model.Runtime
 			),
 			n.active_executions = COALESCE((
 				SELECT COUNT(*) FROM runtime_jobs j
-				WHERE j.node_id = ? AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')
+				WHERE j.node_id = ? AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')
 			), 0),
 			n.worker_count = COALESCE((
 				SELECT COUNT(*) FROM runtime_workers w
@@ -252,7 +252,7 @@ func (r *MySQL) RenewRuntimeExecutionLeases(
 			UPDATE runtime_jobs
 			SET lease_expires_at = ?
 			WHERE id = ? AND execution_id = ? AND worker_id = ?
-			  AND lease_token = ? AND status IN ('ACCEPTED','COMPLETING')
+			  AND lease_token = ? AND status IN ('ACCEPTED','RESULT_PENDING','COMPLETING')
 			  AND (? = 0 OR fence_epoch = ?)
 		`, leaseUntil, ref.JobID, ref.ExecutionID, workerID, ref.LeaseToken,
 			ref.FenceEpoch, ref.FenceEpoch)
@@ -269,6 +269,22 @@ func (r *MySQL) RenewRuntimeExecutionLeases(
 		return 0, err
 	}
 	return renewed, nil
+}
+
+// RESULT_PENDING is only entered after a durable outbox INSERT. Unlike a live
+// execution lease, a durably stored result must not be failed/replayed merely
+// because its publisher or Kafka consumer is temporarily unavailable.
+func (r *MySQL) MarkRuntimeJobResultPending(ctx context.Context, jobID int64, executionID, workerID, leaseToken string, fenceEpoch int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE runtime_jobs SET status='RESULT_PENDING'
+		WHERE id=? AND execution_id=? AND worker_id=? AND lease_token=?
+		  AND fence_epoch=? AND status IN ('DISPATCHING','ACCEPTED')
+	`, jobID, executionID, workerID, leaseToken, fenceEpoch)
+	if err != nil {
+		return false, err
+	}
+	count, err := res.RowsAffected()
+	return count == 1, err
 }
 
 func scanRuntimeWorker(s scanner) (*model.RuntimeWorker, error) {
@@ -310,18 +326,18 @@ const runtimeWorkerSelect = `
 	w.capacity, w.active_executions,
 	(SELECT COUNT(*) FROM runtime_jobs j
 		WHERE j.worker_id = w.worker_id
-		  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) AS authoritative_active,
+		  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) AS authoritative_active,
 	COALESCE(n.capacity, w.capacity) AS node_capacity,
 	(SELECT COUNT(*) FROM runtime_jobs j
 		WHERE j.node_id = w.node_id
-		  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) AS node_active,
+		  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) AS node_active,
 	(
 		((SELECT COUNT(*) FROM runtime_jobs j
 			WHERE j.worker_id = w.worker_id
-			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) / GREATEST(w.capacity, 1)) * 0.65
+			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) / GREATEST(w.capacity, 1)) * 0.65
 		+ ((SELECT COUNT(*) FROM runtime_jobs j
 			WHERE j.node_id = w.node_id
-			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) / GREATEST(COALESCE(n.capacity, w.capacity), 1)) * 0.25
+			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) / GREATEST(COALESCE(n.capacity, w.capacity), 1)) * 0.25
 		+ LEAST(w.consecutive_failures, 10) * 0.01
 	) AS scheduling_score,
 	w.last_assignment_at, w.draining, w.status, w.consecutive_failures,
@@ -351,10 +367,10 @@ func (r *MySQL) ListAvailableRuntimeWorkers(ctx context.Context, staleBefore tim
 		  AND (n.node_id IS NULL OR (n.status = 'ACTIVE' AND n.draining = 0 AND n.last_heartbeat_at >= ?))
 		  AND (SELECT COUNT(*) FROM runtime_jobs j
 			WHERE j.worker_id = w.worker_id
-			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) < w.capacity
+			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) < w.capacity
 		  AND (n.node_id IS NULL OR (SELECT COUNT(*) FROM runtime_jobs j
 			WHERE j.node_id = w.node_id
-			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')) < n.capacity)
+			  AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')) < n.capacity)
 		  AND (w.circuit_open_until IS NULL OR w.circuit_open_until <= UTC_TIMESTAMP(6))
 		ORDER BY scheduling_score ASC,
 			CASE WHEN w.last_assignment_at IS NULL THEN 0 ELSE 1 END ASC,
@@ -412,7 +428,7 @@ func (r *MySQL) ClaimNextRuntimeJob(
 	var active int
 	if err = tx.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runtime_jobs
-		WHERE worker_id = ? AND status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')
+		WHERE worker_id = ? AND status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')
 	`, workerID).Scan(&active); err != nil {
 		return nil, nil, err
 	}
@@ -438,7 +454,7 @@ func (r *MySQL) ClaimNextRuntimeJob(
 		var nodeActive int
 		if err = tx.QueryRowContext(ctx, `
 			SELECT COUNT(*) FROM runtime_jobs
-			WHERE node_id = ? AND status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')
+			WHERE node_id = ? AND status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')
 		`, nodeID).Scan(&nodeActive); err != nil {
 			return nil, nil, err
 		}
@@ -541,7 +557,7 @@ func (r *MySQL) RuntimeJobByID(ctx context.Context, id int64) (*model.RuntimeJob
 func (r *MySQL) BeginRuntimeJobCallback(ctx context.Context, jobID int64, executionID, workerID, leaseToken string) (bool, error) {
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE runtime_jobs SET status = 'COMPLETING'
-		WHERE id = ? AND status IN ('DISPATCHING','ACCEPTED') AND execution_id = ?
+		WHERE id = ? AND status IN ('DISPATCHING','ACCEPTED','RESULT_PENDING') AND execution_id = ?
 		  AND worker_id = ? AND lease_token = ?
 	`, jobID, executionID, workerID, leaseToken)
 	if err != nil {
@@ -551,6 +567,21 @@ func (r *MySQL) BeginRuntimeJobCallback(ctx context.Context, jobID int64, execut
 	return affected == 1, err
 }
 
+func (r *MySQL) RuntimeJobCallbackOwned(ctx context.Context, jobID int64, executionID, workerID, leaseToken string) (bool, error) {
+	var owned int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM runtime_jobs
+			WHERE id = ? AND status = 'COMPLETING' AND execution_id = ?
+			  AND worker_id = ? AND lease_token = ?
+		)
+	`, jobID, executionID, workerID, leaseToken).Scan(&owned)
+	if err != nil {
+		return false, err
+	}
+	return owned == 1, nil
+}
+
 func (r *MySQL) MarkRuntimeJobCompleted(ctx context.Context, jobID int64) error {
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE runtime_jobs SET status = 'COMPLETED', lease_token = NULL,
@@ -558,6 +589,24 @@ func (r *MySQL) MarkRuntimeJobCompleted(ctx context.Context, jobID int64) error 
 		WHERE id = ? AND status = 'COMPLETING'
 	`, jobID)
 	return err
+}
+
+// The task + assistant commit may survive a Go crash even if its job marker
+// does not. Never mark a COMPLETING job FAILED merely because it exceeded a
+// fixed 30-second window. After a generous replay window, reconcile only if
+// the authoritative task has already reached a successful terminal state.
+func (r *MySQL) ReconcileCommittedCompletingJobs(ctx context.Context, before time.Time) (int64, error) {
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE runtime_jobs j INNER JOIN tasks t ON t.id=j.task_id
+		SET j.status='COMPLETED', j.lease_token=NULL,
+		    j.lease_expires_at=NULL, j.last_error=NULL
+		WHERE j.status='COMPLETING' AND j.updated_at < ?
+		  AND t.status IN ('COMPLETED','INPUT_REQUIRED','AUTH_REQUIRED')
+	`, before.UTC())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (r *MySQL) RequeueRuntimeJob(ctx context.Context, jobID int64, delay time.Duration, message string) error {
@@ -839,8 +888,7 @@ func (r *MySQL) ListExpiredAcceptedRuntimeJobs(ctx context.Context, now time.Tim
 	}
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT `+runtimeJobColumns+` FROM runtime_jobs
-		WHERE ((status IN ('DISPATCHING','ACCEPTED') AND deadline_at < ?)
-		   OR (status = 'COMPLETING' AND updated_at < DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 30 SECOND)))
+		WHERE status IN ('DISPATCHING','ACCEPTED') AND deadline_at < ?
 		ORDER BY id ASC LIMIT ?
 	`, now.UTC(), limit)
 	if err != nil {
@@ -1010,7 +1058,7 @@ func (r *MySQL) RuntimeReliabilitySnapshot(ctx context.Context, staleBefore time
 			snapshot.QueueDepth = count
 		case "LEASED", "DISPATCHING":
 			snapshot.Leased += count
-		case "ACCEPTED", "COMPLETING":
+		case "ACCEPTED", "RESULT_PENDING", "COMPLETING":
 			snapshot.Accepted += count
 		case "FAILED":
 			snapshot.Failed = count
@@ -1040,7 +1088,7 @@ func (r *MySQL) RuntimeReliabilitySnapshot(ctx context.Context, staleBefore time
 
 	if err := r.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM runtime_jobs
-		WHERE status IN ('LEASED','DISPATCHING','ACCEPTED','COMPLETING')
+		WHERE status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')
 	`).Scan(&snapshot.ActiveExecutions); err != nil {
 		return nil, err
 	}

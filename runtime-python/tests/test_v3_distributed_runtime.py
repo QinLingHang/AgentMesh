@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+
+import httpx
 from types import MethodType
 
 import pytest
@@ -89,6 +91,9 @@ async def test_v3_heartbeat_carries_node_topology_and_active_lease_fence(monkeyp
     class Response:
         status_code = 200
 
+        def raise_for_status(self):
+            return None
+
     class FakeClient:
         def __init__(self, *args, **kwargs):
             pass
@@ -103,7 +108,7 @@ async def test_v3_heartbeat_carries_node_topology_and_active_lease_fence(monkeyp
             captured.append({"url": url, "json": json, "headers": headers})
             return Response()
 
-    monkeypatch.setattr("app.distributed.execution_manager.httpx.AsyncClient", FakeClient)
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
 
     manager = _manager(runner=runner)
     accepted = await manager.submit(_envelope())
@@ -112,6 +117,8 @@ async def test_v3_heartbeat_carries_node_topology_and_active_lease_fence(monkeyp
 
     heartbeat = next(item for item in captured if item["url"].endswith("/internal/v1/runtime/workers/heartbeat"))
     payload = heartbeat["json"]
+    assert manager.heartbeat_status()["sent"] >= 1
+    assert manager.heartbeat_status()["failed"] == 0
     assert payload["workerId"] == "worker-v3-a"
     assert payload["nodeId"] == "node-a"
     assert payload["zone"] == "zone-a"
@@ -214,3 +221,29 @@ async def test_v3_node_capacity_never_reduces_below_worker_capacity():
     )
     assert manager.capacity == 6
     assert manager.node_capacity == 6
+
+@pytest.mark.asyncio
+async def test_v3_heartbeat_failure_is_observable_without_failing_execution(monkeypatch):
+    class FailingClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ConnectError("synthetic heartbeat outage")
+
+    monkeypatch.setattr(httpx, "AsyncClient", FailingClient)
+    manager = _manager(runner=lambda _: asyncio.sleep(0, result=_response()))
+
+    await manager._send_heartbeat_once()
+
+    status = manager.heartbeat_status()
+    assert status["sent"] == 0
+    assert status["failed"] == 1
+    assert status["lastFailureAt"]
+    assert status["lastErrorCategory"] == "ConnectError"

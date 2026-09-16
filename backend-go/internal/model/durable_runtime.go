@@ -6,10 +6,11 @@ import "time"
 // The control plane renews only an exact worker/execution/lease/fence tuple,
 // preventing a recovered stale process from extending a newer assignment.
 type RuntimeExecutionLeaseRef struct {
-	JobID       int64  `json:"jobId"`
-	ExecutionID string `json:"executionId"`
-	LeaseToken  string `json:"-"`
-	FenceEpoch  int64  `json:"fenceEpoch"`
+	JobID         int64  `json:"jobId"`
+	ExecutionID   string `json:"executionId"`
+	LeaseToken    string `json:"-"`
+	FenceEpoch    int64  `json:"fenceEpoch"`
+	ResultPending bool   `json:"resultPending,omitempty"`
 }
 
 // RuntimeWorker is a trusted control-plane view of one Python Runtime worker.

@@ -12,6 +12,7 @@ import (
 	"example.com/agentmesh-control-plane/internal/cache"
 	"example.com/agentmesh-control-plane/internal/config"
 	"example.com/agentmesh-control-plane/internal/db"
+	"example.com/agentmesh-control-plane/internal/eventbus"
 	"example.com/agentmesh-control-plane/internal/handler"
 	"example.com/agentmesh-control-plane/internal/repository"
 	"example.com/agentmesh-control-plane/internal/router"
@@ -242,6 +243,21 @@ func main() {
 		},
 	)
 
+	runtimeEventConsumer := eventbus.NewRuntimeEventConsumer(
+		sqlDB,
+		durableRuntimeS,
+		eventbus.RuntimeEventConsumerConfig{
+			Enabled:            cfg.Kafka.Enabled,
+			Brokers:            cfg.Kafka.Brokers,
+			Topic:              cfg.Kafka.RuntimeEventsTopic,
+			DLQTopic:           cfg.Kafka.RuntimeDLQTopic,
+			GroupID:            cfg.Kafka.ConsumerGroup,
+			ClientID:           cfg.Kafka.ClientID,
+			ProcessMaxAttempts: cfg.Kafka.ProcessMaxAttempts,
+			DedupeRetention:    cfg.Kafka.DedupeRetention,
+		},
+	)
+
 	authH := handler.NewAuthHandler(
 		authS,
 		cfg.RefreshCookieName,
@@ -349,13 +365,17 @@ func main() {
 			TaskRateLimit: cfg.TaskRateLimit,
 
 			InternalToken: cfg.RuntimeInternalToken,
+
+			EventPlaneStatus: runtimeEventConsumer.Snapshot,
 		},
 	)
 
 	rootCtx, stopSignal := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stopSignal()
 	durableRuntimeS.Start(rootCtx)
+	runtimeEventConsumer.Start(rootCtx)
 	defer durableRuntimeS.Stop()
+	defer runtimeEventConsumer.Stop()
 
 	server := &http.Server{
 		Addr:              ":" + cfg.Port,
@@ -389,6 +409,7 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer shutdownCancel()
+	runtimeEventConsumer.Stop()
 	durableRuntimeS.Stop()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Printf("control plane graceful shutdown failed: %v", err)

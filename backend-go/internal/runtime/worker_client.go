@@ -27,9 +27,10 @@ type DurableExecutionEnvelope struct {
 }
 
 type DurableExecutionAccepted struct {
-	Accepted  bool   `json:"accepted"`
-	Duplicate bool   `json:"duplicate"`
-	WorkerID  string `json:"workerId"`
+	Accepted   bool   `json:"accepted"`
+	Duplicate  bool   `json:"duplicate"`
+	WorkerID   string `json:"workerId"`
+	FenceEpoch int64  `json:"fenceEpoch"`
 }
 
 type WorkerDispatchError struct {
@@ -88,6 +89,15 @@ func (c *Client) SubmitDurableExecution(
 		}
 		if !accepted.Accepted {
 			return nil, &WorkerDispatchError{Err: errors.New("worker returned 202 without acceptance"), Ambiguous: true, StatusCode: resp.StatusCode}
+		}
+		// An older worker can reply duplicate=202 for execution_id even when the
+		// new assignment carries a higher fence. Never treat an unverified
+		// duplicate as acceptance of the current attempt.
+		if accepted.Duplicate && accepted.FenceEpoch != envelope.FenceEpoch {
+			return nil, &WorkerDispatchError{
+				Err:       errors.New("worker duplicate acknowledgement has mismatched fence"),
+				Ambiguous: true, StatusCode: resp.StatusCode,
+			}
 		}
 		return &accepted, nil
 	}

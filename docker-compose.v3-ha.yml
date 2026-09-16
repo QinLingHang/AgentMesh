@@ -20,12 +20,16 @@ services:
     environment:
       DURABLE_RUNTIME_DISPATCHER_ID: dispatcher-b
       CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go-b:8086
+      KAFKA_OUTBOX_PATH: /app/data/runtime_result_outbox.sqlite3
+    volumes:
+      - runtime_outbox_b:/app/data
     expose:
       - "8086"
 
   runtime-python:
     environment:
       RUNTIME_WORKER_ID: runtime-node-a-worker-1
+      KAFKA_CLIENT_ID: agentmesh-runtime-node-a
       RUNTIME_WORKER_ENDPOINT: http://runtime-python:9572
       RUNTIME_NODE_ID: runtime-node-a
       RUNTIME_NODE_ZONE: zone-a
@@ -39,12 +43,16 @@ services:
       service: runtime-python
     environment:
       RUNTIME_WORKER_ID: runtime-node-b-worker-1
+      KAFKA_CLIENT_ID: agentmesh-runtime-node-b
       RUNTIME_WORKER_ENDPOINT: http://runtime-python-b:9572
       RUNTIME_NODE_ID: runtime-node-b
       RUNTIME_NODE_ZONE: zone-b
       RUNTIME_NODE_VERSION: 3.0.0-dev
       RUNTIME_NODE_CAPACITY: ${RUNTIME_NODE_B_CAPACITY:-4}
       CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go-b:8086
+      KAFKA_OUTBOX_PATH: /app/data/runtime_result_outbox.sqlite3
+    volumes:
+      - runtime_outbox_b:/app/data
     expose:
       - "9572"
 
@@ -62,3 +70,7 @@ services:
         condition: service_healthy
       web-react:
         condition: service_started
+
+volumes:
+  runtime_outbox_b:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-runtime-outbox-b-data

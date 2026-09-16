@@ -76,10 +76,11 @@ func (h *DurableRuntimeHandler) Topology(c *gin.Context) {
 }
 
 type workerExecutionLeaseReq struct {
-	JobID       int64  `json:"jobId"`
-	ExecutionID string `json:"executionId"`
-	LeaseToken  string `json:"leaseToken"`
-	FenceEpoch  int64  `json:"fenceEpoch"`
+	JobID         int64  `json:"jobId"`
+	ExecutionID   string `json:"executionId"`
+	LeaseToken    string `json:"leaseToken"`
+	FenceEpoch    int64  `json:"fenceEpoch"`
+	ResultPending bool   `json:"resultPending"`
 }
 
 type workerHeartbeatReq struct {
@@ -107,9 +108,10 @@ func (h *DurableRuntimeHandler) Heartbeat(c *gin.Context) {
 		leases = append(leases, model.RuntimeExecutionLeaseRef{
 			JobID: item.JobID, ExecutionID: strings.TrimSpace(item.ExecutionID),
 			LeaseToken: strings.TrimSpace(item.LeaseToken), FenceEpoch: item.FenceEpoch,
+			ResultPending: item.ResultPending,
 		})
 	}
-	err := h.s.Heartbeat(c, model.RuntimeWorker{
+	terminalIDs, err := h.s.Heartbeat(c, model.RuntimeWorker{
 		WorkerID:         strings.TrimSpace(req.WorkerID),
 		NodeID:           strings.TrimSpace(req.NodeID),
 		Zone:             strings.TrimSpace(req.Zone),
@@ -125,7 +127,7 @@ func (h *DurableRuntimeHandler) Heartbeat(c *gin.Context) {
 		domain(c, err)
 		return
 	}
-	ok(c, gin.H{"accepted": true})
+	ok(c, gin.H{"accepted": true, "terminalExecutionIds": terminalIDs})
 }
 
 func (h *DurableRuntimeHandler) Callback(c *gin.Context) {

@@ -16,3 +16,5 @@ python-docx>=1.1,<2
 python-multipart>=0.0.20,<1
 tzdata>=2025.2,<2027
 PyMuPDF>=1.25,<2
+
+aiokafka>=0.14,<0.15

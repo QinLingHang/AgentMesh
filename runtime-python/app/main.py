@@ -16,6 +16,7 @@ from app.distributed import (
     DurableExecutionEnvelope,
     DurableExecutionManager,
     WorkerUnavailable,
+    build_result_transport,
 )
 from app.knowledge import (
     KnowledgeIndexer,
@@ -69,6 +70,17 @@ async def lifespan(app: FastAPI):
     )
 
     if settings.runtime_worker_enabled:
+        result_transport = build_result_transport(
+            mode=settings.runtime_result_transport,
+            internal_token=settings.internal_token,
+            callback_timeout_seconds=settings.runtime_worker_callback_timeout_seconds,
+            callback_max_retries=settings.runtime_worker_callback_max_retries,
+            kafka_brokers=settings.kafka_brokers,
+            kafka_topic=settings.kafka_runtime_result_topic,
+            kafka_client_id=settings.kafka_client_id,
+            kafka_outbox_path=settings.kafka_outbox_path,
+            kafka_publish_timeout_seconds=settings.kafka_publish_timeout_seconds,
+        )
         execution_manager = DurableExecutionManager(
             worker_id=settings.runtime_worker_id,
             worker_endpoint=settings.runtime_worker_endpoint,
@@ -85,6 +97,7 @@ async def lifespan(app: FastAPI):
             node_zone=settings.runtime_node_zone,
             node_version=settings.runtime_node_version,
             node_capacity=settings.runtime_node_capacity or settings.runtime_worker_capacity,
+            result_transport=result_transport,
         )
         await execution_manager.start()
 
@@ -128,6 +141,8 @@ async def health():
         "nodeCapacity": execution_manager.node_capacity if execution_manager is not None else 0,
         "draining": execution_manager.draining if execution_manager is not None else False,
         "activeExecutions": execution_manager.active_count() if execution_manager is not None else 0,
+        "heartbeat": execution_manager.heartbeat_status() if execution_manager is not None else None,
+        "resultTransport": execution_manager.result_transport_status() if execution_manager is not None else None,
     }
 
 
