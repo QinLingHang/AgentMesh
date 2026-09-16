@@ -1,670 +1,254 @@
 AgentMesh
-> 面向多用户、多项目的 Multi-Agent 应用与运行时平台｜Go 控制面 · Python Runtime · Kafka 可靠结果交付
-AgentMesh 基于 Go Control Plane + Python Agent Runtime + React / TypeScript 构建，围绕 Multi-Agent 编排、多模态 RAG、Conversation Memory、Tool / MCP、分布式执行、故障恢复、多租户治理 等能力展开，并在 P21 引入 Kafka Event Plane + SQLite Durable Outbox，用于可靠交付 Agent 执行结果。
-项目并非单一聊天页面或简单的模型 API 封装，而是尝试从 Agent Runtime、知识检索、长期会话、工具调用、任务可靠执行以及工程化部署等角度，构建一套完整的 Agent 应用运行体系。
-已发布的稳定版本（Release / Tag）：
-```text
-v1.0.0
-```
-开发进度： P20 长会话可靠性已完成专项验收；P21 Kafka 结果交付改造已合并至 `main`，并通过 Windows 本地部署验收。不要据此推断这些能力已经包含在 `v1.0.0` Tag，或容器化生产发布已经验收。
+> 面向多用户、多项目的 Agent 应用与分布式运行平台。以 **Go Control Plane + Python Agent Runtime + React / TypeScript** 为核心，围绕 Multi-Agent 编排、RAG、Memory、Tool / MCP、多租户治理与可靠执行开展工程实践。
+![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)
+![Go](https://img.shields.io/badge/Backend-Go-00ADD8)
+![Python](https://img.shields.io/badge/Runtime-Python-3776AB)
+![React](https://img.shields.io/badge/Frontend-React%20%2B%20TypeScript-149ECA)
+![Kafka](https://img.shields.io/badge/Event%20Plane-Apache%20Kafka-231F20)
+AgentMesh 不只是模型 API 的聊天封装。项目将用户与项目管理、任务控制、Agent 执行、知识与记忆、工具调用以及运行状态分别放在明确的架构边界中，并通过持久化队列、Lease / Fencing、SQLite Outbox 和 Kafka 处理分布式执行中的失败与结果交付问题。
+版本与验收边界： GitHub 已发布的 Release / Tag 为 `v1.0.0`；`main` 中后续合并了 V2 / V3 / V4 / V4.1、P20 与 P21 等开发成果。P21 已通过 Windows 本地部署验收，不等于包含 P21 的新版 Release 已发布，也不等于容器化生产发布或海量并发压测通过。 仓库根目录的 `VERSION` / `MANIFEST.json` 不能单独作为最新开发功能已发布的依据。
 ---
-✨ Features
-Agent Runtime
-支持 Agent 的动态发现、选择与协作执行。
-主要能力：
-Capability Discovery
-Task Profile
-Agent Resolver
-Agent Routing
-Serial Execution
-Parallel Execution
-DAG Multi-Agent Workflow
-Runtime Rescheduling
-Timeout / Failure Recovery
-Execution Trace
-AgentMesh 可以根据任务所需能力，以及 Agent 的：
-Capability
-Success Rate
-Latency
-Cost
-Load
-动态筛选并路由执行 Agent，降低 Agent 与固定 Workflow 之间的强绑定。
+核心能力
+领域	已实现的主要内容
+Agent Runtime	任务画像、能力发现、Agent Resolver、模型路由、串行 / 并行 / DAG 执行、失败处理与执行追踪
+Multi-Agent	按任务能力选择 Agent、协作规划、DAG 执行、运行时重新调度
+RAG	文档与图片知识处理、Embedding、Milvus、混合检索、Rerank、证据来源与引用、TEXT / VISUAL / HYBRID 模式
+Conversation & Memory	MySQL 持久会话、分页历史、Redis 工作记忆、上下文预算、Memory Capsule、历史恢复
+Tool / MCP	工具注册、Schema、发现与调用、调用结果回填、治理与高风险操作审批
+Model & BYOK	模型 Provider 抽象、个人模型服务池、任务级自动 / 手动选择、项目模型回退与凭据隔离
+Distributed Runtime	MySQL Durable Queue、Worker / Node 心跳、容量调度、Lease / Fencing、Dispatcher HA、安全重试与故障恢复
+Kafka Event Plane	SQLite Durable Outbox、Runtime Result 事件、Go Consumer、幂等账本、DLQ、Broker ACK / Business ACK
+Governance	Organization / Workspace / Project、RBAC、资源归属、多租户隔离、配额与审计
+Platform Ecosystem	Public API、API Key / Service Account、Python / TypeScript SDK、Agent Template / Version、Marketplace、插件与 MCP Registry
+Observability	Run Details、DAG / Trace、路由、RAG、Memory、Tool / MCP、可靠性事件及部分用量 / 评测指标
+Desktop Agent	本地文件、注册应用与 CLI 工具；可选的受控 Windows Computer Use 与独立 Desktop Bridge
+这些能力并非都在同一版本中首次发布；请结合 `docs/`、相应模块源码和下文的验收范围理解。
+架构与职责
+```text
+React / TypeScript Web          Python / TypeScript SDK
+         |                                |
+         +--------- HTTP / SSE ----------+
+                          |
+                    Go Control Plane
+           Auth / Project / RBAC / BYOK
+           Registry / Public API / Task
+                 /       |         \
+                /        |          \
+       MySQL / Redis   Durable Queue    Governance / Audit
+                         |
+                  Go Dispatcher
+                         | HTTP dispatch
+                         v
+                  Python Workers
+           Agent / DAG / LLM / RAG /
+             Memory / Tool / MCP
+                         |
+                  执行完成并产出结果
+                         |
+                SQLite Durable Outbox
+                         |
+                  Kafka Runtime Topic
+                         |
+                  Go Result Consumer
+                         |
+             幂等 / Fencing / Finalize
+                         |
+                MySQL Task / Result
+                         |
+                 Business ACK
+                         |
+             Python 释放执行归属
+```
+Go： 用户、组织与项目、权限、任务状态、持久队列与调度、数据库事务、Kafka 结果消费。
+Python： Agent 运行、模型与路由、RAG / Memory、Tool / MCP、Worker 心跳、结果 Outbox 与 Kafka 发布。
+React / TypeScript： Workspace、会话、知识与记忆管理、模型设置、治理、任务管理及独立的 Run Details。
+MySQL / Redis / Milvus： 分别承载权威业务记录、工作记忆及缓存、向量检索。
+Kafka： 结果事件的异步传输与消费进度管理，不替代 Go 的 MySQL Durable Queue 或浏览器 HTTP / SSE。
+开发环境与生产 Compose 的部署拓扑不同，详见下文。
 ---
-🤖 Multi-Agent Orchestration
-Python Runtime 基于：
-FastAPI
-LangGraph
-asyncio
-实现 Multi-Agent Runtime。
-支持串行、并行以及 DAG 形式的 Agent 协作。
-基本执行流程：
-```text
-User Task
-    ↓
-Task Profile
-    ↓
-Capability Discovery
-    ↓
-Agent Resolver
-    ↓
-Multi-Agent DAG
-    ↓
-Runtime Execution
-    ↓
-Failure / Timeout
-    ↓
-Runtime Rescheduling
-    ↓
-Final Result
-```
-当 Agent 在执行过程中出现 Timeout / Failure 时，可以重新选择能力兼容的 Agent 接替任务，实现运行时故障恢复。
+Agent 执行与智能能力
+Multi-Agent 编排
+Python Runtime 包含任务画像、Capability Discovery、Agent Resolver、协作规划、DAG Executor 和 Rescheduler。它可以按能力及运行指标选择候选 Agent，执行串行或并行步骤，并在符合安全条件时重新调度。多 Agent 协作指任务规划与编排，不表示多个大模型能够无约束地自主互相调用。
+Multimodal RAG
+知识摄取和查询链路涉及文档 / 图片解析、文本与视觉证据、Embedding、Milvus、Hybrid Retrieval、Rerank、Citation 与检索门控。查询可按 `TEXT`、`VISUAL` 或 `HYBRID` 选择证据；文本任务不应强制依赖视觉模型。Go 负责知识生命周期与 Scope，Python 负责摄取、检索和运行时上下文组装。
+Conversation 与 Memory
+MySQL 保存完整会话与消息，Redis 提供工作记忆；Context Budget、Compaction 与 Memory Capsule 用于长上下文管理。P20 实现了历史消息分页、旧消息加载、会话刷新与 Redis 丢失后的上下文恢复。
+Scope 必须区分： User-global Memory 属于用户；Project Knowledge 属于项目。共享项目不会自动共享项目拥有者的用户级长期记忆，也不会把 RAG 证据、工具输出或项目 Secret 无条件写入用户级 Memory。
+Tool、MCP 与 Desktop
+Tool Runtime 支持内部工具、HTTP 工具、Schema 校验、执行结果回填与审批；MCP 集成包含发现与调用。Desktop Agent 通过受控能力接入本地文件、注册应用和 CLI 工具。可选 Computer Use 具有独立会话、权限与审批边界；高级终端默认关闭。单独的 `desktop-bridge/` 可作为受限回环服务，Windows 本地 Runtime 也有嵌入式 Desktop 能力。这些功能不代表浏览器能直接获得任意本机执行权限。
+Model Gateway、BYOK 与 Evaluation
+模型层提供 Provider 抽象、请求级模型选择、重试 / 超时和 Token / 成本元数据。个人模型池支持自动路由或显式选取；符合策略时可回退至项目配置。项目密钥按既有治理边界加密保存，不作为全局 Runtime Provider 共享。Evaluation 提供确定性评分、可选 Model Judge、数据集回归和 Run Details 相关指标；未知价格不会被凭空估算为真实账单。
 ---
-🔍 Multimodal RAG
-AgentMesh 内置知识检索链路，支持文本与视觉知识。
-主要流程：
+分布式可靠性：Durable Runtime 与 Kafka
+任务调度与结果交付是两件不同的事：
+Go 将 Task 和 Runtime Job 保存到 MySQL Durable Queue，再由 Dispatcher 选择 Worker，通过内部 HTTP 分配执行。
+Worker 使用 `execution_id`、`lease_token`、`fence_epoch` 等标识执行归属。过期 Worker 的结果不能覆盖新归属；对接受状态不确定的任务，不会无条件重放副作用。
+Kafka 模式下，Python 完成计算后先将结果写入本地 SQLite Outbox，再投递 `agentmesh.runtime.events`。
+Broker ACK 仅代表 Kafka 收到消息；Go Consumer 仍需验证归属与幂等，并完成业务持久化。
+`RESULT_PENDING` 保留已经产出结果但尚未完成业务确认的状态。Go 通过精确归属匹配的终态确认让 Python 释放执行记录，避免因消费延迟误判 Worker 丢失。
+消费者在成功处理或成功转交 DLQ 后才提交相应 Kafka offset。重复事件通过 `eventId` 去重，崩溃重放走既有 Callback 状态机恢复路径。
 ```text
-Document / Image
-       ↓
- Knowledge Ingest
-       ↓
-     Chunking
-       ↓
-    Embedding
-       ↓
-      Milvus
-       ↓
-Hybrid Retrieval
-       ↓
-     Rerank
-       ↓
-    Citation
-       ↓
-  Agent Context
+Python result
+    -> SQLite Outbox
+    -> Kafka broker ACK
+    -> Go Consumer
+    -> eventId dedupe + lease/fence check
+    -> MySQL task/result finalize
+    -> business ACK
 ```
-主要能力：
-Document Knowledge
-Image / Visual Knowledge
-Chunking
-Embedding
-Vector Retrieval
-Hybrid Retrieval
-Rerank
-Citation
-RAG Gating
-支持三种检索模式：
-```text
-TEXT
-VISUAL
-HYBRID
-```
-通过 RAG Gating 判断当前任务是否真正需要知识检索，避免无意义地向上下文注入大量内容。
-检索得到的文本和视觉证据会统一进入 Agent Context，参与后续推理。
+当前 P21 真正接入业务处理的是 `runtime.execution.result` v1。本地 Compose 还预建了 Tool、Model、Audit、Usage 等 Topic，作为后续事件消费者的基础；它们不等于已完成全量事件采集与计费服务。Kafka 模式由 Go 的 `KAFKA_ENABLED=true` 与 Python 的 `RUNTIME_RESULT_TRANSPORT=kafka` 配合启用；旧 HTTP Callback 仍可通过 `RUNTIME_RESULT_TRANSPORT=http` 回退。
+可靠性交付的边界
+当前方式是 At-Least-Once Delivery + 幂等业务处理，不宣称跨 Kafka 与 MySQL 的全局 Exactly-Once。
+SQLite Outbox 必须置于可保留的数据目录；Worker 本地磁盘永久丢失且没有其他持久副本时，不能保证恢复。
+本地单 Broker 没有 Kafka 集群容灾能力；生产三节点 Kafka 仅完成 Compose 配置相关验证，不能等同于真实公网部署、高可用切换或海量压测已通过。
+结果长期处于 `RESULT_PENDING` 时，需要监控积压、Outbox、Consumer 和 DLQ，不能假定任何故障都能自动消失。
+详见 `docs/p21/P21_EVENT_DRIVEN_RUNTIME.md` 与 `docs/p21/P21_FIX3_RELEASE_NOTES.md`。部分随源码保留的 P21 阶段文档写于最终验收之前，应以下面的验收范围说明和对应实际证据为准。
 ---
-🧠 Conversation & Memory
-AgentMesh 对 Conversation History 与 Runtime Memory 进行分层处理。
-MySQL
-负责持久化完整会话历史。
-Redis
-负责保存 Runtime Working Memory。
-整体结构：
-```text
-Conversation
-    ↓
-MySQL Durable History
-    +
-Redis Working Memory
-    ↓
-Context Budget
-    ↓
-Memory Capsule
-    ↓
-Agent Runtime
-```
-主要能力：
-Conversation History
-Historical Message Pagination
-Working Memory
-Context Budget
-Memory Capsule
-Context Compaction
-Redis-loss Recovery
-Long Conversation Continuity
-P20 历史消息分页与首尾标记恢复、刷新后连续性校验
-在 P20 自动化长会话测试中，已验证 125/125 历史消息完整恢复、分页可见锚点稳定、刷新后会话连续性与 Redis Memory 丢失后的恢复。
-MySQL 中的 Durable History 是持久化依据；Redis Working Memory 可丢失并通过持久化历史恢复。上述结果属于已验证的测试场景，不表示任意规模或任意故障下的绝对保证。
+多租户与平台生态
+资源治理以 User、Organization、Workspace、Project 为基础，覆盖 RBAC、资源归属、项目知识、Memory、模型服务、Tool / MCP、配额与审计。高风险操作需要遵守审批与治理流程；任务调度前会重新检查相关资源授权，避免排队期间被撤销的资源继续使用。
+V4 平台生态提供 `/openapi/v1`、Service Account API Key、Python / TypeScript SDK、Agent Template / Version、Marketplace、Plugin Registry 与 MCP Registry。SDK 通过公开 API 调用，不直接访问内部 Runtime 或持有内部 Token。
 ---
-🔧 Tool & MCP
-AgentMesh 支持 Agent 调用内部 Tool、HTTP Tool 以及 MCP Tool。
-主要能力：
-Internal Tool
-HTTP Tool
-Tool Schema
-Tool Discovery
-Tool Invocation
-MCP Discovery
-MCP Invocation
-Parameter Validation
-Tool Governance
-Approval
-Tool Result Feedback
-基本调用链：
+技术栈
+层级	技术
+前端	React、TypeScript、Vite
+Go 控制面	Go、Gin、MySQL、Redis、JWT
+Python 运行时	Python、FastAPI、Pydantic、asyncio、LangGraph
+检索与记忆	Milvus、MySQL、Redis
+事件与交付	Apache Kafka、SQLite Durable Outbox、`kafka-go`、Python Kafka Producer
+接入与部署	HTTP、SSE、Docker Compose、Nginx Gateway（生产配置）
+集成	Tool / MCP、Public API、Python SDK、TypeScript SDK
+具体依赖版本以 `backend-go/go.mod`、`runtime-python/requirements.txt`、`web-react/package.json` 和 Compose 文件为准。
+项目目录
 ```text
-Agent
-  ↓
-Tool Discovery
-  ↓
-Schema Injection
-  ↓
-Model Decision
-  ↓
-Tool Invocation
-  ↓
-Governance Check
-  ↓
-Execution
-  ↓
-Tool Result
-  ↓
-Agent Continue
-```
-Tool / MCP 的执行结果会重新注入 Agent Context，驱动 Agent 继续完成后续推理和任务执行。
----
-⚙️ Distributed Runtime
-AgentMesh 针对 Multi-Worker Agent Runtime 实现了分布式任务执行与故障恢复机制。
-主要包括：
-Durable Queue
-Worker Registration
-Worker Heartbeat
-Lease
-Fencing Token
-Idempotent Execution
-Backpressure
-Deadline
-Cancel
-Worker Recovery
-Dispatcher Recovery
-Task Reassignment
-Lease / Fencing
-通过：
-```text
-Lease + Fencing Token
-```
-控制 Worker 的任务执行所有权。
-基本过程：
-```text
-Task
-  ↓
-Durable Queue
-  ↓
-Worker Acquire Lease
-  ↓
-Generate Fencing Token
-  ↓
-Execute Task
-  ↓
-Commit Result
-```
-当 Worker 超时或失联后，任务可以重新分配给新的 Worker。
-旧 Worker 即使之后恢复，也无法使用过期的 Fencing Token 覆盖新 Worker 已提交的执行结果，从而降低重复执行及脏写风险。
-RESULT_PENDING 与结果交付
-P21 为“Agent 已计算完成、业务尚未确认结果”增加了 `RESULT_PENDING` 协调机制：Broker ACK 仅表示 Kafka 接收了消息，Business ACK 才表示 Go 已完成业务提交。 在业务确认前保留必要的执行归属，避免消费滞后被错误认定为 Worker 丢失。
----
-📨 Kafka Event Plane & Durable Result Delivery（P21）
-旧版结果链路依赖 Python 向 Go 发起 HTTP Callback；网络抖动或 Go 暂时不可达时，有限次 Retry 可能仍无法交付结果。P21 在保留 HTTP 兼容模式的同时，新增可恢复的异步结果通道。
-```text
-Go Durable Queue / Scheduler
-            ↓ assignment (HTTP)
-Python Worker → LLM / Tool / MCP → Result
-            ↓ persist before publish
-       SQLite Outbox
-            ↓ publish / Broker ACK
-  Kafka: agentmesh.runtime.events
-            ↓ consumer group
-      Go Result Consumer
-            ↓ validate fence + deduplicate
-  Business Finalization / MySQL
-            ↓ Business ACK
-  Release execution ownership
-```
-主要机制：
-SQLite Durable Outbox：先持久化终态事件，再异步发送；Kafka 故障或 Python 进程重启后可恢复待投递记录（前提是 Outbox 文件可恢复）。
-Broker ACK / Business ACK 分离：消息入 Kafka 不代表任务已完成；`RESULT_PENDING` 避免过早释放执行所有权。
-At-Least-Once + 幂等消费：通过稳定 `event_id`、数据库处理记录与业务状态恢复，处理重复投递；业务提交后才推进 Kafka 消费位点。
-Lease / Fencing：拒绝旧执行归属的结果；支持同一 Worker 在更高 fence 下重新执行。
-DLQ 隐私保护：无法正常处理的消息可进入 DLQ，记录哈希、大小、来源位置及错误分类，不保存可逆的原始敏感消息。
-HTTP Fallback：通过配置保留旧结果回调路径，便于兼容和故障排查。
-Kafka 负责事件传输，原有 Go Durable Queue 仍负责任务调度；二者职责不同，不能相互替代。P21 已实际接入的核心业务是 Runtime Result。Tool / Model / Audit / Usage 等 Topic 具备基础配置，但不等于相应事件生产者和消费者已全部投入使用。
-详细设计与验收合同：`docs/p21/P21_EVENT_DRIVEN_RUNTIME.md`、`docs/p21/CODEX_P21_VALIDATION.md`。
----
-🔐 Multi-Tenant Governance
-AgentMesh 支持多用户、多组织以及多项目资源治理。
-主要资源层级：
-```text
-User
-  ↓
-Organization
-  ↓
-Workspace / Project
-  ↓
-Agent
-Knowledge
-Conversation
-Memory
-Model
-Tool
-MCP
-```
-主要能力：
-Organization
-Workspace
-Project
-RBAC
-Project Scope
-Resource Ownership
-BYOK
-Secret Isolation
-Knowledge Isolation
-Conversation Isolation
-Memory Isolation
-Tool Governance
-通过 User / Organization / Project Scope 对平台资源进行权限与归属校验，避免不同用户或项目之间出现数据串用。
----
-🔑 Model Gateway & BYOK
-AgentMesh 支持项目级模型配置以及 BYOK：
-```text
-Bring Your Own Key
-```
-模型访问通过统一的 Provider 层进行抽象，Runtime 不直接与单一模型厂商强绑定。
-主要能力：
-Model Provider
-Project Model Configuration
-BYOK
-Secret Isolation
-Usage Control
-Governance Check
-不同项目可以配置各自的 Model Provider 与访问凭据。
----
-🌐 Platform Capability
-除 Agent Runtime 外，AgentMesh 还提供部分平台化能力。
-包括：
-Public API
-API Key
-Service Account
-Python SDK
-TypeScript SDK
-Agent Template
-Agent Versioning
-Plugin Registry
-MCP Registry
-Marketplace
-用于支持 Agent 能力复用以及第三方系统接入。
----
-🖥️ Desktop Bridge
-项目包含 Desktop Bridge，用于扩展 Agent 与本地桌面环境之间的交互能力。
-当前主要能力包括：
-Desktop Capability Discovery
-Read-only Desktop Access
-Tool Integration
-Governance Check
-Runtime Trace
-Desktop 能力仍然遵循平台的 Project Scope 与 Governance 检查机制。
----
-📊 Execution Trace & Observability
-AgentMesh 提供 Agent 执行全过程追踪能力。
-包括：
-Execution Trace
-Run Details
-Task Profile
-Scheduling Decision
-Agent Execution
-Tool Invocation
-MCP Invocation
-Failover Event
-Runtime Error
-Recovery Event
-可以用于分析：
-```text
-为什么选择这个 Agent？
-
-当前任务被拆成了什么结构？
-
-RAG 检索到了什么内容？
-
-Agent 调用了什么 Tool / MCP？
-
-哪个 Worker 执行了任务？
-
-为什么发生 Runtime Rescheduling？
-
-任务失败以后如何恢复？
-
-最终结果来自哪一条执行链路？
-```
----
-🏗 Architecture
-AgentMesh 使用多语言分层架构：React/TypeScript 提供交互界面，Go 控制面处理身份、治理和持久任务调度，Python Runtime 执行 Agent。P21 额外引入独立的结果事件传输链路。
-```text
-React / TypeScript Web
-       │ HTTP / SSE
-       ▼
-Nginx Gateway（部署可选；同源代理 / TLS）
-       │
-       ▼
-Go Control Plane ────────────────► MySQL / Redis
-  │ Auth / Registry / Governance      任务、会话、状态、缓存
-  │ Durable Queue / Lease / Fence
-  │
-  └── HTTP assignment ─────────► Python Agent Runtime
-                                │ LangGraph / RAG / Memory / Tool / MCP
-                                ├──────────────► Milvus（向量检索）
-                                │
-                                ▼
-                          SQLite Durable Outbox
-                                │
-                                ▼
-                             Kafka
-                                │ runtime events
-                                ▼
-                         Go Result Consumer
-                                │ idempotency / fencing / finalize
-                                └──────────────► MySQL
-```
-说明： MySQL/Redis 与 Python 的实际读写由具体模块决定，图中重点展示任务分发和结果回传。Windows 本地开发不要求启动 Nginx；Nginx 属于可选网关部署形态。Kafka 不是 Go 与 Python 之间所有 HTTP 的替代品。
----
-🧩 Runtime Flow
-一条采用 Kafka 结果传输的典型 Durable Agent 任务：
-```text
-User Request
-   ↓
-Go: Auth / Project Scope / Governance
-   ↓
-Go: Durable Queue → Dispatcher → Lease / Fencing
-   ↓ HTTP assignment
-Python Worker: Agent execution (RAG / Memory / Tool / MCP)
-   ↓
-Result generated → persist SQLite Outbox
-   ↓
-Kafka publish → Broker ACK
-   ↓ (RESULT_PENDING while awaiting business completion)
-Go Consumer: fence validation → event idempotency
-   ↓
-Finalize task / result / conversation in MySQL
-   ↓
-Business ACK → release execution ownership
-   ↓
-Task COMPLETED / UI displays final answer
-```
-如果 Kafka 暂时不可用，Outbox 保留待发送事件；如果 Go 消费者暂时不可用，Kafka 在保留策略内积压消息。重复投递需要通过业务幂等处理，不能仅依靠 Kafka 避免重复副作用。旧 HTTP Callback 仍为可选兼容模式。
----
-🛠 Tech Stack
-Backend
-```text
-Go
-Gin
-Python
-FastAPI
-Pydantic
-asyncio
-LangGraph
-```
-Frontend
-```text
-React
-TypeScript
-Vite
-```
-Storage & Messaging
-```text
-MySQL                   Durable history / business state
-Redis                   Working memory / cache
-Milvus                  Vector database
-SQLite                  Python local durable result outbox
-Apache Kafka 3.9.1      Runtime result event transport（开发 Compose）
-```
-Agent
-```text
-Multi-Agent
-LangGraph
-RAG
-Memory
-Tool Calling
-MCP
-Capability Discovery
-Agent Routing
-Runtime Rescheduling
-Execution Trace
-```
-Infrastructure
-```text
-Docker
-Docker Compose
-Nginx
-JWT
-SSE
-RBAC
-```
----
-📁 Project Structure
-```text
-AgentMesh
-├── backend-go
-│   └── Go Control Plane
-│
-├── runtime-python
-│   └── Python Agent Runtime
-│
-├── web-react
-│   └── React / TypeScript Web
-│
-├── desktop-bridge
-│   └── Desktop Integration
-│
-├── infra
-│   └── Infrastructure / Docker Compose
-│
-├── scripts
-│   ├── Test
-│   ├── Release
-│   └── Ops
-│
-├── docs
-│   ├── p21                 # Event Plane 设计、验收与发布说明
-│   └── Architecture / Validation / Documentation
-│
-├── docker-compose.yml      # 开发基础设施（含 Kafka）
+AgentMesh/
+├── backend-go/                 # Go API、鉴权、治理、调度、Kafka Consumer
+│   ├── cmd/server/
+│   ├── cmd/migrate/
+│   └── internal/eventbus/
+├── runtime-python/             # Agent、RAG、Memory、Tool、Worker、Outbox
+│   ├── app/distributed/
+│   └── tests/
+├── web-react/                  # React UI、合同测试、Browser E2E
+├── desktop-bridge/             # 可选的独立桌面受限执行桥
+├── sdk/python/                 # Python SDK
+├── sdk/typescript/             # TypeScript SDK
+├── infra/                      # Gateway / MySQL 等部署资源
+├── scripts/                    # Smoke、测试、发布、运维脚本
+├── docs/                       # 架构、分阶段验收与运行说明
+├── docker-compose.yml          # 本地基础设施（含单节点 Kafka）
 ├── docker-compose.production.yml
 ├── docker-compose.v3-ha.yml
-│
 ├── VERSION
 ├── MANIFEST.json
-├── LICENSE
 └── README.md
 ```
 ---
-🚀 Quick Start
-Requirements
-准备 Go、Python、Node.js、Docker Desktop / Docker Compose。请按项目配置文件中的要求安装依赖，并为实际模型服务配置可用的 Provider；本地可靠性测试可以使用项目内置的确定性 Mock Provider。
-```bash
-git clone https://github.com/QinLingHang/AgentMesh.git
-cd AgentMesh
-```
-Windows 本地开发（P21 已验收的部署形态）
+本地运行（Windows 开发环境）
+当前已验收的本地架构是：Go / Python / React 在 Windows 本机运行；Docker 只承载 MySQL、Redis、Kafka、Milvus、etcd 和 MinIO。请勿将 Docker 中间件的可用状态误当作 Go / Python 已运行。
+1. 基础设施
+安装 Go、Python、Node.js、Docker Desktop 和 Docker Compose。已存在的 Compose Project 固定为：
 ```text
-Windows 本机：Go Control Plane / Python Runtime / React
-Docker Compose：MySQL / Redis / Kafka / Milvus / etcd / MinIO
-Compose Project：agentmesh_runtime_mvp_full_v02
+agentmesh_runtime_mvp_full_v02
 ```
-先打开 Docker Desktop，并确认当前目录的 `docker-compose.yml` 确实指向原有基础设施，再检查已有容器：
+进入仓库根目录后，先检查，不要对已有共享数据直接执行 `down`、`down -v` 或全量重建：
 ```powershell
 docker compose -p agentmesh_runtime_mvp_full_v02 ps
 ```
-初次启用 Kafka、且已核实使用这份 Compose 文件时，可按需启动 Kafka 与 Topic 初始化服务：
+全新独立开发环境在确认没有同名共享容器与数据卷后，才可根据 `docker-compose.yml` 初始化所需服务。当前本地示例端口为 MySQL `3310`、Redis `6382`、Milvus `19530`、Kafka `29092`；容器内部 Kafka 地址为 `kafka:9092`。`kafka-init` 创建 Topic 后正常退出，不需要常驻。
+2. 配置本地环境
+参考 `backend-go/.env.example` 与 `runtime-python/.env.example` 设置环境变量或创建本地 `.env`（不要提交）。确保：
+Go 的 `RUNTIME_INTERNAL_TOKEN` 与 Python 的 `INTERNAL_TOKEN` 一致，并配置正确的数据库、Redis 与 JWT / Governance 密钥。
+Windows 本机 Go / Python 访问 Kafka 使用 `127.0.0.1:29092`；不要使用仅容器内可解析的 `kafka:9092`。
+Kafka 结果链路需要 Go：`KAFKA_ENABLED=true`，Python：`RUNTIME_RESULT_TRANSPORT=kafka`。
+Python 的 `KAFKA_OUTBOX_PATH` 指向可持久保存、不会被临时清理的目录。
+登录后通过模型设置配置可用模型服务；离线验证可使用系统已有的 `mock` Provider，不需要把真实 API Key 写进仓库。
+3. 启动 Python Runtime
+在第一个 PowerShell 窗口：
 ```powershell
-docker compose -p agentmesh_runtime_mvp_full_v02 up -d kafka kafka-init
+cd runtime-python
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m uvicorn app.main:app --host 127.0.0.1 --port 9572
 ```
-不要在共享开发环境随意执行 `docker compose down -v`，也不要以新的 Compose Project 名重复创建基础设施。`kafka-init` 创建完 Topic 后正常退出（exit 0）。
-Go、Python 在 Windows 本机运行时，依据 `.env.example` 配置 Kafka：
-```dotenv
-# backend-go：启用 Go Kafka Runtime Consumer
-KAFKA_ENABLED=true
-KAFKA_BROKERS=127.0.0.1:29092
-
-# runtime-python：启用 SQLite Outbox + Kafka Result Transport
-RUNTIME_RESULT_TRANSPORT=kafka
-KAFKA_BROKERS=127.0.0.1:29092
+4. 启动 Go Control Plane
+在第二个 PowerShell 窗口：
+```powershell
+cd backend-go
+go mod download
+go run ./cmd/server
 ```
-以上是两个模块各自的配置示例，不要把注释和两组配置直接当作一个共享 `.env`。在相应模块中完成数据库连接、Runtime 内部 API、模型服务与前端设置后，按项目现有启动文档启动 Windows 本地进程；这里不假设每个人的启动脚本、端口或凭据相同。
-容器内 Kafka 地址通常为 `kafka:9092`，本机地址为 `127.0.0.1:29092`（以实际 Compose Listener 配置为准）。若需要旧回调模式，使用 `RUNTIME_RESULT_TRANSPORT=http` 并核对 Go/Python 对应的结果交付配置。
-不要提交 `.env`、`runtime-python/data/`、SQLite Outbox、凭据或测试生成的数据文件。更完整的设计与校验步骤见 `docs/p21/`。
+Go Server 启动时会运行数据库迁移；独立迁移入口为 `go run ./cmd/migrate`，实际环境应按运维流程控制迁移时机。首次启动前请确认连接的是你预期的数据库。
+5. 启动前端
+在第三个 PowerShell 窗口：
+```powershell
+cd web-react
+npm ci
+npm run dev
+```
+打开 `http://localhost:5173`。Vite 默认将 `/api` 代理到 `http://127.0.0.1:8086`。可查看 Go `http://127.0.0.1:8086/health` 与 Python `http://127.0.0.1:9572/health`，并检查 Worker 心跳和 Result Transport 状态。
+以上命令均应从对应子项目目录执行；如果使用虚拟环境、已有本地密钥或其他端口，以实际配置为准。
+其他部署方式
+仓库还提供生产 Compose、三节点 KRaft Kafka 配置、Gateway / TLS、迁移与运维脚本，详见 `docs/p10/RUNBOOK.md`。这些配置与脚本不代表当前 P21 已完成容器化生产镜像构建和公网发布验收。
 ---
-✅ Reliability Validation
-AgentMesh 在开发过程中针对 Agent Runtime、分布式执行、长会话以及多租户场景进行了持续自动化验收。
-既往阶段的部分验收结果（不同版本、不同测试范围；不能视为全部在同一次生产部署下验证）：
-```text
-Conversation History Recovery     PASS
-125 / 125 Message Recovery        PASS
-Memory Capsule                    PASS
-Redis-loss Recovery               PASS
+测试与验收
+常用本地测试入口：
+```powershell
+# Go（在 backend-go/ 中）
+go test ./...
+go build -mod=readonly ./cmd/server
+go build -mod=readonly ./cmd/migrate
 
-Durable Queue                     PASS
-Worker Heartbeat                  PASS
-Lease / Fencing                   PASS
-Idempotent Execution              PASS
-Worker Recovery                   PASS
-Dispatcher Recovery               PASS
+# Python（在 runtime-python/ 中）
+python -m pytest -q
 
-Multi-Agent Runtime               PASS
-Runtime Rescheduling              PASS
-Multimodal RAG                    PASS
-Tool / MCP                        PASS
+# Frontend（在 web-react/ 中）
+npm test
+npm run build
 
-Multi-Tenant Isolation            PASS
-Governance                        PASS
+# Python SDK（在 sdk/python/ 中）
+python -m unittest discover -s tests -p "test_*.py"
 
-Browser E2E                       PASS
-Release Validator                 PASS
-Strict-tree Validation            PASS
-
-P21 Windows Local Deployment      FINAL PASS
-Kafka Outage E2E (B/B2)           PASS
-Outbox / Broker vs Business ACK   PASS
-Same-worker Higher Fence          PASS
-Successful Duplicate Idempotency PASS
-Go Consumer Backlog Recovery      PASS
-COMPLETING Crash Replay          21/21 PASS
-HTTP Fallback                     PASS
-DLQ Privacy / Offset-skip         PASS
-Go readonly build (server/migrate) PASS
+# TypeScript SDK（在 sdk/typescript/ 中）
+npm ci
+npm test
 ```
-P21 验收环境为 Windows 本机 Go/Python/React + `agentmesh_runtime_mvp_full_v02` Docker 基础设施。该结论仅覆盖此部署形态；Go/Python 容器化构建、生产集群发布及海量吞吐压力测试尚未作为本次 P21 验收结论。
+数据库集成测试需要独立、可清理的测试 DSN，不能把开发数据库冒充测试库；缺少 DSN 而跳过的测试不应报告为 PASS。Browser E2E、隔离测试与发布验证有专门脚本及环境要求，详见 `docs/TESTING.md`、`web-react/e2e/` 与各阶段验收文档。
+已完成的 P20 / P21 验收范围
+P20 Conversation History Reliability： 曾以真实栈验证 125/125 历史消息可分页恢复、刷新后历史保留、Memory Capsule 和 Redis 丢失恢复；此处的 125 是验收样本规模，不是容量上限。
+P21 Windows Local Deployment — FINAL PASS： 在 Windows 本机 Go / Python / React + `agentmesh_runtime_mvp_full_v02` 中间件环境下，验证 Kafka 中断恢复、Durable Outbox、Consumer backlog 恢复、成功事件重复消费幂等、Same Worker Higher Fence、HTTP 回退与 DLQ 隐私。COMPLETING 崩溃重放故障注入记录为 21/21 PASS。
+P21 构建： Windows 本地 `go build -mod=readonly ./cmd/server` 与 `./cmd/migrate` 已通过，未修改 `go.mod` / `go.sum`。
+尚未宣称通过： P21 的 Docker 镜像生产构建、公网多节点部署、真实生产流量高并发压测，以及预建 Topic 上的完整 Tool / Model / Audit / Usage 事件消费者。
+测试报告反映特定版本、配置与场景的证据，不应解读为对所有网络故障或数据丢失场景的无限保证。
 ---
-📦 Release
-当前已发布的稳定版本：
+安全与数据边界
+AgentMesh 在源码中实现了身份认证、RBAC / Project Scope、BYOK 凭据保护、Tool / MCP Governance、Desktop 高风险审批与部分 Trace / DLQ 脱敏机制。实际对外部署仍需独立核实密钥、TLS、网络隔离、持久化备份与运维权限。
+以下内容不得进入 Git 或 Release 源码包：
 ```text
-AgentMesh v1.0.0
+.env / .env.local / .env.production
+API Key / JWT Secret / 内部 Token / TLS 私钥
+runtime-python/data/ 及 SQLite Outbox
+node_modules/ / .venv/ / __pycache__/ / .pytest_cache/
+dist/ / 日志 / 备份 / 用户上传 / 本地数据库
 ```
-Git Tag：
-```text
-v1.0.0
-```
-Release Source：
-```text
-AgentMesh_v1.0.0_SOURCE.zip
-```
-`v1.0.0` 已完成：
-Runtime Regression
-Distributed Runtime Validation
-Conversation History Validation
-Memory Recovery Validation
-Governance Validation
-Browser E2E
-Release Validator
-Strict-tree Validation
-Source Hygiene Validation
-Security / Privacy Validation
-版本状态：
-```text
-v1.0.0 Tag / Release: Stable Release
-main: 已合并 P21；P20 以实际提交记录为准
-```
-P21 已通过 Windows 本地部署最终验收，但尚未据此发布新的正式版本或新 Tag；不要把 `v1.0.0` 下载包视为已包含 P21。
+`MANIFEST.json` 是对应源码快照的完整性清单；修改 `main` 之后不能假设旧 Manifest 自动覆盖新提交。正式打包与发布需重新执行相应校验，不能直接复用旧 Release 的哈希。
+文档入口
+文档	用途
+`docs/ARCHITECTURE.md`	初期 Control Plane / Runtime 职责边界
+`docs/v2/ARCHITECTURE.md`	多模态检索与 Evaluation
+`docs/v3/ARCHITECTURE.md`	Multi-node、Lease / Fencing、Dispatcher HA
+`docs/v4/ARCHITECTURE.md`	模型服务池、Public API 与生态治理
+`docs/p21/P21_EVENT_DRIVEN_RUNTIME.md`	Kafka / Outbox / Consumer 设计
+`docs/p10/RUNBOOK.md`	Compose、Gateway、迁移与生产运维
+`docs/p12/SECURITY_BOUNDARIES.md`	Release 与安全边界
+`desktop-bridge/README.md`	桌面能力、权限及启动
+`sdk/README.md`	Python / TypeScript SDK
+项目演进与后续方向
+从 Agent / Memory / Tool / MCP 基础能力出发，项目逐步加入分布式执行、多租户治理、多模态与评测、平台生态、长会话可靠性和 Kafka 结果事件平面。后续仍需根据实际部署需求评估：生产 Kafka / Outbox 运维、高并发容量、更加完整的事件消费者、监控告警与对外发布流程。
+项目关注的核心工程问题： 当多个用户和 Agent 同时工作、模型和工具可能失败、网络与 Worker 可能中断时，怎样明确任务所有权、隔离数据、保留执行证据，并在不重复业务副作用的前提下安全恢复。
 ---
-🎯 Project Goal
-AgentMesh 的目标并不是简单封装一个 LLM Chat API。
-这个项目更关注：
-```text
-Agent 如何理解任务？
-
-Agent 如何发现能力？
-
-Agent 如何选择执行 Agent？
-
-多个 Agent 如何协作？
-
-Agent 如何获得外部知识？
-
-文本和图片知识如何统一检索？
-
-Agent 如何保存长期上下文？
-
-Agent 如何调用真实工具？
-
-Worker 故障以后任务如何继续执行？
-
-如何避免旧 Worker 重复提交结果？
-
-Redis Memory 丢失以后会话如何恢复？
-
-不同用户和项目的数据如何真正隔离？
-
-复杂 Agent 执行过程如何调试与追踪？
-
-Agent 执行成功，但网络/Kafka/Go 故障时如何可靠交付结果？
-
-消息重放时怎样避免重复写答案与旧 Worker 覆盖结果？
-```
-对于一个完整 Agent 系统而言，模型调用只是其中一个环节。
-真正复杂的工程问题往往集中在：
-```text
-State
-Context
-Memory
-RAG
-Tool
-Idempotency
-Recovery
-Isolation
-Scheduling
-Governance
-Observability
-Event Delivery
-```
-AgentMesh 主要围绕这些问题进行实现。
----
-🗺 Roadmap
-AgentMesh 的已发布稳定基线是 `v1.0.0`；P20 已完成专项验收、P21 已合并至开发主线。后续演进以实际提交记录与真实测试结果为准。
-后续如果继续演进，可能关注：
-更丰富的 Agent Runtime Strategy
-更完善的 Agent Evaluation
-更强的 Multimodal Agent 能力
-更多 MCP / Tool 生态接入
-更完善的 Runtime Observability
-更丰富的 Agent Template / Marketplace
-将 Tool / Model / Audit / Usage 等 Kafka Topic 从基础配置逐步扩展为真实生产者与消费者
-Kafka 多节点部署、容量规划、吞吐压测与容器化发布验收
-`v1.0.0` Release 与后续 `main` 开发进度应分别查看，避免把未发布能力误认为已经包含在稳定发布包中。
----
-📄 License
-This project is licensed under the Apache License 2.0.
-See:
-```text
-LICENSE
-```
-for details.
----
-👨‍💻 Author
-Qin LingHang
-GitHub:
-https://github.com/QinLingHang
----
-如果这个项目对你的 Agent / Multi-Agent 学习有所帮助，欢迎 Star ⭐
+License
+Apache License 2.0，详见 `LICENSE`。
+Author
+Qin LingHang · GitHub
+如果这个项目对你的 Agent / Multi-Agent 开发有所帮助，欢迎 Star ⭐
