@@ -116,6 +116,19 @@ class Settings(
     runtime_worker_shutdown_grace_seconds: float = 20.0
     runtime_worker_dedupe_retention_seconds: float = 3600.0
 
+    # =====================================================
+    # P21 Event Plane / Runtime Result Transport
+    # =====================================================
+
+    # http preserves the P8 callback path. kafka persists results into a local
+    # SQLite outbox first, then publishes runtime.execution.result events.
+    runtime_result_transport: str = "http"
+    kafka_brokers: str = "127.0.0.1:29092"
+    kafka_runtime_result_topic: str = "agentmesh.runtime.events"
+    kafka_client_id: str = "agentmesh-runtime-python"
+    kafka_outbox_path: str = "./data/runtime_result_outbox.sqlite3"
+    kafka_publish_timeout_seconds: float = 10.0
+
         # =====================================================
     # A2A Agent
     # =====================================================

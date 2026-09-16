@@ -56,6 +56,8 @@ type Dependencies struct {
 	TaskRateLimit int
 
 	InternalToken string
+
+	EventPlaneStatus func() map[string]any
 }
 
 func New(
@@ -73,6 +75,7 @@ func New(
 		r,
 		deps.DB,
 		deps.Redis,
+		deps.EventPlaneStatus,
 	)
 
 	internal := r.Group(

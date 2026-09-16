@@ -595,6 +595,9 @@ type DurableRuntimeRepository interface {
 		time.Duration,
 	) (int64, error)
 
+	MarkRuntimeJobResultPending(context.Context, int64, string, string, string, int64) (bool, error)
+	ReconcileCommittedCompletingJobs(context.Context, time.Time) (int64, error)
+
 	RuntimeWorkerByID(
 		context.Context,
 		string,
@@ -633,6 +636,14 @@ type DurableRuntimeRepository interface {
 	) (*model.RuntimeJob, error)
 
 	BeginRuntimeJobCallback(
+		context.Context,
+		int64,
+		string,
+		string,
+		string,
+	) (bool, error)
+
+	RuntimeJobCallbackOwned(
 		context.Context,
 		int64,
 		string,

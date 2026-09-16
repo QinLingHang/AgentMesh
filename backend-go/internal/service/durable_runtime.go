@@ -41,8 +41,10 @@ type DurableRuntimeService struct {
 	runtime     *runtimeclient.Client
 	cfg         DurableRuntimeConfig
 
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
+	startedAt       time.Time
+	nextReconcileAt time.Time
 }
 
 type DurableExecutionCallback struct {
@@ -110,6 +112,7 @@ func (s *DurableRuntimeService) Start(parent context.Context) {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	s.cancel = cancel
+	s.startedAt = time.Now().UTC()
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -333,12 +336,28 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 	if _, err := s.repo.RecoverExpiredRuntimeLeases(ctx, now); err != nil {
 		log.Printf("v3 recover pre-accept runtime leases: %v", err)
 	}
-	if requeued, failed, recoverErr := s.repo.RecoverLostAcceptedRuntimeJobs(
-		ctx, now, s.cfg.RetryBackoff, 50,
-	); recoverErr != nil {
-		log.Printf("v3 recover accepted runtime executions: %v", recoverErr)
-	} else if requeued > 0 || failed > 0 {
-		log.Printf("v3 accepted execution recovery requeued=%d failed=%d", requeued, failed)
+	// After a control-plane restart, give workers time to reconnect/renew
+	// before recovering old ACCEPTED leases. Otherwise the dispatcher can race
+	// an already-published Kafka result and irreversibly fail its task.
+	if s.startedAt.IsZero() || !now.Before(s.startedAt.Add(2*s.cfg.WorkerStaleAfter)) {
+		if requeued, failed, recoverErr := s.repo.RecoverLostAcceptedRuntimeJobs(
+			ctx, now, s.cfg.RetryBackoff, 50,
+		); recoverErr != nil {
+			log.Printf("v3 recover accepted runtime executions: %v", recoverErr)
+		} else if requeued > 0 || failed > 0 {
+			log.Printf("v3 accepted execution recovery requeued=%d failed=%d", requeued, failed)
+		}
+	}
+	// COMPLETING must never be failed based on a 30s wall-clock timeout: its
+	// task/history transaction may already be committed. Prefer Kafka replay;
+	// reconcile committed task terminals only after a generous replay window.
+	if !now.Before(s.nextReconcileAt) {
+		s.nextReconcileAt = now.Add(time.Minute)
+		if reconciled, reconcileErr := s.repo.ReconcileCommittedCompletingJobs(ctx, now.Add(-10*time.Minute)); reconcileErr != nil {
+			log.Printf("p21 reconcile committed callbacks failed: %v", reconcileErr)
+		} else if reconciled > 0 {
+			log.Printf("p21 reconciled committed callbacks count=%d", reconciled)
+		}
 	}
 
 	expired, err := s.repo.ListExpiredAcceptedRuntimeJobs(ctx, now, 50)
@@ -510,8 +529,8 @@ func (s *DurableRuntimeService) dispatchOne(
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "worker accepted execution but control-plane acknowledgement failed")
 		return
 	}
-	// The callback can race the 202 acknowledgement and move DISPATCHING directly
-	// to COMPLETING. In that case marked=false is valid and still safe.
+	// The result-pending heartbeat or callback can race the 202 acknowledgement
+	// and advance DISPATCHING before this step. marked=false is valid.
 	if marked {
 		_ = s.repo.RecordRuntimeWorkerDispatchSuccess(ctx, worker.WorkerID)
 	}
@@ -521,9 +540,9 @@ func (s *DurableRuntimeService) Heartbeat(
 	ctx context.Context,
 	worker model.RuntimeWorker,
 	leases []model.RuntimeExecutionLeaseRef,
-) error {
+) ([]string, error) {
 	if strings.TrimSpace(worker.WorkerID) == "" || strings.TrimSpace(worker.Endpoint) == "" {
-		return ErrInvalidInput
+		return nil, ErrInvalidInput
 	}
 	worker.WorkerID = strings.TrimSpace(worker.WorkerID)
 	worker.NodeID = strings.TrimSpace(worker.NodeID)
@@ -531,65 +550,151 @@ func (s *DurableRuntimeService) Heartbeat(
 		worker.NodeID = worker.WorkerID
 	}
 	if err := s.repo.HeartbeatRuntimeWorker(ctx, worker); err != nil {
-		return err
+		return nil, err
+	}
+	for _, lease := range leases {
+		if !lease.ResultPending || lease.JobID <= 0 || lease.ExecutionID == "" || lease.LeaseToken == "" {
+			continue
+		}
+		if _, err := s.repo.MarkRuntimeJobResultPending(
+			ctx, lease.JobID, lease.ExecutionID, worker.WorkerID,
+			lease.LeaseToken, lease.FenceEpoch,
+		); err != nil {
+			return nil, err
+		}
 	}
 	_, err := s.repo.RenewRuntimeExecutionLeases(
 		ctx, worker.WorkerID, leases, s.cfg.ExecutionLeaseDuration,
 	)
+	if err != nil {
+		return nil, err
+	}
+	terminal := make([]string, 0)
+	for _, lease := range leases {
+		if !lease.ResultPending {
+			continue
+		}
+		job, err := s.repo.RuntimeJobByID(ctx, lease.JobID)
+		if err != nil {
+			return nil, err
+		}
+		if job == nil || job.ExecutionID != lease.ExecutionID || job.WorkerID == nil ||
+			*job.WorkerID != worker.WorkerID || job.FenceEpoch != lease.FenceEpoch {
+			continue
+		}
+		if job.Status == "COMPLETED" || job.Status == "FAILED" || job.Status == "CANCELED" {
+			terminal = append(terminal, lease.ExecutionID)
+		}
+	}
+	return terminal, nil
+}
+
+type DurableCallbackOutcome string
+
+const (
+	DurableCallbackApplied    DurableCallbackOutcome = "applied"
+	DurableCallbackRecovered  DurableCallbackOutcome = "recovered"
+	DurableCallbackDuplicate  DurableCallbackOutcome = "duplicate"
+	DurableCallbackStaleFence DurableCallbackOutcome = "stale_fence"
+	DurableCallbackTerminal   DurableCallbackOutcome = "terminal"
+)
+
+func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callback DurableExecutionCallback) error {
+	_, err := s.CallbackWithOutcome(ctx, jobID, callback)
 	return err
 }
 
-func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callback DurableExecutionCallback) error {
+// CallbackWithOutcome preserves the P8/P10 HTTP callback contract while exposing
+// the no-op reason needed by the P21 Kafka consumer for observability. It is also
+// restart-safe for callbacks that were fenced into COMPLETING before a consumer
+// process crashed: the same execution/worker/lease may resume finalization, while
+// stale workers remain fenced out.
+func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID int64, callback DurableExecutionCallback) (DurableCallbackOutcome, error) {
 	job, err := s.repo.RuntimeJobByID(ctx, jobID)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if job == nil {
-		return ErrNotFound
+		return "", ErrNotFound
 	}
 	if job.Status == "COMPLETED" || job.Status == "CANCELED" || job.Status == "FAILED" {
-		return nil
+		return DurableCallbackTerminal, nil
 	}
 
 	// V3 adds a monotonic fence epoch on top of the random lease token. Older
 	// P8 workers omit it (zero) and remain compatible; V3 workers must match the
 	// current assignment so callbacks from a recovered stale node are ignored.
 	if callback.FenceEpoch != 0 && callback.FenceEpoch != job.FenceEpoch {
-		return nil
+		return DurableCallbackStaleFence, nil
 	}
 
-	begun, err := s.repo.BeginRuntimeJobCallback(ctx, jobID, callback.ExecutionID, callback.WorkerID, callback.LeaseToken)
-	if err != nil {
-		return err
-	}
-	if !begun {
-		// A duplicate callback may observe COMPLETING after the first callback won
-		// the CAS. It must never execute the side effects twice.
-		return nil
+	resuming := job.Status == "COMPLETING"
+	if resuming {
+		owned, ownershipErr := s.repo.RuntimeJobCallbackOwned(
+			ctx, jobID, callback.ExecutionID, callback.WorkerID, callback.LeaseToken,
+		)
+		if ownershipErr != nil {
+			return "", ownershipErr
+		}
+		if !owned {
+			return DurableCallbackDuplicate, nil
+		}
+	} else {
+		begun, beginErr := s.repo.BeginRuntimeJobCallback(ctx, jobID, callback.ExecutionID, callback.WorkerID, callback.LeaseToken)
+		if beginErr != nil {
+			return "", beginErr
+		}
+		if !begun {
+			// A duplicate callback may observe a state that no longer accepts this
+			// lease. It must never execute the side effects twice.
+			return DurableCallbackDuplicate, nil
+		}
 	}
 
 	status := strings.ToLower(strings.TrimSpace(callback.Status))
 	if status == "canceled" {
-		return s.repo.FailRuntimeJob(ctx, jobID, "runtime execution canceled")
+		if err := s.repo.FailRuntimeJob(ctx, jobID, "runtime execution canceled"); err != nil {
+			return "", err
+		}
+		return DurableCallbackApplied, nil
 	}
 	if status == "failed" || callback.Response == nil {
 		category := strings.TrimSpace(callback.ErrorCategory)
 		if category == "" {
 			category = "runtime_execution_failed"
 		}
-		return s.repo.FailRuntimeJob(ctx, jobID, category)
+		if err := s.repo.FailRuntimeJob(ctx, jobID, category); err != nil {
+			return "", err
+		}
+		return DurableCallbackApplied, nil
 	}
 
 	task, err := s.taskService.tasks.TaskByID(ctx, job.UserID, job.TaskID)
 	if err != nil {
 		_ = s.repo.FailRuntimeJob(ctx, jobID, "task persistence unavailable")
-		return err
+		return "", err
 	}
 	if task == nil {
 		_ = s.repo.FailRuntimeJob(ctx, jobID, "task missing")
-		return ErrNotFound
+		return "", ErrNotFound
 	}
 	response := callback.Response
+	runtimeStatus := normalizeRuntimeStatus(response.Status)
+
+	// A crash can happen after the authoritative task/history transaction commits
+	// but before runtime_jobs moves from COMPLETING to COMPLETED. On replay, finish
+	// only the runtime-job marker instead of trying to write the user result twice.
+	if resuming {
+		alreadyFinalized := runtimeStatus == "COMPLETED" && task.Status == "COMPLETED"
+		alreadySuspended := (runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED") && task.Status == runtimeStatus
+		if alreadyFinalized || alreadySuspended {
+			if err := s.repo.MarkRuntimeJobCompleted(ctx, jobID); err != nil {
+				return "", err
+			}
+			return DurableCallbackRecovered, nil
+		}
+	}
+
 	response.Trace = append([]map[string]any{durableReliabilityTrace(
 		job, callback.WorkerID, callback.DispatcherEpoch, "completed",
 	)}, response.Trace...)
@@ -606,12 +711,10 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	}
 	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability, response.EstimatedCost)
 
-	runtimeStatus := normalizeRuntimeStatus(response.Status)
-
 	if runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED" {
 		if response.Continuation == nil {
 			_ = s.repo.FailRuntimeJob(ctx, jobID, "runtime suspended without continuation")
-			return errors.New("runtime suspended without continuation")
+			return "", errors.New("runtime suspended without continuation")
 		}
 		continuation := runtimeContinuationToModel(response.Continuation)
 		var assistantMessage *repository.AssistantMessageWrite
@@ -619,7 +722,7 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 			assistantMessage = &repository.AssistantMessageWrite{
 				UserID: job.UserID, ConversationID: conversationIDValue(task.ConversationID), Content: response.Answer, Status: runtimeStatus, RequestID: task.RequestID,
 				Metadata: map[string]any{
-					"taskId": task.ID, "runtimePhase": "durable_suspended", "deliveryMode": "durable",
+					"taskId": job.TaskID, "runtimePhase": "durable_suspended", "deliveryMode": "durable",
 					"trace": response.Trace, "dag": response.DAG, "selectedAgents": response.SelectedAgents,
 					"taskProfile": response.TaskProfile, "observability": response.Observability,
 					"scorecard": response.Scorecard, "agentFeedback": response.AgentFeedback,
@@ -633,13 +736,19 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 			LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
 		}, assistantMessage); err != nil {
 			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime suspension and assistant history")
-			return err
+			return "", err
 		}
-		return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
+		if err := s.repo.MarkRuntimeJobCompleted(ctx, jobID); err != nil {
+			return "", err
+		}
+		return DurableCallbackApplied, nil
 	}
 
 	if runtimeStatus != "COMPLETED" {
-		return s.repo.FailRuntimeJob(ctx, jobID, "unsupported runtime status")
+		if err := s.repo.FailRuntimeJob(ctx, jobID, "unsupported runtime status"); err != nil {
+			return "", err
+		}
+		return DurableCallbackApplied, nil
 	}
 	var assistantMessage *repository.AssistantMessageWrite
 	if task.ConversationID != nil {
@@ -660,14 +769,17 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 		Trace: response.Trace, DAG: response.DAG, LatencyMS: response.ElapsedMS, EstimatedCost: response.EstimatedCost,
 	}, assistantMessage); err != nil {
 		_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist runtime completion and assistant history")
-		return err
+		return "", err
 	}
 	if err := s.taskService.agents.RecordAgentFeedback(ctx, job.UserID, task.RequestID, response.AgentFeedback); err != nil {
 		// Evaluation feedback persistence is important but cannot turn an already
 		// completed user task into an execution replay.
 		log.Printf("p8 agent feedback persistence failed: %v", err)
 	}
-	return s.repo.MarkRuntimeJobCompleted(ctx, jobID)
+	if err := s.repo.MarkRuntimeJobCompleted(ctx, jobID); err != nil {
+		return "", err
+	}
+	return DurableCallbackApplied, nil
 }
 
 func durableReliabilityTrace(job *model.RuntimeJob, workerID string, dispatcherEpoch int64, status string) map[string]any {

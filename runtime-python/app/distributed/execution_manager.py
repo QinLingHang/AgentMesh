@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from dataclasses import dataclass
 from typing import Awaitable, Callable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas import RuntimeRequest, RuntimeResponse
+from app.distributed.result_transport import HttpResultTransport, ResultDelivery, ResultTransport
+
+
+logger = logging.getLogger(__name__)
 
 
 class DurableExecutionEnvelope(BaseModel):
@@ -30,6 +35,7 @@ class DurableExecutionAccepted(BaseModel):
     accepted: bool = True
     duplicate: bool = False
     worker_id: str = Field(alias="workerId")
+    fence_epoch: int = Field(default=0, alias="fenceEpoch")
 
 
 class WorkerUnavailable(RuntimeError):
@@ -43,6 +49,8 @@ class _ExecutionRecord:
     envelope: DurableExecutionEnvelope
     task: asyncio.Task[None]
     created_at: float
+    result_pending: bool = False
+    finalized: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class DurableExecutionManager:
@@ -75,6 +83,7 @@ class DurableExecutionManager:
         node_zone: str = "",
         node_version: str = "",
         node_capacity: int = 0,
+        result_transport: ResultTransport | None = None,
     ) -> None:
         self.worker_id = worker_id.strip()
         self.worker_endpoint = worker_endpoint.rstrip("/")
@@ -92,12 +101,22 @@ class DurableExecutionManager:
         self.shutdown_grace_seconds = max(1.0, shutdown_grace_seconds)
         self.dedupe_retention_seconds = max(30.0, dedupe_retention_seconds)
         self._runner = runner
+        self._result_transport = result_transport or HttpResultTransport(
+            internal_token=internal_token,
+            timeout_seconds=callback_timeout_seconds,
+            max_retries=callback_max_retries,
+        )
 
         self._lock = asyncio.Lock()
         self._records: dict[str, _ExecutionRecord] = {}
         self._draining = False
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._stopping = False
+        self._heartbeat_sent_total = 0
+        self._heartbeat_failed_total = 0
+        self._heartbeat_last_success_at: str | None = None
+        self._heartbeat_last_failure_at: str | None = None
+        self._heartbeat_last_error_category: str | None = None
 
     @property
     def draining(self) -> bool:
@@ -106,20 +125,38 @@ class DurableExecutionManager:
     def active_count(self) -> int:
         return sum(1 for record in self._records.values() if not record.task.done())
 
+    def heartbeat_status(self) -> dict[str, object]:
+        return {
+            "sent": self._heartbeat_sent_total,
+            "failed": self._heartbeat_failed_total,
+            "lastSuccessAt": self._heartbeat_last_success_at,
+            "lastFailureAt": self._heartbeat_last_failure_at,
+            "lastErrorCategory": self._heartbeat_last_error_category,
+        }
+
+    def result_transport_status(self) -> dict[str, object]:
+        status_fn = getattr(self._result_transport, "status", None)
+        if callable(status_fn):
+            value = status_fn()
+            if isinstance(value, dict):
+                return value
+        return {"mode": "unknown"}
+
     def active_execution_leases(self) -> list[dict[str, object]]:
         leases: list[dict[str, object]] = []
         for record in self._records.values():
             if record.task.done():
                 continue
             envelope = record.envelope
-            leases.append(
-                {
-                    "jobId": envelope.job_id,
-                    "executionId": envelope.execution_id,
-                    "leaseToken": envelope.lease_token,
-                    "fenceEpoch": envelope.fence_epoch,
-                }
-            )
+            lease: dict[str, object] = {
+                "jobId": envelope.job_id,
+                "executionId": envelope.execution_id,
+                "leaseToken": envelope.lease_token,
+                "fenceEpoch": envelope.fence_epoch,
+            }
+            if record.result_pending:
+                lease["resultPending"] = True
+            leases.append(lease)
         return leases
 
     async def set_draining(self, draining: bool) -> None:
@@ -130,6 +167,7 @@ class DurableExecutionManager:
         if self._heartbeat_task is not None:
             return
         self._stopping = False
+        await self._result_transport.start()
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(),
             name="agentmesh-runtime-heartbeat",
@@ -159,21 +197,35 @@ class DurableExecutionManager:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
         await self._send_heartbeat_once()
+        await self._result_transport.stop()
 
     async def submit(self, envelope: DurableExecutionEnvelope) -> DurableExecutionAccepted:
         async with self._lock:
             self._prune_completed_locked()
             existing = self._records.get(envelope.execution_id)
             if existing is not None:
-                return DurableExecutionAccepted(
-                    accepted=True,
-                    duplicate=True,
-                    workerId=self.worker_id,
-                )
+                old = existing.envelope
+                if envelope.fence_epoch < old.fence_epoch:
+                    raise WorkerUnavailable("stale execution fence", status_code=409)
+                if envelope.fence_epoch == old.fence_epoch:
+                    if envelope.lease_token != old.lease_token or envelope.job_id != old.job_id:
+                        raise WorkerUnavailable("conflicting execution ownership", status_code=409)
+                    return DurableExecutionAccepted(
+                        accepted=True,
+                        duplicate=True,
+                        workerId=self.worker_id,
+                        fenceEpoch=old.fence_epoch,
+                    )
             if self._draining:
                 raise WorkerUnavailable("runtime worker is draining", status_code=503)
-            if self.active_count() >= self.capacity:
+            # A newer fence supersedes the old attempt; it does not consume a
+            # second permanent capacity slot. Its old outbox event remains
+            # durable and is rejected by the Go fencing check if delivered.
+            occupied = self.active_count() - int(existing is not None and not existing.task.done())
+            if occupied >= self.capacity:
                 raise WorkerUnavailable("runtime worker is at capacity", status_code=429)
+            if existing is not None and not existing.task.done():
+                existing.task.cancel()
 
             task = asyncio.create_task(
                 self._execute(envelope),
@@ -192,6 +244,7 @@ class DurableExecutionManager:
             accepted=True,
             duplicate=False,
             workerId=self.worker_id,
+            fenceEpoch=envelope.fence_epoch,
         )
 
     async def cancel(self, execution_id: str) -> bool:
@@ -207,13 +260,12 @@ class DurableExecutionManager:
     async def _execute(self, envelope: DurableExecutionEnvelope) -> None:
         try:
             response = await self._runner(envelope.request)
-            await self._deliver_callback(
-                envelope,
-                status="completed",
-                response=response,
-            )
         except asyncio.CancelledError:
-            await self._deliver_callback(envelope, status="canceled")
+            # Do not generate a second, conflicting outcome for an attempt
+            # canceled by a higher fence. A previously stored outbox event is
+            # preserved and Go will apply the authoritative fence.
+            if self._is_current_attempt(envelope):
+                await self._deliver_callback(envelope, status="canceled")
             raise
         except Exception as exc:
             # Never send raw exception text: it may contain prompt/tool/provider
@@ -224,8 +276,18 @@ class DurableExecutionManager:
                 status="failed",
                 error_category=category,
             )
+        else:
+            await self._deliver_callback(
+                envelope,
+                status="completed",
+                response=response,
+            )
         finally:
             asyncio.create_task(self._send_heartbeat_once())
+
+    def _is_current_attempt(self, envelope: DurableExecutionEnvelope) -> bool:
+        record = self._records.get(envelope.execution_id)
+        return record is not None and record.envelope is envelope
 
     async def _deliver_callback(
         self,
@@ -248,21 +310,34 @@ class DurableExecutionManager:
         if error_category:
             payload["errorCategory"] = error_category
 
-        headers = {
-            "X-Internal-Token": self.internal_token,
-            "Content-Type": "application/json",
-        }
-        timeout = httpx.Timeout(self.callback_timeout_seconds)
-        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
-            for attempt in range(self.callback_max_retries):
-                try:
-                    result = await client.post(envelope.callback_url, json=payload, headers=headers)
-                    if 200 <= result.status_code < 300:
-                        return
-                except Exception:
-                    pass
-                if attempt + 1 < self.callback_max_retries:
-                    await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
+        kafka_delivery = self.result_transport_status().get("mode") == "kafka"
+        record = self._records.get(envelope.execution_id)
+        current = record is not None and record.envelope is envelope
+        if kafka_delivery and current:
+            # publish() persists synchronously before its first await. The
+            # resultPending flag cannot reach a heartbeat until that INSERT
+            # has committed; the on_persisted hook forces an early heartbeat.
+            record.result_pending = True
+        await self._result_transport.publish(
+            ResultDelivery(
+                job_id=envelope.job_id,
+                execution_id=envelope.execution_id,
+                lease_token=envelope.lease_token,
+                fence_epoch=envelope.fence_epoch,
+                dispatcher_epoch=envelope.dispatcher_epoch,
+                worker_id=self.worker_id,
+                callback_url=envelope.callback_url,
+                status=status,
+                payload=payload,
+                user_id=getattr(envelope.request, "user_id", None),
+                conversation_id=getattr(envelope.request, "conversation_id", None),
+                on_persisted=self._send_heartbeat_once if kafka_delivery and current else None,
+            )
+        )
+        if kafka_delivery and current and self.control_plane_base_url:
+            # Kafka broker ACK is NOT a business ACK. Keep the execution and
+            # its heartbeat lease alive until Go confirms terminal state.
+            await record.finalized.wait()
 
     async def _heartbeat_loop(self) -> None:
         while True:
@@ -291,13 +366,36 @@ class DurableExecutionManager:
         }
         try:
             async with httpx.AsyncClient(timeout=3.0, trust_env=False) as client:
-                await client.post(
+                response = await client.post(
                     self.control_plane_base_url + "/internal/v1/runtime/workers/heartbeat",
                     json=payload,
                     headers=headers,
                 )
-        except Exception:
-            # Heartbeats are availability telemetry; they never fail an Agent run.
+                response.raise_for_status()
+                # Old control planes / test doubles may omit the new optional
+                # acknowledgement field. Never infer finalization from 200.
+                json_method = getattr(response, "json", None)
+                body = json_method() if callable(json_method) else None
+                data = body.get("data", {}) if isinstance(body, dict) else {}
+                terminal = data.get("terminalExecutionIds", []) if isinstance(data, dict) else []
+                if isinstance(terminal, list):
+                    for execution_id in terminal:
+                        record = self._records.get(execution_id)
+                        if record is not None and record.result_pending:
+                            record.finalized.set()
+            self._heartbeat_sent_total += 1
+            self._heartbeat_last_success_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            self._heartbeat_last_error_category = None
+        except Exception as exc:
+            # Heartbeats must not fail an Agent run, but failures are observable so
+            # a worker cannot remain silently OFFLINE while executions are active.
+            self._heartbeat_failed_total += 1
+            self._heartbeat_last_failure_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            self._heartbeat_last_error_category = type(exc).__name__.strip() or "HeartbeatError"
+            logger.warning(
+                "runtime worker heartbeat failed: category=%s",
+                self._heartbeat_last_error_category,
+            )
             return
 
     def _prune_completed_locked(self) -> None:

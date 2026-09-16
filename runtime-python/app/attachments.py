@@ -11,7 +11,7 @@ from pypdf import PdfReader
 
 from app.models import ModelMessage, ModelRequest
 from app.models.contracts import ModelImagePart, ModelImageURL, ModelTextPart
-from app.models.providers import OpenAICompatibleModelProvider
+from app.models.providers import MockModelProvider, OpenAICompatibleModelProvider
 from app.models.gateway import ModelGateway
 from app.schemas import RuntimeAttachment, RuntimeRequest
 
@@ -68,7 +68,15 @@ def _extract_document(item: LoadedAttachment) -> str:
 async def _describe_image(item: LoadedAttachment, req: RuntimeRequest, engine) -> str:
     data_url = f"data:{item.ref.media_type};base64,{base64.b64encode(item.content).decode('ascii')}"
     if req.project_model is not None:
-        provider = OpenAICompatibleModelProvider(api_key=req.project_model.api_key.get_secret_value(), base_url=req.project_model.base_url, trust_env=False)
+        normalized_provider = req.project_model.provider.strip().lower().replace("_", "-")
+        if normalized_provider == "mock":
+            provider = MockModelProvider()
+        else:
+            provider = OpenAICompatibleModelProvider(
+                api_key=req.project_model.api_key.get_secret_value(),
+                base_url=req.project_model.base_url,
+                trust_env=False,
+            )
         gateway = ModelGateway(provider, timeout=30.0, max_retries=1)
         model = req.project_model.model_name
     else:

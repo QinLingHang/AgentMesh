@@ -11,7 +11,7 @@ import (
 func TestP10HealthContractsWithoutDependencies(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	engine := gin.New()
-	registerHealthRoutes(engine, nil, nil)
+	registerHealthRoutes(engine, nil, nil, nil)
 
 	for _, tc := range []struct {
 		path string

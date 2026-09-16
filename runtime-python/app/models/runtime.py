@@ -7,7 +7,7 @@ from app.kernel import RuntimeContext
 from app.models import ModelInputAttachment, ModelMessage, ModelRequest, ModelResponse
 from app.models.gateway import ModelEventHandler, ModelGateway
 from app.optimization import AdaptiveModelRouter, ModelRouteDecision
-from app.models.providers import OpenAICompatibleModelProvider
+from app.models.providers import MockModelProvider, OpenAICompatibleModelProvider
 from app.schemas import AgentProfile, ModelSelection, TaskConstraints, TaskProfile, ProjectModelRuntime
 
 
@@ -93,6 +93,17 @@ class ResolvedModelRuntime:
 
 
 
+def _request_local_provider(item: ProjectModelRuntime):
+    normalized = item.provider.strip().lower().replace("_", "-")
+    if normalized == "mock":
+        return MockModelProvider()
+    return OpenAICompatibleModelProvider(
+        api_key=item.api_key.get_secret_value(),
+        base_url=item.base_url,
+        trust_env=False,
+    )
+
+
 @dataclass(slots=True)
 class RequestLocalModelCandidate:
     runtime_id: str
@@ -111,11 +122,7 @@ class RequestLocalModelCandidate:
 
 
 def _request_local_candidate(item: ProjectModelRuntime) -> RequestLocalModelCandidate:
-    provider = OpenAICompatibleModelProvider(
-        api_key=item.api_key.get_secret_value(),
-        base_url=item.base_url,
-        trust_env=False,
-    )
+    provider = _request_local_provider(item)
     runtime_id = f"user-service-{item.service_id}" if item.service_id else "request-byok"
     return RequestLocalModelCandidate(
         runtime_id=runtime_id,
@@ -141,11 +148,7 @@ def resolve_project_model_runtime(
     ``require_explicit_vision=True`` so image bytes are never silently sent to a
     text-only model when ``visionModelName`` was not configured.
     """
-    provider = OpenAICompatibleModelProvider(
-        api_key=project_model.api_key.get_secret_value(),
-        base_url=project_model.base_url,
-        trust_env=False,
-    )
+    provider = _request_local_provider(project_model)
     return ResolvedModelRuntime(
         runtime_id="project-byok",
         gateway=ModelGateway(provider, timeout=30.0, max_retries=1),

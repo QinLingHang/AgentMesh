@@ -105,3 +105,39 @@ func TestP8WorkerCancelContract(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestP21DuplicateAcceptanceMustCarryExactFence(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		ackFence  int64
+		wantError bool
+	}{
+		{name: "same-fence", ackFence: 9},
+		{name: "stale-fence", ackFence: 8, wantError: true},
+		{name: "legacy-omits-fence", ackFence: 0, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusAccepted)
+				_ = json.NewEncoder(w).Encode(DurableExecutionAccepted{
+					Accepted: true, Duplicate: true, WorkerID: "worker", FenceEpoch: tc.ackFence,
+				})
+			}))
+			defer server.Close()
+			input := p8Envelope()
+			input.FenceEpoch = 9
+			client := NewClient("http://unused.invalid", "internal-test-token", time.Second)
+			ack, err := client.SubmitDurableExecution(context.Background(), server.URL, input)
+			if tc.wantError {
+				var dispatchErr *WorkerDispatchError
+				if !errors.As(err, &dispatchErr) || !dispatchErr.Ambiguous || dispatchErr.SafeToRetry {
+					t.Fatalf("mismatched duplicate fence must fail closed: ack=%#v err=%v", ack, err)
+				}
+				return
+			}
+			if err != nil || ack == nil || !ack.Duplicate {
+				t.Fatalf("exact-fence duplicate must be accepted: ack=%#v err=%v", ack, err)
+			}
+		})
+	}
+}

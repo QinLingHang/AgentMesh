@@ -46,6 +46,54 @@ services:
       timeout: 3s
       retries: 30
 
+
+  # ========================================================
+  # P21 Kafka Event Plane (KRaft, single-node dev)
+  # ========================================================
+
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: agentmesh-mvp02-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,EXTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,EXTERNAL://127.0.0.1:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: 12
+    ports:
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  kafka-init:
+    image: apache/kafka:3.9.1
+    container_name: agentmesh-mvp02-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        for topic in agentmesh.runtime.events agentmesh.tool.events agentmesh.model.events agentmesh.audit.events agentmesh.usage.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic "$$topic" --partitions 12 --replication-factor 1
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --create --if-not-exists --topic agentmesh.runtime.events.dlq --partitions 3 --replication-factor 1
+
   # ========================================================
   # Milvus Metadata Store
   # ========================================================
@@ -161,6 +209,7 @@ services:
 volumes:
   mysql_data:
   redis_data:
+  kafka_data:
 
   milvus_etcd_data:
   milvus_minio_data:

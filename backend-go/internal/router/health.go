@@ -10,10 +10,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-func registerHealthRoutes(r *gin.Engine, database *sql.DB, redisClient *redis.Client) {
+func registerHealthRoutes(r *gin.Engine, database *sql.DB, redisClient *redis.Client, eventPlaneStatus func() map[string]any) {
 	// Backwards-compatible shallow endpoint used by existing local scripts.
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"status": "ok", "service": "agentmesh-go"})
+		payload := gin.H{"status": "ok", "service": "agentmesh-go"}
+		if eventPlaneStatus != nil {
+			payload["eventPlane"] = eventPlaneStatus()
+		}
+		c.JSON(http.StatusOK, payload)
 	})
 
 	// Liveness answers only whether this process is alive. It deliberately does

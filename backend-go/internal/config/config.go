@@ -75,6 +75,24 @@ type DurableRuntime struct {
 	CircuitOpenFor          time.Duration
 }
 
+type Kafka struct {
+	Enabled bool
+
+	Brokers []string
+
+	RuntimeEventsTopic string
+
+	RuntimeDLQTopic string
+
+	ConsumerGroup string
+
+	ClientID string
+
+	ProcessMaxAttempts int
+
+	DedupeRetention time.Duration
+}
+
 type Governance struct {
 	MasterKey string
 }
@@ -111,6 +129,8 @@ type Config struct {
 	Knowledge Knowledge
 
 	DurableRuntime DurableRuntime
+
+	Kafka Kafka
 
 	Governance Governance
 
@@ -243,6 +263,19 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	durableCircuitOpenSeconds, err := positiveInt("DURABLE_RUNTIME_CIRCUIT_OPEN_SECONDS", 20)
+	if err != nil {
+		return Config{}, err
+	}
+
+	kafkaEnabled, err := strconv.ParseBool(env("KAFKA_ENABLED", "false"))
+	if err != nil {
+		return Config{}, errors.New("KAFKA_ENABLED must be true or false")
+	}
+	kafkaProcessMaxAttempts, err := positiveInt("KAFKA_PROCESS_MAX_ATTEMPTS", 10)
+	if err != nil {
+		return Config{}, err
+	}
+	kafkaDedupeRetentionDays, err := positiveInt("KAFKA_DEDUPE_RETENTION_DAYS", 30)
 	if err != nil {
 		return Config{}, err
 	}
@@ -470,6 +503,17 @@ func Load() (Config, error) {
 			MaxQueueDepth:           durableMaxQueue,
 			CircuitFailureThreshold: durableCircuitThreshold,
 			CircuitOpenFor:          time.Duration(durableCircuitOpenSeconds) * time.Second,
+		},
+
+		Kafka: Kafka{
+			Enabled:            kafkaEnabled,
+			Brokers:            splitCSV(env("KAFKA_BROKERS", "127.0.0.1:29092")),
+			RuntimeEventsTopic: env("KAFKA_RUNTIME_EVENTS_TOPIC", "agentmesh.runtime.events"),
+			RuntimeDLQTopic:    env("KAFKA_RUNTIME_DLQ_TOPIC", "agentmesh.runtime.events.dlq"),
+			ConsumerGroup:      env("KAFKA_RUNTIME_CONSUMER_GROUP", "agentmesh-control-plane-runtime-v1"),
+			ClientID:           env("KAFKA_CLIENT_ID", "agentmesh-control-plane"),
+			ProcessMaxAttempts: kafkaProcessMaxAttempts,
+			DedupeRetention:    time.Duration(kafkaDedupeRetentionDays) * 24 * time.Hour,
 		},
 
 		RefreshCookieName: env(

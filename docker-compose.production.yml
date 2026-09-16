@@ -40,6 +40,121 @@ services:
       retries: 30
     stop_grace_period: 30s
 
+  kafka-1:
+    image: apache/kafka:3.9.1
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-1:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
+    volumes:
+      - kafka_1_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
+  kafka-2:
+    image: apache/kafka:3.9.1
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: "2"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-2:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
+    volumes:
+      - kafka_2_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
+  kafka-3:
+    image: apache/kafka:3.9.1
+    restart: unless-stopped
+    logging: *default-logging
+    environment:
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:-MkU3OEVBNTcwNTJENDM2Qk}
+      KAFKA_NODE_ID: "3"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka-3:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "3"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "2"
+      KAFKA_DEFAULT_REPLICATION_FACTOR: "3"
+      KAFKA_MIN_INSYNC_REPLICAS: "2"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-24}
+    volumes:
+      - kafka_3_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    stop_grace_period: 30s
+
+  kafka-init:
+    image: apache/kafka:3.9.1
+    restart: "no"
+    logging: *default-logging
+    depends_on:
+      kafka-1:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+    environment:
+      KAFKA_RUNTIME_PARTITIONS: ${KAFKA_RUNTIME_PARTITIONS:-24}
+      KAFKA_EVENT_PARTITIONS: ${KAFKA_EVENT_PARTITIONS:-24}
+      KAFKA_DLQ_PARTITIONS: ${KAFKA_DLQ_PARTITIONS:-6}
+    command:
+      - /bin/bash
+      - -ec
+      - |
+        for topic in agentmesh.runtime.events agentmesh.tool.events agentmesh.model.events agentmesh.audit.events agentmesh.usage.events; do
+          /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092 --create --if-not-exists --topic "$$topic" --partitions "$${KAFKA_EVENT_PARTITIONS}" --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=604800000
+        done
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092 --alter --topic agentmesh.runtime.events --partitions "$${KAFKA_RUNTIME_PARTITIONS}" || true
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-1:9092,kafka-2:9092,kafka-3:9092 --create --if-not-exists --topic agentmesh.runtime.events.dlq --partitions "$${KAFKA_DLQ_PARTITIONS}" --replication-factor 3 --config min.insync.replicas=2 --config retention.ms=1209600000
+
   etcd:
     image: quay.io/coreos/etcd:v3.5.25
     restart: unless-stopped
@@ -132,6 +247,12 @@ services:
       DURABLE_RUNTIME_ENABLED: "true"
       CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go:8086
       DURABLE_RUNTIME_MAX_QUEUE_DEPTH: ${DURABLE_RUNTIME_MAX_QUEUE_DEPTH:-500}
+      KAFKA_ENABLED: "true"
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_RUNTIME_EVENTS_TOPIC: ${KAFKA_RUNTIME_EVENTS_TOPIC:-agentmesh.runtime.events}
+      KAFKA_RUNTIME_DLQ_TOPIC: ${KAFKA_RUNTIME_DLQ_TOPIC:-agentmesh.runtime.events.dlq}
+      KAFKA_RUNTIME_CONSUMER_GROUP: ${KAFKA_RUNTIME_CONSUMER_GROUP:-agentmesh-control-plane-runtime-v1}
+      KAFKA_PROCESS_MAX_ATTEMPTS: ${KAFKA_PROCESS_MAX_ATTEMPTS:-10}
       GOVERNANCE_MASTER_KEY: ${GOVERNANCE_MASTER_KEY:?set GOVERNANCE_MASTER_KEY}
     depends_on:
       mysql:
@@ -181,8 +302,15 @@ services:
       RUNTIME_WORKER_ENDPOINT: http://runtime-python:9572
       CONTROL_PLANE_INTERNAL_BASE_URL: http://backend-go:8086
       RUNTIME_WORKER_CAPACITY: ${RUNTIME_WORKER_CAPACITY:-4}
+      RUNTIME_RESULT_TRANSPORT: kafka
+      KAFKA_BROKERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      KAFKA_RUNTIME_RESULT_TOPIC: ${KAFKA_RUNTIME_EVENTS_TOPIC:-agentmesh.runtime.events}
+      KAFKA_CLIENT_ID: ${KAFKA_RUNTIME_CLIENT_ID:-agentmesh-runtime-python}
+      KAFKA_OUTBOX_PATH: /app/data/runtime_result_outbox.sqlite3
       RERANKER_HTTP_TRUST_ENV: "false"
       EMBEDDING_HTTP_TRUST_ENV: "false"
+    volumes:
+      - runtime_outbox_data:/app/data
     depends_on:
       backend-go:
         condition: service_healthy
@@ -252,6 +380,14 @@ volumes:
     name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-mysql-data
   redis_data:
     name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-redis-data
+  kafka_1_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-kafka-1-data
+  kafka_2_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-kafka-2-data
+  kafka_3_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-kafka-3-data
+  runtime_outbox_data:
+    name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-runtime-outbox-data
   milvus_etcd_data:
     name: ${DATA_VOLUME_PREFIX:-agentmesh-prod}-milvus-etcd-data
   milvus_minio_data:
