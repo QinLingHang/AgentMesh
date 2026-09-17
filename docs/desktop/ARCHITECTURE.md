@@ -8,7 +8,7 @@ Phase 1 intentionally implements **safe local filesystem access**, not arbitrary
 Browser / Workspace
         |
 Go Control Plane
-  Tool ownership / project scope / P5 approval
+  Tool ownership / project scope / human approval
         |
 Python Runtime
   ToolLoop + final governance boundary
@@ -36,7 +36,7 @@ The Desktop Bridge is a separate process so the Runtime does not receive unrestr
 - `local.fs.move`
 - `local.fs.delete`
 
-Read-only operations are low risk. All writes require P5 human confirmation. Move/delete are high risk and always require confirmation.
+Read-only operations are low risk. All writes require human confirmation. Move/delete are high risk and always require confirmation.
 
 ## Project scope
 

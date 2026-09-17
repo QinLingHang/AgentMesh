@@ -253,8 +253,7 @@ AgentMesh 将完整会话历史、运行时工作记忆和知识库进行分层�
 - Redis-loss Recovery
 - Long Conversation Continuity
 
-### P20 — Conversation History Reliability
-
+### Conversation History Reliability
 针对长会话场景，AgentMesh 增强了历史分页、上下文恢复与持久化可靠性。
 
 已通过的关键验收包括：
@@ -367,7 +366,7 @@ Commit Result
 
 ## Reliable Result Delivery
 
-P21 在现有分布式 Runtime 基础上引入 Kafka，实现 Agent 执行结果的可靠交付。
+在现有分布式 Runtime 基础上引入 Kafka，实现 Agent 执行结果的可靠交付。
 
 ```text
 Python Agent
@@ -402,9 +401,9 @@ Task COMPLETED
 - **DLQ**：处理异常事件并限制敏感信息暴露。
 - **HTTP Fallback**：保留原有回调兼容模式。
 
-P21 已通过 Windows 本地部署可靠性验收。
+已通过 Windows 本地部署可靠性验收。
 
-详细说明：[P21 Event-Driven Runtime](docs/p21/P21_EVENT_DRIVEN_RUNTIME.md)
+详细说明：[Event-Driven Runtime](docs/runtime/EVENT_DRIVEN_RUNTIME.md)
 
 ---
 
@@ -569,7 +568,6 @@ AgentMesh/
 │
 ├── docker-compose.yml
 ├── VERSION
-├── MANIFEST.json
 ├── LICENSE
 └── README.md
 ```
@@ -638,7 +636,7 @@ runtime-python/.env.example
 
 配置数据库、Redis、模型服务以及 Runtime 相关参数。
 
-使用 P21 Kafka 结果交付模式时，需要分别启用 Go Consumer 和 Python Kafka Transport。
+使用 Kafka 结果交付模式时，需要分别启用 Go Consumer 和 Python Kafka Transport。
 
 ## 5. 启动应用
 
@@ -669,16 +667,16 @@ AgentMesh 在不同开发阶段针对 Runtime、记忆、分布式执行、治�
 | Memory Capsule / Redis-loss Recovery | PASS |
 | Multi-Tenant Governance | PASS |
 | Browser E2E | PASS |
-| P20 Conversation History Reliability | PASS |
-| P21 Kafka Outage Recovery | PASS |
-| P21 Duplicate Event Idempotency | PASS |
-| P21 Higher-Fence Recovery | PASS |
-| P21 COMPLETING Crash Replay | 21/21 PASS |
-| P21 Windows Local Deployment | FINAL PASS |
+| Conversation History Reliability | PASS |
+| Kafka Outage Recovery | PASS |
+| Duplicate Event Idempotency | PASS |
+| Higher-Fence Recovery | PASS |
+| COMPLETING Crash Replay | 21/21 PASS |
+| Windows Local Deployment | FINAL PASS |
 
 **验收范围说明：**
 
-P21 已通过 Windows 本地 Go/Python + Docker 基础设施环境的可靠性验收。
+已通过 Windows 本地 Go/Python + Docker 基础设施环境的可靠性验收。
 
 Docker 容器化生产发布、真实生产 Kafka 集群和大规模并发性能仍需独立验收。
 
@@ -692,7 +690,6 @@ Docker 容器化生产发布、真实生产 Kafka 集群和大规模并发性能
 
 [查看 GitHub Releases](https://github.com/QinLingHang/AgentMesh/releases)
 
-`v1.0.0` 为已发布版本，P20/P21 属于后续开发成果。
 
 当前仓库代码与历史 Release 包的功能范围可能不同，请以对应 Tag、Commit 和发布说明为准。
 
