@@ -108,6 +108,7 @@ from app.schemas import (
     TraceEvent,
 )
 from app.services.collaboration_planner import (
+    CollaborationPlan,
     CollaborationPlanner,
     MultiObjectiveCollaborationPlanner,
 )
@@ -129,6 +130,23 @@ from app.services.platform_capability_grounding import (
 )
 from app.services.dag import (
     build_dag,
+)
+from app.planning import (
+    ExecutionPlan,
+    PlanStep,
+    PlanValidator,
+    SemanticReplanner,
+    SemanticTaskPlanner,
+)
+from app.services.plan_compiler import (
+    PlanCompiler,
+)
+from app.services.quality_gate import (
+    QualityGate,
+    QualityGateError,
+)
+from app.eval.repair import (
+    RepairPromptBuilder,
 )
 from app.services.dag_executor import (
     DAGExecutionError,
@@ -449,12 +467,36 @@ class RuntimeEngine:
         }
 
         # ====================================================
-        # Evaluator
+        # Adaptive Workflow Orchestration
+        # ====================================================
+
+        self.plan_validator = PlanValidator(
+            max_steps=settings.semantic_planner_max_steps
+        )
+        self.semantic_planner = SemanticTaskPlanner(
+            validator=self.plan_validator,
+            timeout_seconds=settings.semantic_planner_timeout_seconds,
+        )
+        self.semantic_replanner = SemanticReplanner(
+            validator=self.plan_validator,
+            timeout_seconds=settings.semantic_planner_timeout_seconds,
+        )
+        self.plan_compiler = PlanCompiler()
+
+        # ====================================================
+        # Evaluator / Quality Gate
         # ====================================================
 
         self.evaluator = (
             HeuristicEvaluator()
         )
+        self.quality_gate = QualityGate(
+            enabled=settings.quality_gate_enabled,
+            pass_threshold=settings.quality_gate_pass_threshold,
+            hard_fail_threshold=settings.quality_gate_hard_fail_threshold,
+            max_repair_attempts=settings.max_quality_repair_attempts,
+        )
+        self.repair_prompt_builder = RepairPromptBuilder()
 
         # ====================================================
         # MCP Discovery Failure Backoff
@@ -4546,8 +4588,94 @@ class RuntimeEngine:
                 )
 
             # =================================================
-            # 3. Scheduler
+            # 3. Semantic Planner + Scheduler
+            #
+            # Planner decides WHAT work is required. Scheduler keeps its
+            # existing responsibility for WHO should execute each capability.
+            # Simple/explicit-topology requests stay on the legacy fast path.
             # =================================================
+
+            semantic_plan: ExecutionPlan | None = None
+            semantic_planning_used = False
+            planning_model = None
+
+            if (
+                settings.semantic_planner_enabled
+                and req.execution_mode == "auto"
+                and self.semantic_planner.should_plan(
+                    task=req.task,
+                    profile=profile,
+                )
+            ):
+                event(
+                    "planning",
+                    "Semantic Planner",
+                    "running",
+                    json.dumps(
+                        {
+                            "complexity": profile.complexity,
+                            "baselineCapabilities": list(profile.required_capabilities),
+                            "maxSteps": settings.semantic_planner_max_steps,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+
+                try:
+                    planning_model = self.registry.context.get("model.default")
+                except KeyError:
+                    planning_model = None
+
+                planning_outcome = await self.semantic_planner.plan(
+                    task=req.task,
+                    profile=profile,
+                    agents=req.agents,
+                    model=planning_model,
+                    on_model_event=model_event,
+                )
+                semantic_plan = planning_outcome.plan
+                semantic_planning_used = True
+
+                planned_capabilities = [
+                    step.capability
+                    for step in semantic_plan.steps
+                ]
+                root_steps = [
+                    step
+                    for step in semantic_plan.steps
+                    if not step.depends_on
+                ]
+                profile = profile.model_copy(
+                    update={
+                        "required_capabilities": planned_capabilities,
+                        "parallelizable": len(root_steps) > 1,
+                        "complexity": (
+                            "high"
+                            if len(semantic_plan.steps) >= 4
+                            else profile.complexity
+                        ),
+                    }
+                )
+
+                event(
+                    "planning",
+                    "Semantic Planner",
+                    "completed",
+                    json.dumps(
+                        {
+                            "source": semantic_plan.source,
+                            "usedModel": planning_outcome.used_model,
+                            "fallbackReason": planning_outcome.fallback_reason,
+                            "goal": semantic_plan.goal,
+                            "requiresSynthesis": semantic_plan.requires_synthesis,
+                            "steps": [
+                                step.model_dump(by_alias=True)
+                                for step in semantic_plan.steps
+                            ],
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
 
             scheduler_id = (
                 f"scheduler."
@@ -4567,9 +4695,7 @@ class RuntimeEngine:
                 scheduler_id,
             )
 
-            assignments: list[
-                Assignment
-            ] = (
+            raw_assignments: list[Assignment] = (
                 await scheduler.schedule(
                     req.agents,
                     profile,
@@ -4577,13 +4703,30 @@ class RuntimeEngine:
                 )
             )
 
-            selected_names.extend(
-                assignment
-                .agent_name
+            if semantic_plan is not None:
+                if len(raw_assignments) != len(semantic_plan.steps):
+                    raise RuntimeError(
+                        "scheduler assignment count does not match semantic plan steps"
+                    )
+                assignments = [
+                    Assignment(
+                        capability=assignment.capability,
+                        agent_id=assignment.agent_id,
+                        agent_name=assignment.agent_name,
+                        stepId=step.id,
+                        objective=step.objective,
+                        dependsOn=list(step.depends_on),
+                        optional=step.optional,
+                        condition=step.condition,
+                    )
+                    for step, assignment in zip(semantic_plan.steps, raw_assignments)
+                ]
+            else:
+                assignments = raw_assignments
 
-                for assignment
-                in assignments
-            )
+            for assignment in assignments:
+                if assignment.agent_name not in selected_names:
+                    selected_names.append(assignment.agent_name)
 
             routing_decisions = getattr(
                 scheduler,
@@ -4612,126 +4755,111 @@ class RuntimeEngine:
             )
 
             # =================================================
-            # 4. Collaboration Planner
+            # 4. Collaboration / Plan Topology
             # =================================================
 
-            event(
-                "planning",
-                (
-                    "Collaboration "
-                    "Planner"
-                ),
-                "running",
-            )
-
-            planner = (
-                self
-                .collaboration_planners[
-                    req.planner
-                ]
-            )
-
-            collaboration_plan = (
-                planner.plan(
-                    assignments=(
-                        assignments
-                    ),
-                    profile=(
-                        profile
-                    ),
-                    constraints=(
-                        req.constraints
-                    ),
-                    requested_mode=(
-                        req.execution_mode
-                    ),
-                    agents=(
-                        req.agents
+            if semantic_plan is not None:
+                execution_mode = self.plan_compiler.infer_topology(semantic_plan)
+                collaboration_plan = CollaborationPlan(
+                    topology=execution_mode,
+                    reason="semantic execution plan dependencies",
+                    agent_count=len(assignments),
+                    max_parallelism=self.plan_compiler.max_parallelism(semantic_plan),
+                    requires_synthesis=semantic_plan.requires_synthesis,
+                )
+                event(
+                    "planning",
+                    "Plan Topology",
+                    "completed",
+                    json.dumps(
+                        {
+                            "planner": "semantic",
+                            "topology": execution_mode,
+                            "reason": collaboration_plan.reason,
+                            "agent_count": collaboration_plan.agent_count,
+                            "max_parallelism": collaboration_plan.max_parallelism,
+                            "requires_synthesis": collaboration_plan.requires_synthesis,
+                        },
+                        ensure_ascii=False,
                     ),
                 )
-            )
+            else:
+                event(
+                    "planning",
+                    "Collaboration Planner",
+                    "running",
+                )
 
-            execution_mode = (
-                collaboration_plan
-                .topology
-            )
+                planner = (
+                    self
+                    .collaboration_planners[
+                        req.planner
+                    ]
+                )
 
-            event(
-                "planning",
-                (
-                    "Collaboration "
-                    "Planner"
-                ),
-                "completed",
-                json.dumps(
-                    {
-                        "planner":
-                            req.planner,
+                collaboration_plan = (
+                    planner.plan(
+                        assignments=(
+                            assignments
+                        ),
+                        profile=(
+                            profile
+                        ),
+                        constraints=(
+                            req.constraints
+                        ),
+                        requested_mode=(
+                            req.execution_mode
+                        ),
+                        agents=(
+                            req.agents
+                        ),
+                    )
+                )
 
-                        "topology":
-                            collaboration_plan
-                            .topology,
+                execution_mode = (
+                    collaboration_plan
+                    .topology
+                )
 
-                        "reason":
-                            collaboration_plan
-                            .reason,
-
-                        "agent_count":
-                            collaboration_plan
-                            .agent_count,
-
-                        "max_parallelism":
-                            collaboration_plan
-                            .max_parallelism,
-
-                        "requires_synthesis":
-                            collaboration_plan
-                            .requires_synthesis,
-
-                        "estimated_quality":
-                            collaboration_plan
-                            .estimated_quality,
-
-                        "estimated_reliability":
-                            collaboration_plan
-                            .estimated_reliability,
-
-                        "estimated_latency_ms":
-                            collaboration_plan
-                            .estimated_latency_ms,
-
-                        "estimated_cost":
-                            collaboration_plan
-                            .estimated_cost,
-
-                        "estimated_load":
-                            collaboration_plan
-                            .estimated_load,
-
-                        "constraint_violation":
-                            collaboration_plan
-                            .constraint_violation,
-
-                        "utility_score":
-                            collaboration_plan
-                            .utility_score,
-                    },
-                    ensure_ascii=False,
-                ),
-            )
+                event(
+                    "planning",
+                    "Collaboration Planner",
+                    "completed",
+                    json.dumps(
+                        {
+                            "planner": req.planner,
+                            "topology": collaboration_plan.topology,
+                            "reason": collaboration_plan.reason,
+                            "agent_count": collaboration_plan.agent_count,
+                            "max_parallelism": collaboration_plan.max_parallelism,
+                            "requires_synthesis": collaboration_plan.requires_synthesis,
+                            "estimated_quality": collaboration_plan.estimated_quality,
+                            "estimated_reliability": collaboration_plan.estimated_reliability,
+                            "estimated_latency_ms": collaboration_plan.estimated_latency_ms,
+                            "estimated_cost": collaboration_plan.estimated_cost,
+                            "estimated_load": collaboration_plan.estimated_load,
+                            "constraint_violation": collaboration_plan.constraint_violation,
+                            "utility_score": collaboration_plan.utility_score,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
 
             # =================================================
-            # 5. Dynamic DAG
+            # 5. Dynamic DAG / Semantic Plan Compiler
             # =================================================
 
-            dag = (
-                build_dag(
+            if semantic_plan is not None:
+                dag = self.plan_compiler.compile(
+                    semantic_plan,
                     assignments,
-                    execution_mode=(
-                        execution_mode
-                    ),
                 )
-            )
+            else:
+                dag = build_dag(
+                    assignments,
+                    execution_mode=execution_mode,
+                )
 
             event(
                 "dag",
@@ -4739,22 +4867,11 @@ class RuntimeEngine:
                 "completed",
                 json.dumps(
                     {
-                        "agent_nodes":
-                            len(
-                                assignments
-                            ),
-
-                        "topology":
-                            execution_mode,
-
-                        "edges":
-                            len(
-                                dag.edges
-                            ),
-
-                        "max_parallelism":
-                            collaboration_plan
-                            .max_parallelism,
+                        "agent_nodes": len(assignments),
+                        "topology": execution_mode,
+                        "edges": len(dag.edges),
+                        "max_parallelism": collaboration_plan.max_parallelism,
+                        "semanticPlan": semantic_planning_used,
                     },
                     ensure_ascii=False,
                 ),
@@ -5193,6 +5310,9 @@ class RuntimeEngine:
                     0
                 )
 
+                quality_repair_count = 0
+                current_task_input = task_input
+
                 while True:
 
                     attempted_agent_ids.add(
@@ -5266,7 +5386,7 @@ class RuntimeEngine:
                                 current_agent,
                                 assignment
                                 .capability,
-                                task_input,
+                                current_task_input,
                             )
                         )
 
@@ -5280,7 +5400,7 @@ class RuntimeEngine:
                             .evaluate(
                                 EvaluationRequest(
                                     task=(
-                                        task_input
+                                        current_task_input
                                     ),
                                     capability=(
                                         assignment
@@ -5348,6 +5468,99 @@ class RuntimeEngine:
                                     },
                                     ensure_ascii=False,
                                 ),
+                            )
+
+                        # =====================================
+                        # Runtime Quality Gate
+                        #
+                        # Quality recovery is intentionally conservative. Model-only
+                        # local workflows may be repaired/retried. Tool, high-risk,
+                        # HTTP and A2A executions are never replayed solely because a
+                        # heuristic quality score is low; replay could duplicate an
+                        # external side effect.
+                        # =====================================
+
+                        protocol = current_agent.protocol.strip().lower()
+                        quality_recovery_safe = (
+                            profile.risk_level != "high"
+                            and not tool_execution_enabled
+                            and protocol in {"internal", "langgraph"}
+                        )
+                        quality_repair_safe = (
+                            quality_recovery_safe
+                            and protocol == "internal"
+                        )
+
+                        gate_decision = self.quality_gate.decide(
+                            evaluation,
+                            repair_attempts=quality_repair_count,
+                            allow_repair=quality_repair_safe,
+                        )
+
+                        if gate_decision.action == "fail" and not quality_recovery_safe:
+                            # Monitor-only mode for executions that must not be replayed.
+                            gate_action = "degraded"
+                            gate_reason = (
+                                gate_decision.reason
+                                + "; recovery suppressed for side-effect safety"
+                            )
+                        else:
+                            gate_action = gate_decision.action
+                            gate_reason = gate_decision.reason
+
+                        event(
+                            "quality_gate",
+                            "Runtime Quality Gate",
+                            (
+                                "error"
+                                if gate_action == "fail"
+                                else "completed"
+                            ),
+                            json.dumps(
+                                {
+                                    "agent": current_agent.name,
+                                    "capability": assignment.capability,
+                                    "action": gate_action,
+                                    "score": gate_decision.score,
+                                    "reason": gate_reason,
+                                    "repairAttempt": quality_repair_count,
+                                    "recoverySafe": quality_recovery_safe,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+
+                        if gate_action == "repair":
+                            quality_repair_count += 1
+                            current_task_input = self.repair_prompt_builder.build(
+                                original_task=task_input,
+                                previous_result=result,
+                                evaluation=evaluation,
+                                attempt=quality_repair_count,
+                            )
+                            event(
+                                "repair",
+                                "Agent Result Repair",
+                                "running",
+                                json.dumps(
+                                    {
+                                        "agent": current_agent.name,
+                                        "capability": assignment.capability,
+                                        "attempt": quality_repair_count,
+                                        "qualityScore": evaluation.quality_score,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                            continue
+
+                        if gate_action == "fail":
+                            raise QualityGateError(
+                                (
+                                    f"quality gate rejected {assignment.capability} "
+                                    f"result from {current_agent.name}"
+                                ),
+                                score=evaluation.quality_score,
                             )
 
                         # =====================================
@@ -5803,6 +6016,11 @@ class RuntimeEngine:
                         current_agent = (
                             replacement
                         )
+                        # Keep the mutable Assignment aligned with the latest
+                        # runtime fallback so bounded replanning can correctly
+                        # assess which protocol actually executed last.
+                        assignment.agent_id = replacement.id
+                        assignment.agent_name = replacement.name
 
             # =================================================
             # 6. DAG Runtime
@@ -5909,15 +6127,33 @@ class RuntimeEngine:
                             node
                             .agent_name
                         ),
+                        stepId=node.step_id,
+                        objective=node.objective,
+                        optional=node.optional,
+                        condition=node.condition,
                     )
                 )
 
                 # =============================================
-                # First layer
+                # Assigned semantic step / legacy task
                 # =============================================
 
+                if node.objective:
+                    base_task_input = (
+                        "Overall user goal:\n"
+                        f"{req.task}\n\n"
+                        "Assigned execution-plan step"
+                        + (f" [{node.step_id}]" if node.step_id else "")
+                        + ":\n"
+                        + node.objective
+                        + "\n\nComplete only this assigned step. "
+                        "Use upstream results when present and do not redo completed steps."
+                    )
+                else:
+                    base_task_input = req.task
+
                 task_input = (
-                    req.task
+                    base_task_input
                     + (
                         "\n\nRequest-local attachment context:\n"
                         + attachment_text_context
@@ -5960,13 +6196,7 @@ class RuntimeEngine:
                         )
 
                     task_input = (
-                        req.task
-                        + (
-                            "\n\nRequest-local attachment context:\n"
-                            + attachment_text_context
-                            if attachment_text_context
-                            else ""
-                        )
+                        task_input
                         + "\n\n"
                         + (
                             "Upstream Agent "
@@ -5994,6 +6224,279 @@ class RuntimeEngine:
                 )
 
             # =================================================
+            # Bounded Semantic Replanning
+            #
+            # Replanning is allowed only for low-risk, model-only executions.
+            # Tool / HTTP / A2A work may have side effects and is therefore
+            # never replayed by this recovery layer. Completed semantic steps
+            # are carried forward as initial DAG outputs.
+            # =================================================
+
+            async def execute_dag_with_replanning():
+                nonlocal dag
+                nonlocal assignments
+                nonlocal semantic_plan
+                nonlocal profile
+                nonlocal execution_mode
+                nonlocal collaboration_plan
+
+                replan_count = 0
+                carried_outputs: dict[str, Any] = {}
+
+                while True:
+                    try:
+                        return await self.dag_executor.execute(
+                            dag,
+                            execute_dag_node,
+                            runtime_event,
+                            evaluate_dag_condition,
+                            initial_outputs=carried_outputs,
+                        )
+                    except DAGExecutionError as dag_exc:
+                        # Suspension is control flow, not a replanning trigger.
+                        if find_runtime_interruption(dag_exc) is not None:
+                            raise
+
+                        if (
+                            semantic_plan is None
+                            or replan_count >= max(0, settings.max_replan_attempts)
+                            or profile.risk_level == "high"
+                            or tool_execution_enabled
+                        ):
+                            raise
+
+                        # Fail closed if any actually selected/fallback Agent is
+                        # remote. Replaying HTTP/A2A execution could duplicate
+                        # an external action whose effects are not observable to
+                        # this process.
+                        selected_protocols = {
+                            agents_by_id[item.agent_id].protocol.strip().lower()
+                            for item in assignments
+                            if item.agent_id in agents_by_id
+                        }
+                        if not selected_protocols.issubset({"internal", "langgraph"}):
+                            event(
+                                "replan",
+                                "Semantic Replanner",
+                                "skipped",
+                                json.dumps(
+                                    {
+                                        "reason": "remote_agent_replay_not_safe",
+                                        "protocols": sorted(selected_protocols),
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                            raise
+
+                        partial = dag_exc.partial_result
+                        if partial is None:
+                            raise
+
+                        current_nodes = {node.id: node for node in dag.nodes}
+                        current_steps = {step.id: step for step in semantic_plan.steps}
+                        completed_steps: dict[str, PlanStep] = {}
+                        for node_id in partial.outputs:
+                            node = current_nodes.get(node_id)
+                            if node is None or not node.step_id:
+                                continue
+                            step = current_steps.get(node.step_id)
+                            if step is not None:
+                                completed_steps[step.id] = step
+
+                        failed_step_id = None
+                        if dag_exc.node_id:
+                            failed_node = current_nodes.get(dag_exc.node_id)
+                            if failed_node is not None:
+                                failed_step_id = failed_node.step_id
+
+                        event(
+                            "replan",
+                            "Semantic Replanner",
+                            "running",
+                            json.dumps(
+                                {
+                                    "attempt": replan_count + 1,
+                                    "failedStepId": failed_step_id,
+                                    "completedStepIds": sorted(completed_steps),
+                                    "failureType": type(dag_exc.__cause__ or dag_exc).__name__,
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+
+                        available_capabilities = self.semantic_planner.available_capabilities(
+                            req.agents,
+                            profile,
+                        )
+                        revised_plan = await self.semantic_replanner.replan(
+                            task=req.task,
+                            current_plan=semantic_plan,
+                            completed_steps=completed_steps,
+                            failed_step_id=failed_step_id,
+                            failure=dag_exc.__cause__ or dag_exc,
+                            available_capabilities=available_capabilities,
+                            baseline_capabilities=[
+                                step.capability for step in semantic_plan.steps
+                            ],
+                            model=planning_model,
+                            on_model_event=model_event,
+                        )
+
+                        if revised_plan is None:
+                            event(
+                                "replan",
+                                "Semantic Replanner",
+                                "error",
+                                json.dumps(
+                                    {
+                                        "reason": "no_valid_revised_plan",
+                                        "attempt": replan_count + 1,
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            )
+                            raise
+
+                        root_steps = [step for step in revised_plan.steps if not step.depends_on]
+                        revised_profile = profile.model_copy(
+                            update={
+                                "required_capabilities": [
+                                    step.capability for step in revised_plan.steps
+                                ],
+                                "parallelizable": len(root_steps) > 1,
+                                "complexity": (
+                                    "high"
+                                    if len(revised_plan.steps) >= 4
+                                    else profile.complexity
+                                ),
+                            }
+                        )
+
+                        # Keep assignments for completed semantic steps. They are
+                        # already materialized in ``partial.outputs`` and must not
+                        # become dependent on a newly available Agent merely because
+                        # the unfinished plan changed. Only unfinished steps are sent
+                        # back through the Scheduler.
+                        current_assignments_by_step = {
+                            item.step_id: item
+                            for item in assignments
+                            if item.step_id
+                        }
+                        unfinished_steps = [
+                            step
+                            for step in revised_plan.steps
+                            if step.id not in completed_steps
+                        ]
+
+                        raw_reassignments: list[Assignment] = []
+                        if unfinished_steps:
+                            scheduling_profile = revised_profile.model_copy(
+                                update={
+                                    "required_capabilities": [
+                                        step.capability for step in unfinished_steps
+                                    ],
+                                    "parallelizable": len(
+                                        [
+                                            step
+                                            for step in unfinished_steps
+                                            if not step.depends_on
+                                            or all(
+                                                dependency in completed_steps
+                                                for dependency in step.depends_on
+                                            )
+                                        ]
+                                    ) > 1,
+                                }
+                            )
+                            raw_reassignments = await scheduler.schedule(
+                                req.agents,
+                                scheduling_profile,
+                                req.constraints,
+                            )
+
+                        if len(raw_reassignments) != len(unfinished_steps):
+                            event(
+                                "replan",
+                                "Semantic Replanner",
+                                "error",
+                                "scheduler assignment count mismatch after replanning",
+                            )
+                            raise RuntimeError(
+                                "scheduler assignment count mismatch after replanning"
+                            )
+
+                        scheduled_iter = iter(raw_reassignments)
+                        revised_assignments: list[Assignment] = []
+                        for step in revised_plan.steps:
+                            if step.id in completed_steps:
+                                previous = current_assignments_by_step.get(step.id)
+                                if previous is None:
+                                    raise RuntimeError(
+                                        "completed semantic step lost its assignment: "
+                                        f"{step.id}"
+                                    )
+                                assignment = previous
+                            else:
+                                assignment = next(scheduled_iter)
+
+                            revised_assignments.append(
+                                Assignment(
+                                    capability=step.capability,
+                                    agent_id=assignment.agent_id,
+                                    agent_name=assignment.agent_name,
+                                    stepId=step.id,
+                                    objective=step.objective,
+                                    dependsOn=list(step.depends_on),
+                                    optional=step.optional,
+                                    condition=step.condition,
+                                )
+                            )
+
+                        for assignment in revised_assignments:
+                            if assignment.agent_name not in selected_names:
+                                selected_names.append(assignment.agent_name)
+
+                        semantic_plan = revised_plan
+                        profile = revised_profile
+                        assignments = revised_assignments
+                        execution_mode = self.plan_compiler.infer_topology(revised_plan)
+                        collaboration_plan = CollaborationPlan(
+                            topology=execution_mode,
+                            reason="bounded semantic replanning",
+                            agent_count=len(assignments),
+                            max_parallelism=self.plan_compiler.max_parallelism(revised_plan),
+                            requires_synthesis=revised_plan.requires_synthesis,
+                        )
+                        dag = self.plan_compiler.compile(revised_plan, assignments)
+
+                        new_node_ids = {node.id for node in dag.nodes}
+                        carried_outputs = {
+                            node_id: output
+                            for node_id, output in partial.outputs.items()
+                            if node_id in new_node_ids
+                        }
+
+                        replan_count += 1
+                        event(
+                            "replan",
+                            "Semantic Replanner",
+                            "completed",
+                            json.dumps(
+                                {
+                                    "attempt": replan_count,
+                                    "topology": execution_mode,
+                                    "carriedCompletedNodes": sorted(carried_outputs),
+                                    "steps": [
+                                        step.model_dump(by_alias=True)
+                                        for step in revised_plan.steps
+                                    ],
+                                },
+                                ensure_ascii=False,
+                            ),
+                        )
+
+            # =================================================
             # Execute DAG
             #
             # RuntimeTaskInterrupted 必须向 Runtime Response
@@ -6002,14 +6505,7 @@ class RuntimeEngine:
             try:
 
                 dag_result = (
-                    await self
-                    .dag_executor
-                    .execute(
-                        dag,
-                        execute_dag_node,
-                        runtime_event,
-                        evaluate_dag_condition,
-                    )
+                    await execute_dag_with_replanning()
                 )
 
             except (
@@ -6659,46 +7155,35 @@ class RuntimeEngine:
                 0.0
             )
 
-            # 保持 business order，
-            # 不使用 async completion order。
+            # 保持 plan / DAG business order，
+            # 不使用 async completion order。Semantic Plan 使用稳定的
+            # step-* node id；legacy topology 继续使用 agent-*。
 
-            for index in range(
-                1,
-                len(assignments)
-                + 1,
-            ):
+            execution_nodes = [
+                node
+                for node in dag.nodes
+                if node.kind == "agent"
+            ]
 
-                node_id = (
-                    f"agent-{index}"
-                )
-
-                node_result = (
-                    dag_result
-                    .outputs[
-                        node_id
-                    ]
-                )
+            for node in execution_nodes:
+                node_result = dag_result.outputs.get(node.id)
+                if node_result is None:
+                    if node.status == "skipped" or node.optional:
+                        continue
+                    raise RuntimeError(
+                        f"mandatory DAG node produced no output: {node.id}"
+                    )
 
                 (
                     _,
                     result,
                     local_feedback,
                     cost,
-                ) = (
-                    node_result
-                )
+                ) = node_result
 
-                parts.append(
-                    result
-                )
-
-                feedback.extend(
-                    local_feedback
-                )
-
-                estimated_cost += (
-                    cost
-                )
+                parts.append(result)
+                feedback.extend(local_feedback)
+                estimated_cost += cost
 
             # =================================================
             # 8. Synthesis Policy
