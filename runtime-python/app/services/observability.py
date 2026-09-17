@@ -27,6 +27,11 @@ def build_observability_summary(
     tool_failures = 0
     mcp_events = 0
     reschedules = 0
+    semantic_plans = 0
+    replans = 0
+    repairs = 0
+    quality_gate_degraded = 0
+    quality_gate_rejections = 0
 
     retrieval_mode = ""
     rag_latency_ms = 0
@@ -66,6 +71,19 @@ def build_observability_summary(
             mcp_events += 1
         elif item.kind == "reschedule" and item.status == "completed":
             reschedules += 1
+        elif item.kind == "planning" and item.title == "Semantic Planner" and item.status == "completed":
+            semantic_plans += 1
+        elif item.kind == "replan" and item.status == "completed":
+            replans += 1
+        elif item.kind == "repair" and item.status == "running":
+            repairs += 1
+        elif item.kind == "quality_gate" and item.title == "Runtime Quality Gate":
+            detail = _parse_detail(item.detail)
+            action = str(detail.get("action") or "")
+            if action == "degraded":
+                quality_gate_degraded += 1
+            elif action == "fail":
+                quality_gate_rejections += 1
 
         if item.kind == "rag" and item.title == "RAG Route":
             detail = _parse_detail(item.detail)
@@ -105,6 +123,11 @@ def build_observability_summary(
         agentSuccesses=agent_successes,
         agentFailures=agent_failures,
         reschedules=reschedules,
+        semanticPlans=semantic_plans,
+        replans=replans,
+        repairs=repairs,
+        qualityGateDegraded=quality_gate_degraded,
+        qualityGateRejections=quality_gate_rejections,
         dagCompletedNodes=dag_completed_nodes,
         dagSkippedNodes=dag_skipped_nodes,
         qualityEvaluations=len(quality_scores),

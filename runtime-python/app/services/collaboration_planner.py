@@ -18,6 +18,7 @@ CollaborationTopology = Literal[
     "single",
     "parallel",
     "sequential",
+    "hybrid",
 ]
 
 
