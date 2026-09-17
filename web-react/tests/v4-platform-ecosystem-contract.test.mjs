@@ -85,7 +85,7 @@ test("V4 dedicated browser and SDK acceptance runners are wired", () => {
   const ts = readProject("sdk/typescript/src/index.ts");
   const pyTest = readProject("sdk/python/tests/test_client_integration.py");
   const tsTest = readProject("sdk/typescript/tests/client.integration.test.mjs");
-  const openapi = readProject("docs/v4/openapi.yaml");
+  const openapi = readProject("docs/platform/openapi.yaml");
   const acceptance = readProject("scripts/TEST_V4_PLATFORM_ECOSYSTEM.ps1");
   assert.match(py, /Idempotency-Key/);
   assert.match(ts, /Idempotency-Key/);
