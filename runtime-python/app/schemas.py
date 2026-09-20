@@ -13,6 +13,11 @@ from app.mcp.contracts import (
 from app.tools.contracts import (
     ToolDefinition,
 )
+from app.harness.contracts import (
+    HarnessConfig,
+    HarnessReport,
+    HarnessSummary,
+)
 
 
 class AgentCapabilityProfile(
@@ -87,6 +92,15 @@ class AgentProfile(
     model_runtime: str = Field(
         default="default",
         alias="modelRuntime",
+    )
+
+    # P37 OpenJiuwen adapter: concrete execution framework for this agent.
+    # "native" (or empty) keeps the existing executors; "openjiuwen" routes
+    # internal-protocol agents to OpenJiuwenAgentExecutor. It is independent
+    # from `provider` (model vendor) and from `endpoint`.
+    executor_type: str = Field(
+        default="native",
+        alias="executorType",
     )
 
     quality_score: float = Field(
@@ -379,6 +393,13 @@ class RuntimeRequest(
 
     attachments: list[RuntimeAttachment] = Field(
         default_factory=list
+    )
+
+    # P37 Agent Harness configuration snapshot. Absent/None reads as OFF so
+    # legacy requests keep their exact historical behaviour.
+    harness_config: HarnessConfig | None = Field(
+        default=None,
+        alias="harnessConfig",
     )
 
 
@@ -981,3 +1002,9 @@ class RuntimeResponse(
     )
 
     scorecard: RunScorecard | None = None
+
+    # P37 Agent Harness outputs. None for OFF runs (and for legacy resume
+    # paths), so old consumers stay compatible.
+    harness_summary: HarnessSummary | None = None
+
+    harness_report: HarnessReport | None = None

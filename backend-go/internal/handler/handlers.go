@@ -917,6 +917,9 @@ type runReq struct {
 
 	ModelSelection model.ModelSelection `json:"modelSelection"`
 
+	// P37 Agent Harness configuration; nil/absent reads as OFF.
+	HarnessConfig *model.HarnessConfig `json:"harnessConfig"`
+
 	AttachmentIDs []int64 `json:"attachmentIds"`
 
 	Constraints model.TaskConstraints `json:"constraints"`
@@ -956,13 +959,17 @@ func (h *TaskHandler) RunStream(c *gin.Context) {
 		ExecutionMode:  req.ExecutionMode,
 		SynthesisMode:  req.SynthesisMode,
 		ModelSelection: req.ModelSelection,
+		HarnessConfig:  req.HarnessConfig,
 		AttachmentIDs:  req.AttachmentIDs,
 		Constraints:    req.Constraints,
 	}
 
 	var result *service.RunTaskResult
 	var err error
-	if service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs) {
+	// P37: non-OFF harness tasks must run through the full Runtime - the
+	// interactive fast path must never bypass the supervisor.
+	harnessSupervised := req.HarnessConfig != nil && !req.HarnessConfig.IsOff()
+	if !harnessSupervised && service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs) {
 		result, err = h.s.RunInteractiveStream(c, uid(c), input, func(event runtimeclient.InteractiveStreamEvent) error {
 			return writeNDJSON(c, event)
 		})
@@ -1026,6 +1033,8 @@ func (h *TaskHandler) Run(
 			SynthesisMode: req.SynthesisMode,
 
 			ModelSelection: req.ModelSelection,
+
+			HarnessConfig: req.HarnessConfig,
 
 			AttachmentIDs: req.AttachmentIDs,
 

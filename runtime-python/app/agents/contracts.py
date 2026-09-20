@@ -46,6 +46,12 @@ class AgentExecutionRequest:
 
     attachments: list[ModelInputAttachment] = field(default_factory=list)
 
+    # P37 harness unification: when AUTO_REPAIR owns tool retries inside the
+    # Guarded Tool Executor, the legacy ToolLoopRunner retry is disabled for
+    # this request so one action can only be triggered by one policy. None
+    # keeps the settings.tool_max_retries default.
+    tool_max_retries: int | None = None
+
 @dataclass(slots=True)
 class AgentExecutionResult:
     content: str

@@ -8,6 +8,7 @@ from .agents import (
     InternalAgentPlugin,
     HTTPAgentPlugin,
     LangGraphAgentPlugin,
+    OpenJiuwenAgentPlugin,
 )
 from .schedulers import (
     FixedSchedulerPlugin,
@@ -24,6 +25,7 @@ __all__ = [
     "InternalAgentPlugin",
     "HTTPAgentPlugin",
     "LangGraphAgentPlugin",
+    "OpenJiuwenAgentPlugin",
     "FixedSchedulerPlugin",
     "CapabilitySchedulerPlugin",
     "GreedySchedulerPlugin",

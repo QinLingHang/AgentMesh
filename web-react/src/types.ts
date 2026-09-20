@@ -240,6 +240,10 @@ export type Agent = {
   endpoint: string;
   protocol: string;
 
+  // P37 OpenJiuwen adapter: "native" (default) keeps the existing executors;
+  // "openjiuwen" is only valid on the internal protocol boundary.
+  executorType?: "native" | "openjiuwen";
+
   capabilities: string[];
 
   provider: string;
@@ -505,6 +509,127 @@ export type RunScorecard = {
 };
 
 // =========================================================
+// P37 Agent Harness
+//
+// 与 Python Runtime / Go Control Plane 的 Harness 契约保持一致。
+// 旧任务没有 harness 数据：harnessSummary / harnessReport 均可缺失，
+// UI 据此隐藏页签而不是伪造空报告。
+// =========================================================
+
+export type HarnessMode = "OFF" | "OBSERVE" | "ENFORCE" | "AUTO_REPAIR";
+
+export type HarnessConfig = {
+  mode: HarnessMode;
+  maxSteps?: number;
+  maxRepairs?: number;
+  maxRetriesPerTool?: number;
+  maxReschedules?: number;
+  loopRepeatThreshold?: number;
+  resultSchema?: Record<string, unknown> | null;
+  policyVersion?: string;
+};
+
+export type HarnessValidationStatus = "PASS" | "FAIL" | "NOT_CONFIGURED";
+
+export type HarnessValidationResult = {
+  validator: string;
+  status: HarnessValidationStatus;
+  code?: string;
+  message?: string;
+  fieldPaths?: string[];
+  evidence?: Record<string, unknown>;
+};
+
+export type HarnessDiagnosis = {
+  category:
+    | "INPUT"
+    | "OUTPUT"
+    | "TOOL"
+    | "STEP"
+    | "RESULT"
+    | "LOOP"
+    | "TIMEOUT"
+    | "AUTHORIZATION"
+    | "UNKNOWN";
+  rootCauseCode: string;
+  evidence?: Record<string, unknown>;
+  retryable?: boolean;
+  sideEffectRisk?: "READ_ONLY" | "IDEMPOTENT_WRITE" | "NON_IDEMPOTENT_WRITE" | "UNKNOWN";
+  confidence?: "EXACT" | "HEURISTIC";
+  recommendedAction?:
+    | "NONE"
+    | "REPAIR_ARGS"
+    | "RETRY"
+    | "FALLBACK"
+    | "REPLAN"
+    | "TERMINATE";
+};
+
+export type HarnessRecovery = {
+  action: "REPAIR_ARGS" | "RETRY" | "FALLBACK" | "REPLAN" | "TERMINATE";
+  reason?: string;
+  tool?: string;
+  attempt?: number;
+  success?: boolean;
+  detail?: Record<string, unknown>;
+};
+
+export type HarnessEvent = {
+  eventId: string;
+  sequence: number;
+  timestamp: string;
+  state: string;
+  type: string;
+  severity?: "info" | "warning" | "error";
+  subject?: string;
+  validation?: HarnessValidationResult | null;
+  diagnosis?: HarnessDiagnosis | null;
+  recovery?: HarnessRecovery | null;
+  elapsedMs?: number;
+};
+
+export type HarnessSummary = {
+  mode: string;
+  outcome: "COMPLETED" | "TERMINATED" | "OBSERVED_ISSUES";
+  validationFailures?: number;
+  repairs?: number;
+  retries?: number;
+  reschedules?: number;
+  terminationReason?: string;
+  overheadMs?: number;
+};
+
+export type HarnessBudgetSnapshot = {
+  maxSteps?: number;
+  maxRepairs?: number;
+  maxRetriesPerTool?: number;
+  maxReschedules?: number;
+  loopRepeatThreshold?: number;
+  usedSteps?: number;
+  usedRepairs?: number;
+  usedToolRetries?: number;
+  usedReschedules?: number;
+};
+
+export type HarnessReport = {
+  configSnapshot?: Record<string, unknown>;
+  stateTimeline?: { state: string; elapsedMs: number; timestamp: string }[];
+  events?: HarnessEvent[];
+  diagnoses?: HarnessDiagnosis[];
+  recoveries?: HarnessRecovery[];
+  finalValidation?: HarnessValidationResult | null;
+  metrics?: {
+    validationTotal?: number;
+    validationFailures?: number;
+    validationsNotConfigured?: number;
+    diagnoses?: number;
+    recoveries?: number;
+    loopDetections?: number;
+    budget?: HarnessBudgetSnapshot | null;
+  };
+};
+
+// =========================================================
 // Run / Resume Result
 //
 // /api/tasks/run
@@ -550,6 +675,10 @@ export type RunResult = {
   observability: ObservabilitySummary;
 
   scorecard: RunScorecard | null;
+
+  harnessSummary?: HarnessSummary | null;
+
+  harnessReport?: HarnessReport | null;
 };
 
 export type RuntimeReliabilitySnapshot = {

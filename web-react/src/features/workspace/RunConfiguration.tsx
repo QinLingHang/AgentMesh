@@ -1,4 +1,4 @@
-import type { DeliveryMode, ExecutionMode, Planner, Scheduler, SynthesisMode } from "../../types";
+import type { DeliveryMode, ExecutionMode, HarnessMode, Planner, Scheduler, SynthesisMode } from "../../types";
 import { Icon } from "../../components/common/Icon";
 
 export function RunConfiguration({
@@ -20,6 +20,16 @@ export function RunConfiguration({
   setQuality,
   retryOnWorkerLoss,
   setRetryOnWorkerLoss,
+  harnessMode,
+  setHarnessMode,
+  harnessMaxRepairs,
+  setHarnessMaxRepairs,
+  harnessMaxRetriesPerTool,
+  setHarnessMaxRetriesPerTool,
+  harnessMaxSteps,
+  setHarnessMaxSteps,
+  harnessLoopRepeatThreshold,
+  setHarnessLoopRepeatThreshold,
 }: {
   scheduler: Scheduler;
 
@@ -79,6 +89,36 @@ export function RunConfiguration({
 
   setRetryOnWorkerLoss: (
     value: boolean,
+  ) => void;
+
+  harnessMode: HarnessMode;
+
+  setHarnessMode: (
+    value: HarnessMode,
+  ) => void;
+
+  harnessMaxRepairs: number;
+
+  setHarnessMaxRepairs: (
+    value: number,
+  ) => void;
+
+  harnessMaxRetriesPerTool: number;
+
+  setHarnessMaxRetriesPerTool: (
+    value: number,
+  ) => void;
+
+  harnessMaxSteps: number;
+
+  setHarnessMaxSteps: (
+    value: number,
+  ) => void;
+
+  harnessLoopRepeatThreshold: number;
+
+  setHarnessLoopRepeatThreshold: (
+    value: number,
   ) => void;
 }) {
   return (
@@ -224,7 +264,144 @@ export function RunConfiguration({
             </option>
           </select>
         </label>
+
+        <label>
+          <span>
+            Harness
+          </span>
+
+          <select
+            value={harnessMode}
+            data-testid="harness-mode-select"
+            onChange={(e) =>
+              setHarnessMode(
+                e.target.value as HarnessMode,
+              )
+            }
+          >
+            <option value="OFF">
+              OFF · 原始行为
+            </option>
+
+            <option value="OBSERVE">
+              OBSERVE · 只观察
+            </option>
+
+            <option value="ENFORCE">
+              ENFORCE · 阻断
+            </option>
+
+            <option value="AUTO_REPAIR">
+              AUTO_REPAIR · 自动修复
+            </option>
+          </select>
+        </label>
       </div>
+
+      {harnessMode !== "OFF" && (
+        <details
+          className="advanced-config"
+          data-testid="harness-advanced"
+        >
+          <summary>
+            <span>
+              {harnessMode === "AUTO_REPAIR"
+                ? "Harness 预算（自动修复）"
+                : "Harness 预算"}
+            </span>
+
+            <Icon
+              name="chevron"
+              size={14}
+            />
+          </summary>
+
+          <div className="advanced-fields">
+            {harnessMode === "AUTO_REPAIR" && (
+              <>
+                <label>
+                  <span>
+                    修复次数上限
+                  </span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    value={harnessMaxRepairs}
+                    onChange={(e) =>
+                      setHarnessMaxRepairs(
+                        Number(e.target.value),
+                      )
+                    }
+                  />
+                </label>
+
+                <label>
+                  <span>
+                    单工具重试上限
+                  </span>
+
+                  <input
+                    type="number"
+                    min="0"
+                    value={harnessMaxRetriesPerTool}
+                    onChange={(e) =>
+                      setHarnessMaxRetriesPerTool(
+                        Number(e.target.value),
+                      )
+                    }
+                  />
+                </label>
+              </>
+            )}
+
+            <label>
+              <span>
+                总步数上限
+              </span>
+
+              <input
+                type="number"
+                min="1"
+                value={harnessMaxSteps}
+                onChange={(e) =>
+                  setHarnessMaxSteps(
+                    Number(e.target.value),
+                  )
+                }
+              />
+            </label>
+
+            <label>
+              <span>
+                循环判定阈值
+              </span>
+
+              <input
+                type="number"
+                min="1"
+                value={harnessLoopRepeatThreshold}
+                onChange={(e) =>
+                  setHarnessLoopRepeatThreshold(
+                    Number(e.target.value),
+                  )
+                }
+              />
+            </label>
+
+            <small className="harness-mode-hint">
+              {harnessMode === "OBSERVE" &&
+                "观察模式：记录校验与命中，不改变任何调用、结果与恢复行为。"}
+
+              {harnessMode === "ENFORCE" &&
+                "强制模式：在确定性违规处阻断任务，不做自动修复。"}
+
+              {harnessMode === "AUTO_REPAIR" &&
+                "修复模式：在统一预算与副作用约束内执行白名单修复（默认值补齐 / 只读重试 / 显式回退 / 一次重规划）。"}
+            </small>
+          </div>
+        </details>
+      )}
 
       <details className="advanced-config">
         <summary>

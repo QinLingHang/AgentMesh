@@ -7,6 +7,9 @@ from app.agents import (
     AgentExecutionRequest,
     AgentExecutionResult,
 )
+from app.agents.openjiuwen import (
+    OpenJiuwenAgentExecutor,
+)
 from app.agents.workflows import (
     LangGraphAgentWorkflow,
 )
@@ -106,6 +109,15 @@ class InternalAgentPlugin(
             request.tool_registry
             .list()
         ):
+            # P37: AUTO_REPAIR lets the Guarded Tool Executor own retries
+            # within the unified budget, so the legacy loop retry stands down.
+            loop_max_retries = (
+                request.tool_max_retries
+                if request.tool_max_retries
+                is not None
+                else settings.tool_max_retries
+            )
+
             content = (
                 await ToolLoopRunner(
                     model.gateway,
@@ -115,7 +127,7 @@ class InternalAgentPlugin(
                     settings
                     .max_tool_iterations,
                     max_retries=(
-                        settings.tool_max_retries
+                        loop_max_retries
                     ),
                     retry_backoff_seconds=(
                         settings.tool_retry_backoff_seconds
@@ -174,6 +186,67 @@ class InternalAgentPlugin(
                     "tool_loop":
                         False,
                 },
+            )
+        )
+
+
+# =========================================================
+# OpenJiuwen Agent (P37 §7.1 / 适配器执行方案 V1.0)
+#
+# OpenJiuwen-developed agents carry executorType=openjiuwen and are
+# routed here by AgentExecutorResolver (protocol=internal). The plugin
+# is a thin plugin-shell around the standalone OpenJiuwenAgentExecutor
+# (app/agents/openjiuwen.py); the InternalAgentPlugin prompt and
+# ToolLoop are NOT reused.
+#
+# What the adapter owns:
+#   its own bounded framework loop + model adapter + tool bridge,
+#   OpenJiuwen identity events for the trace,
+#   the unified AgentExecutionResult contract,
+#   explicit failure instead of silently downgrading.
+# =========================================================
+
+
+class OpenJiuwenAgentPlugin(
+    AgentMeshPlugin
+):
+    manifest = PluginManifest(
+        "agent.openjiuwen",
+        (
+            "OpenJiuwen Agent "
+            "Executor"
+        ),
+        "0.1.0",
+        PluginKind.AGENT,
+    )
+
+    def __init__(
+        self,
+    ) -> None:
+        self.context: (
+            RuntimeContext
+            | None
+        ) = None
+
+        self.executor = (
+            OpenJiuwenAgentExecutor()
+        )
+
+    async def setup(
+        self,
+        context: RuntimeContext,
+    ) -> None:
+        self.context = (
+            context
+        )
+
+    async def execute(
+        self,
+        request: AgentExecutionRequest,
+    ) -> AgentExecutionResult:
+        return (
+            await self.executor.execute(
+                request,
             )
         )
 

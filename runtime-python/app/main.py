@@ -31,7 +31,15 @@ from app.mcp import MCPDiscoverRequest, MCPManager
 from app.multimodal.ingestion import safe_knowledge_error
 from app.multimodal.vision import DeterministicVisionAnalyzer, ModelVisionAnalyzer
 from app.models.runtime import resolve_project_model_runtime
-from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse
+from app.schemas import (
+    DynamicDAG,
+    InteractiveStreamRequest,
+    ProjectModelRuntime,
+    RuntimeRequest,
+    RuntimeResponse,
+    TaskProfile,
+)
+from app.harness import HarnessTerminatedError
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
 
@@ -281,6 +289,39 @@ async def execute(
         return await run_scoped_runtime(req)
     except HTTPException:
         raise
+    except HarnessTerminatedError as exc:
+        # Safety net: a harness termination that escaped engine.run()
+        # still returns the structured FAILED response with its report
+        # instead of an opaque 500. Engine.run() normally converts this
+        # itself at its funnel points.
+        summary = exc.summary
+        report = exc.report
+        reason = (
+            summary.termination_reason
+            if summary is not None
+            else "UNKNOWN"
+        )
+        return RuntimeResponse(
+            request_id=req.request_id,
+            status="FAILED",
+            answer=f"任务已被 Agent Harness 终止：{reason}",
+            scheduler="greedy",
+            task_profile=TaskProfile(
+                required_capabilities=[],
+                complexity="low",
+                risk_level="low",
+                modality=[],
+                parallelizable=False,
+            ),
+            selected_agents=[],
+            estimated_cost=0.0,
+            elapsed_ms=0,
+            trace=[],
+            dag=DynamicDAG(nodes=[], edges=[]),
+            agent_feedback=[],
+            harness_summary=summary,
+            harness_report=report,
+        )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

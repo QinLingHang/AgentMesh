@@ -1,6 +1,7 @@
 import type {
   DeliveryMode,
   ExecutionMode,
+  HarnessMode,
   Planner,
   Scheduler,
   SynthesisMode,
@@ -29,6 +30,16 @@ export function RunSettingsDrawer({
   setQuality,
   retryOnWorkerLoss,
   setRetryOnWorkerLoss,
+  harnessMode,
+  setHarnessMode,
+  harnessMaxRepairs,
+  setHarnessMaxRepairs,
+  harnessMaxRetriesPerTool,
+  setHarnessMaxRetriesPerTool,
+  harnessMaxSteps,
+  setHarnessMaxSteps,
+  harnessLoopRepeatThreshold,
+  setHarnessLoopRepeatThreshold,
 }: {
   open: boolean;
   onClose: () => void;
@@ -50,6 +61,16 @@ export function RunSettingsDrawer({
   setQuality: (value: number) => void;
   retryOnWorkerLoss: boolean;
   setRetryOnWorkerLoss: (value: boolean) => void;
+  harnessMode: HarnessMode;
+  setHarnessMode: (value: HarnessMode) => void;
+  harnessMaxRepairs: number;
+  setHarnessMaxRepairs: (value: number) => void;
+  harnessMaxRetriesPerTool: number;
+  setHarnessMaxRetriesPerTool: (value: number) => void;
+  harnessMaxSteps: number;
+  setHarnessMaxSteps: (value: number) => void;
+  harnessLoopRepeatThreshold: number;
+  setHarnessLoopRepeatThreshold: (value: number) => void;
 }) {
   if (!open) {
     return null;
@@ -129,6 +150,16 @@ export function RunSettingsDrawer({
           setQuality={setQuality}
           retryOnWorkerLoss={retryOnWorkerLoss}
           setRetryOnWorkerLoss={setRetryOnWorkerLoss}
+          harnessMode={harnessMode}
+          setHarnessMode={setHarnessMode}
+          harnessMaxRepairs={harnessMaxRepairs}
+          setHarnessMaxRepairs={setHarnessMaxRepairs}
+          harnessMaxRetriesPerTool={harnessMaxRetriesPerTool}
+          setHarnessMaxRetriesPerTool={setHarnessMaxRetriesPerTool}
+          harnessMaxSteps={harnessMaxSteps}
+          setHarnessMaxSteps={setHarnessMaxSteps}
+          harnessLoopRepeatThreshold={harnessLoopRepeatThreshold}
+          setHarnessLoopRepeatThreshold={setHarnessLoopRepeatThreshold}
         />
 
         <footer className="run-settings-foot">

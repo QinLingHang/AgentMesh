@@ -101,6 +101,7 @@ from app.schemas import (
     AgentFeedback,
     AgentProfile,
     Assignment,
+    DynamicDAG,
     RuntimeCitation,
     RuntimeContinuation,
     RuntimeRequest,
@@ -174,6 +175,24 @@ from app.tools import (
     tool_call_fingerprint,
 )
 from app.tools.loop import safe as safe_tool_payload
+from app.harness import (
+    HarnessConfig,
+    HarnessSupervisor,
+    HarnessTerminatedError,
+    create_harness_supervisor,
+    find_harness_termination,
+)
+from app.harness.contracts import (
+    HarnessRecovery,
+    HarnessRunState,
+)
+from app.harness.diagnosis import (
+    diagnose_result_failure,
+)
+from app.harness.recovery import (
+    replan_decision,
+    replan_prompt,
+)
 
 
 # ============================================================
@@ -1616,7 +1635,7 @@ class RuntimeEngine:
             self
             .executor_resolver
             .resolve(
-                agent.protocol
+                agent
             )
         )
 
@@ -2514,15 +2533,26 @@ class RuntimeEngine:
                 data.pop(
                     "title",
                     "Tool Event",
-                )
+                ),
             )
 
             status = str(
                 data.pop(
                     "status",
                     "completed",
-                )
+                ),
             )
+
+            if harness is not None:
+                # Unified budget: legacy ToolLoopRunner retries are counted
+                # by the harness and never doubled by harness recovery.
+                harness.observe_tool_event(
+                    {
+                        "title": title,
+                        "status": status,
+                        **data,
+                    },
+                )
 
             event(
                 "tool",
@@ -2728,6 +2758,111 @@ class RuntimeEngine:
         )
 
         pre_profile = profile_task(req.task)
+
+        # ====================================================
+        # P37 Agent Harness supervisor
+        #
+        # OFF (explicit, system default, or absent for every
+        # legacy request) never creates a supervisor, so the
+        # existing execution semantics stay untouched. Non-OFF
+        # runs always stay on this full Runtime path.
+        # ====================================================
+
+        harness: HarnessSupervisor | None = (
+            create_harness_supervisor(
+                req,
+                started_perf=started,
+            )
+        )
+
+        if harness is not None:
+            harness.set_trace_bridge(
+                event,
+            )
+
+        def harness_failed_response(
+            terminated: HarnessTerminatedError,
+            *,
+            task_profile: Any = None,
+            dag_payload: Any = None,
+            cost_value: float = 0.0,
+        ) -> RuntimeResponse:
+            summary = terminated.summary
+
+            report = terminated.report
+
+            reason = (
+                summary.termination_reason
+                if summary is not None
+                else "UNKNOWN"
+            )
+
+            return RuntimeResponse(
+                request_id=req.request_id,
+                status="FAILED",
+                answer=(
+                    "任务已被 Agent Harness 终止："
+                    f"{reason}"
+                ),
+                citations=[],
+                continuation=None,
+                scheduler=req.scheduler,
+                task_profile=(
+                    task_profile
+                    if task_profile is not None
+                    else pre_profile
+                ),
+                selected_agents=selected_names,
+                estimated_cost=round(
+                    cost_value,
+                    6,
+                ),
+                elapsed_ms=elapsed(),
+                trace=trace,
+                dag=(
+                    dag_payload
+                    if dag_payload is not None
+                    else DynamicDAG(
+                        nodes=[],
+                        edges=[],
+                    )
+                ),
+                agent_feedback=feedback,
+                observability=build_observability_summary(
+                    trace=trace,
+                    feedback=feedback,
+                    dag=(
+                        dag_payload
+                        if dag_payload is not None
+                        else DynamicDAG(
+                            nodes=[],
+                            edges=[],
+                        )
+                    ),
+                ),
+                scorecard=None,
+                harness_summary=summary,
+                harness_report=report,
+            )
+
+        if harness is not None:
+            try:
+                harness.precheck(
+                    task=req.task,
+                    agent_protocols=[
+                        agent.protocol
+                        for agent in req.agents
+                    ],
+                    tool_names=[
+                        tool.name
+                        for tool in req.tools
+                    ],
+                )
+
+            except HarnessTerminatedError as terminated:
+                return harness_failed_response(
+                    terminated,
+                )
 
         # ====================================================
         # V4.1 Autonomous Capability Discovery
@@ -3140,6 +3275,22 @@ class RuntimeEngine:
             tool_execution_enabled = bool(
                 tool_registry.list()
             )
+
+            # =================================================
+            # P37 Tool Guard
+            #
+            # All tool executions (Internal / HTTP / MCP) now pass
+            # through the Guarded Tool Executor. The guard is a thin
+            # wrapper: discovery, governance and adapters are the same
+            # objects, only the execute() boundary is supervised.
+            # =================================================
+
+            if harness is not None and tool_execution_enabled:
+                tool_registry = (
+                    harness.guarded_registry(
+                        tool_registry,
+                    )
+                )
 
             # =================================================
             # 1.1 User memory control + retrieval
@@ -4967,7 +5118,7 @@ class RuntimeEngine:
                     self
                     .executor_resolver
                     .resolve(
-                        agent.protocol
+                        agent
                     )
                 )
 
@@ -5243,6 +5394,19 @@ class RuntimeEngine:
                         attachments=(
                             model_attachments
                         ),
+
+                        # P37: AUTO_REPAIR owns tool retries inside the
+                        # Guarded Tool Executor within the unified budget;
+                        # the legacy loop retry stands down for this request.
+                        tool_max_retries=(
+                            0
+                            if (
+                                harness is not None
+                                and harness.auto_repair
+                                and tool_execution_enabled
+                            )
+                            else None
+                        ),
                     )
                 )
 
@@ -5250,11 +5414,21 @@ class RuntimeEngine:
                     time.perf_counter()
                 )
 
-                execution_result = (
-                    await executor.execute(
-                        execution_request
+                if harness is not None:
+                    harness.begin_agent_attempt(
+                        agent.name,
                     )
-                )
+
+                try:
+                    execution_result = (
+                        await executor.execute(
+                            execution_request
+                        )
+                    )
+
+                finally:
+                    if harness is not None:
+                        harness.end_agent_attempt()
 
                 latency_ms = int(
                     (
@@ -5312,6 +5486,9 @@ class RuntimeEngine:
 
                 quality_repair_count = 0
                 current_task_input = task_input
+
+                # P37: at most ONE bounded harness replan per assignment.
+                harness_replan_count = 0
 
                 while True:
 
@@ -5389,6 +5566,107 @@ class RuntimeEngine:
                                 current_task_input,
                             )
                         )
+
+                        # =====================================
+                        # P37 Harness result validation
+                        #
+                        # The candidate result of every assignment is
+                        # validated deterministically. OBSERVE records
+                        # only; ENFORCE terminates; AUTO_REPAIR runs at
+                        # most ONE bounded replan with the diagnosis
+                        # evidence passed back to the same executor.
+                        # =====================================
+
+                        if harness is not None:
+                            harness_result_validation = (
+                                harness.check_result(
+                                    result,
+                                    stage=(
+                                        f"{current_agent.name}/"
+                                        f"{assignment.capability}"
+                                    ),
+                                )
+                            )
+
+                            if (
+                                harness_result_validation.status
+                                == "FAIL"
+                            ):
+                                allowed, deny_reason = (
+                                    replan_decision(
+                                        validation=(
+                                            harness_result_validation
+                                        ),
+                                        protocol=(
+                                            current_agent.protocol
+                                        ),
+                                        can_repair=(
+                                            harness.budget.can_repair()
+                                            and harness_replan_count < 1
+                                        ),
+                                        replay_safe=(
+                                            harness.replan_allowed_for_attempt()
+                                        ),
+                                    )
+                                )
+
+                                if not allowed:
+                                    harness.terminate(
+                                        reason=(
+                                            "RESULT_VALIDATION_"
+                                            + harness_result_validation.code
+                                        ),
+                                        validation=(
+                                            harness_result_validation
+                                        ),
+                                        diagnosis=diagnose_result_failure(
+                                            harness_result_validation
+                                        ),
+                                        subject=(
+                                            f"{current_agent.name}/"
+                                            f"{assignment.capability}"
+                                        ),
+                                    )
+
+                                harness.budget.consume_repair()
+
+                                harness_replan_count += 1
+
+                                recovery = HarnessRecovery(
+                                    action="REPLAN",
+                                    reason=deny_reason,
+                                    attempt=(
+                                        harness.budget.used_repairs
+                                    ),
+                                    success=False,
+                                    detail={
+                                        "agent": current_agent.name,
+                                        "capability": assignment.capability,
+                                    },
+                                )
+
+                                harness.emit(
+                                    "recovery",
+                                    subject=(
+                                        f"{current_agent.name}/"
+                                        f"{assignment.capability}"
+                                    ),
+                                    recovery=recovery,
+                                )
+
+                                harness.state_machine.try_transition(
+                                    HarnessRunState.RECOVERING,
+                                )
+
+                                current_task_input = replan_prompt(
+                                    original_task=task_input,
+                                    previous_result=result,
+                                    validation=(
+                                        harness_result_validation
+                                    ),
+                                )
+
+                                continue
 
                         # =====================================
                         # Evaluation
@@ -5803,6 +6081,17 @@ class RuntimeEngine:
                         ) from exc
 
                     # =========================================
+                    # HARNESS TERMINATION
+                    #
+                    # Structured harness termination is control flow,
+                    # not an agent failure: it must never be converted
+                    # into failure feedback or a reschedule.
+                    # =========================================
+
+                    except HarnessTerminatedError:
+                        raise
+
+                    # =========================================
                     # REAL EXECUTION FAILURE
                     # =========================================
 
@@ -5895,6 +6184,41 @@ class RuntimeEngine:
                                     "reschedule attempt(s)"
                                 )
                             ) from exc
+
+                        # =====================================
+                        # P37 unified budget: legacy agent reschedules
+                        # count into the harness budget. When the
+                        # snapshot budget is exhausted the reschedule
+                        # stops deterministically.
+                        # =====================================
+
+                        if harness is not None:
+                            if not harness.budget.can_reschedule():
+                                event(
+                                    "reschedule",
+                                    (
+                                        "Runtime "
+                                        "Rescheduler"
+                                    ),
+                                    "error",
+                                    (
+                                        "harness reschedule "
+                                        "budget exhausted"
+                                    ),
+                                )
+
+                                raise RuntimeError(
+                                    (
+                                        f"{assignment.capability} "
+                                        "failed: harness reschedule "
+                                        "budget exhausted"
+                                    )
+                                ) from exc
+
+                            harness.observe_reschedule(
+                                agent=current_agent.name,
+                                capability=assignment.capability,
+                            )
 
                         event(
                             "reschedule",
@@ -6257,6 +6581,11 @@ class RuntimeEngine:
                         if find_runtime_interruption(dag_exc) is not None:
                             raise
 
+                        # P37: harness termination is control flow too - the
+                        # structured report travels with the exception chain.
+                        if find_harness_termination(dag_exc) is not None:
+                            raise
+
                         if (
                             semantic_plan is None
                             or replan_count >= max(0, settings.max_replan_attempts)
@@ -6511,6 +6840,28 @@ class RuntimeEngine:
             except (
                 DAGExecutionError
             ) as dag_exc:
+
+                # =============================================
+                # P37 Harness Termination
+                #
+                # A harness-terminated node failure carries the full
+                # structured report; convert it into the FAILED
+                # runtime response instead of a reschedule or a
+                # generic 500.
+                # =============================================
+
+                harness_terminated = (
+                    find_harness_termination(
+                        dag_exc,
+                    )
+                )
+
+                if harness_terminated is not None:
+                    return harness_failed_response(
+                        harness_terminated,
+                        task_profile=profile,
+                        dag_payload=dag,
+                    )
 
                 interrupted = (
                     find_runtime_interruption(
@@ -8026,6 +8377,55 @@ class RuntimeEngine:
                 )
 
             # =================================================
+            # 9.5 P37 Harness: final result validation + report
+            #
+            # The candidate final answer passes the deterministic
+            # ResultValidator before the run completes. Blocking
+            # modes terminate here with the full structured report.
+            # =================================================
+
+            harness_summary = None
+            harness_report = None
+
+            if harness is not None:
+                try:
+                    final_validation = harness.check_result(
+                        answer,
+                        stage="final_result",
+                    )
+
+                    if final_validation.status == "FAIL":
+                        harness.terminate(
+                            reason=(
+                                "RESULT_VALIDATION_"
+                                + final_validation.code
+                            ),
+                            validation=final_validation,
+                            diagnosis=diagnose_result_failure(
+                                final_validation,
+                            ),
+                            subject="final_result",
+                        )
+
+                except HarnessTerminatedError as terminated:
+                    return harness_failed_response(
+                        terminated,
+                        task_profile=profile,
+                        dag_payload=dag,
+                        cost_value=estimated_cost,
+                    )
+
+                harness.record_final_validation(
+                    final_validation,
+                )
+
+                harness_summary, harness_report = (
+                    harness.finish(
+                        business_completed=True,
+                    )
+                )
+
+            # =================================================
             # 10. Task Completed
             # =================================================
 
@@ -8178,4 +8578,12 @@ class RuntimeEngine:
                 ),
 
                 scorecard=scorecard,
+
+                harness_summary=(
+                    harness_summary
+                ),
+
+                harness_report=(
+                    harness_report
+                ),
             )

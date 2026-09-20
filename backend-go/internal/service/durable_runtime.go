@@ -183,6 +183,18 @@ func normalizeDurableRunInput(in RunTaskInput) (RunTaskInput, error) {
 	default:
 		return in, ErrInvalidInput
 	}
+
+	// P37: the harness snapshot is normalized at enqueue time and then
+	// travels inside request_json verbatim; dispatch never recomputes it.
+	if in.HarnessConfig != nil {
+		if err := in.HarnessConfig.Normalize(); err != nil {
+			return in, ErrInvalidInput
+		}
+
+		if in.HarnessConfig.IsOff() {
+			in.HarnessConfig = nil
+		}
+	}
 	if in.Constraints.MaxLatencyMS <= 0 {
 		in.Constraints.MaxLatencyMS = 8000
 	}
@@ -274,6 +286,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+		HarnessConfig:  in.HarnessConfig,
 		Constraints:    in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
 	}
 	requestJSON, err := json.Marshal(req)
@@ -286,6 +299,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		TaskText: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: in.ModelSelection,
+		HarnessConfig:  in.HarnessConfig,
 		DeliveryMode:   "durable",
 	}, in.Constraints, requestJSON, uuid.NewString(), time.Now().UTC().Add(s.cfg.JobDeadline), s.cfg.MaxAttempts)
 	if err != nil {
@@ -727,6 +741,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 					"taskProfile": response.TaskProfile, "observability": response.Observability,
 					"scorecard": response.Scorecard, "agentFeedback": response.AgentFeedback,
 					"citations": normalizeRuntimeCitations(response.Citations),
+					"harnessSummary": response.HarnessSummary, "harnessReport": response.HarnessReport,
 				},
 			}
 		}
@@ -739,6 +754,28 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 			return "", err
 		}
 		if err := s.repo.MarkRuntimeJobCompleted(ctx, jobID); err != nil {
+			return "", err
+		}
+		return DurableCallbackApplied, nil
+	}
+
+	if runtimeStatus == "FAILED" {
+		// P37: harness-terminated durable runs persist the task failure and
+		// the structured harness data so the UI can explain the termination.
+		if task.ConversationID != nil {
+			if _, msgErr := s.taskService.messages.CreateMessage(ctx, job.UserID, *task.ConversationID, "assistant", response.Answer, "ERROR", task.RequestID, map[string]any{
+				"taskId": task.ID, "runtimePhase": "durable_failed", "deliveryMode": "durable",
+				"harnessSummary": response.HarnessSummary, "harnessReport": response.HarnessReport,
+			}); msgErr != nil {
+				_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist harness failure history")
+				return "", msgErr
+			}
+		}
+		if err := s.taskService.tasks.FailTask(ctx, job.UserID, job.TaskID, response.Answer, response.ElapsedMS); err != nil {
+			_ = s.repo.FailRuntimeJob(ctx, jobID, "failed to persist harness task failure")
+			return "", err
+		}
+		if err := s.repo.FailRuntimeJob(ctx, jobID, "harness terminated the run"); err != nil {
 			return "", err
 		}
 		return DurableCallbackApplied, nil
@@ -761,6 +798,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 				"executionMode": task.ExecutionMode, "synthesisMode": task.SynthesisMode,
 				"observability": response.Observability, "scorecard": response.Scorecard,
 				"agentFeedback": response.AgentFeedback, "citations": normalizeRuntimeCitations(response.Citations),
+				"harnessSummary": response.HarnessSummary, "harnessReport": response.HarnessReport,
 			},
 		}
 	}

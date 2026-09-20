@@ -18,6 +18,7 @@ import { RoutingTracePanel } from "./RoutingTracePanel";
 import { ReliabilityTracePanel } from "./ReliabilityTracePanel";
 import { DesktopTracePanel } from "./DesktopTracePanel";
 import { CapabilityDiscoveryPanel } from "./CapabilityDiscoveryPanel";
+import { HarnessTracePanel } from "./HarnessTracePanel";
 
 export function RunDetails({
   result,
@@ -104,6 +105,12 @@ export function RunDetails({
 
         {active === "eval" && (
           <EvalScorecardPanel
+            result={result}
+          />
+        )}
+
+        {active === "harness" && (
+          <HarnessTracePanel
             result={result}
           />
         )}

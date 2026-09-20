@@ -21,6 +21,7 @@ import type {
   Message,
   MessageAttachmentMetadata,
   ModelSelection,
+  HarnessMode,
   Planner,
   Project,
   RunResult,
@@ -262,6 +263,22 @@ export function Workspace({
 
   const [retryOnWorkerLoss, setRetryOnWorkerLoss] =
     useState(false);
+
+  // P37 Agent Harness 设置。缺省 OFF：不改变既有执行语义。
+  const [harnessMode, setHarnessMode] =
+    useState<HarnessMode>("OFF");
+
+  const [harnessMaxRepairs, setHarnessMaxRepairs] =
+    useState(2);
+
+  const [harnessMaxRetriesPerTool, setHarnessMaxRetriesPerTool] =
+    useState(1);
+
+  const [harnessMaxSteps, setHarnessMaxSteps] =
+    useState(12);
+
+  const [harnessLoopRepeatThreshold, setHarnessLoopRepeatThreshold] =
+    useState(2);
 
   const [busy, setBusy] =
     useState(false);
@@ -1336,6 +1353,16 @@ export function Workspace({
         synthesisMode,
         deliveryMode,
         modelSelection,
+        harnessConfig:
+          harnessMode === "OFF"
+            ? undefined
+            : {
+                mode: harnessMode,
+                maxRepairs: harnessMaxRepairs,
+                maxRetriesPerTool: harnessMaxRetriesPerTool,
+                maxSteps: harnessMaxSteps,
+                loopRepeatThreshold: harnessLoopRepeatThreshold,
+              },
         maxLatencyMs: latency,
         maxCost: cost,
         minQuality: quality,
@@ -2152,6 +2179,16 @@ export function Workspace({
           setQuality={setQuality}
           retryOnWorkerLoss={retryOnWorkerLoss}
           setRetryOnWorkerLoss={setRetryOnWorkerLoss}
+          harnessMode={harnessMode}
+          setHarnessMode={setHarnessMode}
+          harnessMaxRepairs={harnessMaxRepairs}
+          setHarnessMaxRepairs={setHarnessMaxRepairs}
+          harnessMaxRetriesPerTool={harnessMaxRetriesPerTool}
+          setHarnessMaxRetriesPerTool={setHarnessMaxRetriesPerTool}
+          harnessMaxSteps={harnessMaxSteps}
+          setHarnessMaxSteps={setHarnessMaxSteps}
+          harnessLoopRepeatThreshold={harnessLoopRepeatThreshold}
+          setHarnessLoopRepeatThreshold={setHarnessLoopRepeatThreshold}
         />
       </div>
     </div>

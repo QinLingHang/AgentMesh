@@ -298,6 +298,7 @@ type PublicRunInput struct {
 	Planner        string                `json:"planner,omitempty"`
 	ExecutionMode  string                `json:"executionMode,omitempty"`
 	SynthesisMode  string                `json:"synthesisMode,omitempty"`
+	HarnessConfig  *model.HarnessConfig  `json:"harnessConfig,omitempty"`
 	Constraints    model.TaskConstraints `json:"constraints,omitempty"`
 }
 
@@ -404,7 +405,8 @@ func (s *EcosystemService) RunPublicTask(ctx context.Context, principal *model.A
 		ConversationID: conversationID,
 		Task:           input.Task, Scheduler: input.Scheduler, Planner: input.Planner,
 		ExecutionMode: input.ExecutionMode, SynthesisMode: input.SynthesisMode,
-		Constraints: input.Constraints,
+		HarnessConfig: input.HarnessConfig,
+		Constraints:   input.Constraints,
 	})
 	if err != nil {
 		cleanupReservation()

@@ -34,6 +34,7 @@ func (h *DurableRuntimeHandler) Run(c *gin.Context) {
 		ExecutionMode:  req.ExecutionMode,
 		SynthesisMode:  req.SynthesisMode,
 		ModelSelection: req.ModelSelection,
+		HarnessConfig:  req.HarnessConfig,
 		AttachmentIDs:  req.AttachmentIDs,
 		Constraints:    req.Constraints,
 	})

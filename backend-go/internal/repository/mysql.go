@@ -904,6 +904,7 @@ func scanAgent(
 		&agent.Description,
 		&agent.Endpoint,
 		&agent.Protocol,
+		&agent.ExecutorType,
 		&capabilities,
 		&agent.Provider,
 		&agent.ModelName,
@@ -1073,6 +1074,7 @@ func (r *MySQL) CreateAgent(
 			description,
 			endpoint,
 			protocol,
+			executor_type,
 			capabilities_json,
 			provider,
 			model_name,
@@ -1099,6 +1101,7 @@ func (r *MySQL) CreateAgent(
 			?,
 			?,
 			?,
+			?,
 			'ACTIVE'
 		)
 		`,
@@ -1107,6 +1110,7 @@ func (r *MySQL) CreateAgent(
 		agent.Description,
 		agent.Endpoint,
 		agent.Protocol,
+		agent.ExecutorType,
 		string(
 			capabilities,
 		),
@@ -1140,6 +1144,7 @@ func (r *MySQL) CreateAgent(
 				description,
 				endpoint,
 				protocol,
+				executor_type,
 				capabilities_json,
 				provider,
 				model_name,
@@ -1176,6 +1181,7 @@ func (r *MySQL) ListAgents(
 			description,
 			endpoint,
 			protocol,
+			executor_type,
 			capabilities_json,
 			provider,
 			model_name,
@@ -1698,6 +1704,7 @@ const taskColumns = `
 	execution_mode,
 	synthesis_mode,
 	model_selection_json,
+	harness_config_json,
 	delivery_mode,
 	constraints_json,
 	status,
@@ -1736,6 +1743,8 @@ func scanTask(
 
 	var modelSelectionJSON []byte
 
+	var harnessConfigJSON []byte
+
 	var selectedJSON []byte
 
 	var traceJSON []byte
@@ -1755,6 +1764,7 @@ func scanTask(
 		&task.ExecutionMode,
 		&task.SynthesisMode,
 		&modelSelectionJSON,
+		&harnessConfigJSON,
 		&task.DeliveryMode,
 		&constraintsJSON,
 		&task.Status,
@@ -1822,6 +1832,22 @@ func scanTask(
 	task.ModelSelection = model.ModelSelection{Mode: "auto"}
 	if len(modelSelectionJSON) > 0 {
 		_ = json.Unmarshal(modelSelectionJSON, &task.ModelSelection)
+	}
+
+	// =====================================================
+	// P37 Harness Config Snapshot
+	//
+	// Legacy rows (NULL) read as OFF: task.HarnessConfig stays nil.
+	// =====================================================
+
+	if len(harnessConfigJSON) > 0 {
+		harnessConfig := model.HarnessConfig{}
+
+		if err = json.Unmarshal(harnessConfigJSON, &harnessConfig); err != nil {
+			return nil, err
+		}
+
+		task.HarnessConfig = &harnessConfig
 	}
 
 	// =====================================================
@@ -2023,6 +2049,16 @@ func (r *MySQL) CreateTask(
 		return nil, err
 	}
 
+	var harnessConfigJSON any
+
+	if task.HarnessConfig != nil && !task.HarnessConfig.IsOff() {
+		b, marshalErr := json.Marshal(task.HarnessConfig)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		harnessConfigJSON = string(b)
+	}
+
 	res, err := r.db.ExecContext(
 		ctx,
 		`
@@ -2036,6 +2072,7 @@ func (r *MySQL) CreateTask(
 			execution_mode,
 			synthesis_mode,
 			model_selection_json,
+			harness_config_json,
 			delivery_mode,
 			constraints_json,
 			status
@@ -2051,6 +2088,7 @@ func (r *MySQL) CreateTask(
 			?,
 			?,
 			?,
+			'direct',
 			?,
 			'RUNNING'
 		)
@@ -2064,7 +2102,7 @@ func (r *MySQL) CreateTask(
 		task.ExecutionMode,
 		task.SynthesisMode,
 		string(modelSelectionJSON),
-		"direct",
+		harnessConfigJSON,
 		string(
 			constraintsJSON,
 		),

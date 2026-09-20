@@ -27,6 +27,8 @@ export function Agents({ agents, reload }: { agents: Agent[]; reload: () => Prom
   const [name, setName] = useState("自定义智能体");
   const [endpoint, setEndpoint] = useState("http://127.0.0.1:9999/agent");
   const [protocol, setProtocol] = useState("http");
+  // P37: 执行器类型。仅 internal 协议允许选择 openjiuwen；默认 native 保持既有行为。
+  const [executorType, setExecutorType] = useState<"native" | "openjiuwen">("native");
   const [caps, setCaps] = useState("通用");
   const [query, setQuery] = useState("");
 
@@ -48,6 +50,7 @@ export function Agents({ agents, reload }: { agents: Agent[]; reload: () => Prom
       name,
       endpoint,
       protocol,
+      executorType: protocol === "internal" ? executorType : undefined,
       capabilities: caps
         .split(",")
         .map((value) => value.trim())
@@ -123,13 +126,33 @@ export function Agents({ agents, reload }: { agents: Agent[]; reload: () => Prom
             </label>
             <label>
               <span>接入方式</span>
-              <select value={protocol} onChange={(e) => setProtocol(e.target.value)}>
+              <select
+                value={protocol}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setProtocol(next);
+                  // 非 internal 协议禁止选择 openjiuwen 执行器。
+                  if (next !== "internal") setExecutorType("native");
+                }}
+              >
                 <option value="http">网页接口（HTTP）</option>
                 <option value="a2a">智能体互联（A2A）</option>
                 <option value="internal">平台内部</option>
                 <option value="langgraph">流程编排（LangGraph）</option>
               </select>
             </label>
+            {protocol === "internal" && (
+              <label data-testid="agent-executor-type">
+                <span>执行器类型</span>
+                <select
+                  value={executorType}
+                  onChange={(e) => setExecutorType(e.target.value as "native" | "openjiuwen")}
+                >
+                  <option value="native">Native · 平台原生</option>
+                  <option value="openjiuwen">OpenJiuwen · 九文智能体</option>
+                </select>
+              </label>
+            )}
             <label className="wide">
               <span>能力标签</span>
               <input
