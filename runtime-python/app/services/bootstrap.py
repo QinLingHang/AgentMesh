@@ -10,6 +10,7 @@ from app.plugins import (
     HTTPAgentPlugin,
     InternalAgentPlugin,
     LangGraphAgentPlugin,
+    OpenJiuwenAgentPlugin,
     create_model_plugins,
     A2AAgentPlugin,
 )
@@ -35,6 +36,10 @@ async def create_registry() -> PluginRegistry:
 
     registry.register(
         LangGraphAgentPlugin()
+    )
+
+    registry.register(
+        OpenJiuwenAgentPlugin()
     )
 
     registry.register(

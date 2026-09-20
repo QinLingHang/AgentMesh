@@ -105,6 +105,49 @@ class Settings(
     langgraph_max_repairs: int = 1
 
     # =====================================================
+    # P37 Agent Harness
+    # =====================================================
+
+    # Feature switch: false forces OFF for every run, whatever the request
+    # asks for. Non-OFF runs must go through the full Runtime (never the
+    # interactive fast path).
+    harness_enabled: bool = True
+
+    # System default mode. A request-level harnessConfig snapshot always
+    # wins; tasks without any harness field read as OFF (backward compatible).
+    harness_default_mode: str = "OFF"
+
+    harness_policy_version: str = "p37-v1.0"
+
+    harness_max_steps: int = 12
+
+    harness_max_repairs: int = 2
+
+    harness_max_retries_per_tool: int = 1
+
+    harness_max_reschedules: int = 1
+
+    harness_loop_repeat_threshold: int = 2
+
+    # =====================================================
+    # OpenJiuwen Agent Executor (P37 §7.1 / 适配器执行方案 V1.0)
+    # =====================================================
+
+    # OpenJiuwen-developed agents carry executorType=openjiuwen and are
+    # routed to OpenJiuwenAgentExecutor. There is no second orchestration
+    # service; tools always run through the AgentMesh ToolRegistry.
+    #
+    # builtin: deterministic in-process framework loop over the AgentMesh
+    #          model gateway (default; works without the external SDK).
+    # sdk:     uses the pinned `openjiuwen` package; a missing SDK fails
+    #          explicitly and never degrades to another executor.
+    openjiuwen_execution_mode: str = "builtin"
+
+    openjiuwen_model_name: str = ""
+
+    openjiuwen_max_tool_iterations: int = 8
+
+    # =====================================================
     # Local Desktop Bridge
     # =====================================================
 

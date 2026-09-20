@@ -258,6 +258,10 @@ type ExecuteRequest struct {
 
 	ModelSelection ModelSelection `json:"modelSelection,omitempty"`
 
+	// P37 Agent Harness configuration snapshot. nil keeps the legacy OFF
+	// behaviour; the Python runtime freezes the received snapshot per run.
+	HarnessConfig *model.HarnessConfig `json:"harnessConfig,omitempty"`
+
 	// AttachmentIDs are persisted only in the durable queue envelope. They are
 	// resolved again under the current user/conversation boundary immediately
 	// before dispatch so raw bytes are never stored in MySQL job payloads.
@@ -440,7 +444,16 @@ type ExecuteResponse struct {
 	Observability ObservabilitySummary `json:"observability"`
 
 	Scorecard *RunScorecard `json:"scorecard"`
+
+	// P37 Agent Harness outputs. nil for OFF runs (and legacy runtimes).
+	HarnessSummary *model.HarnessSummary `json:"harness_summary,omitempty"`
+
+	HarnessReport HarnessReport `json:"harness_report,omitempty"`
 }
+
+// HarnessReport is the full harness run report passed through as JSON. The
+// runtime owns its schema; Go persists and returns it unchanged.
+type HarnessReport map[string]any
 
 // ============================================================
 // MCP

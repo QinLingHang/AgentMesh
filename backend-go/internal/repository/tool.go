@@ -11,7 +11,11 @@ import (
 func scanTool(s scanner) (*model.Tool, error) {
 	var t model.Tool
 	var schema []byte
-	err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Protocol, &t.Endpoint, &schema, &t.RiskLevel, &t.RequiresConfirmation, &t.Enabled, &t.CreatedAt, &t.UpdatedAt)
+	var outputSchema []byte
+	var sideEffectRisk sql.NullString
+	var fallbackToolID sql.NullString
+	var argumentAliases []byte
+	err := s.Scan(&t.ID, &t.UserID, &t.Name, &t.Description, &t.Protocol, &t.Endpoint, &schema, &t.RiskLevel, &t.RequiresConfirmation, &t.Enabled, &outputSchema, &sideEffectRisk, &t.SupportsIdempotencyKey, &fallbackToolID, &argumentAliases, &t.CreatedAt, &t.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -21,14 +25,47 @@ func scanTool(s scanner) (*model.Tool, error) {
 	if err = json.Unmarshal(schema, &t.InputSchema); err != nil {
 		return nil, err
 	}
+	if len(outputSchema) > 0 {
+		_ = json.Unmarshal(outputSchema, &t.OutputSchema)
+	}
+	if sideEffectRisk.Valid && sideEffectRisk.String != "" {
+		t.SideEffectRisk = sideEffectRisk.String
+	}
+	if fallbackToolID.Valid {
+		t.FallbackToolID = fallbackToolID.String
+	}
+	if len(argumentAliases) > 0 {
+		_ = json.Unmarshal(argumentAliases, &t.ArgumentAliases)
+	}
 	return &t, nil
 }
 
-const toolColumns = `id,user_id,name,description,protocol,endpoint,input_schema,risk_level,requires_confirmation,enabled,created_at,updated_at`
+const toolColumns = `id,user_id,name,description,protocol,endpoint,input_schema,risk_level,requires_confirmation,enabled,output_schema,side_effect_risk,supports_idempotency_key,fallback_tool_id,argument_aliases,created_at,updated_at`
+
+func marshalJSONColumn(value any) []byte {
+	if value == nil {
+		return nil
+	}
+	b, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+func nullableJSONColumn(value any) any {
+	b := marshalJSONColumn(value)
+	if len(b) == 0 {
+		return nil
+	}
+	return string(b)
+}
 
 func (r *MySQL) CreateTool(ctx context.Context, uid int64, t model.Tool) (*model.Tool, error) {
 	b, _ := json.Marshal(t.InputSchema)
-	res, e := r.db.ExecContext(ctx, `INSERT INTO tools(user_id,name,description,protocol,endpoint,input_schema,risk_level,requires_confirmation,enabled) VALUES(?,?,?,?,?,?,?,?,?)`, uid, t.Name, t.Description, t.Protocol, t.Endpoint, string(b), t.RiskLevel, t.RequiresConfirmation, t.Enabled)
+	res, e := r.db.ExecContext(ctx, `INSERT INTO tools(user_id,name,description,protocol,endpoint,input_schema,risk_level,requires_confirmation,enabled,output_schema,side_effect_risk,supports_idempotency_key,fallback_tool_id,argument_aliases) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		uid, t.Name, t.Description, t.Protocol, t.Endpoint, string(b), t.RiskLevel, t.RequiresConfirmation, t.Enabled,
+		nullableJSONColumn(t.OutputSchema), t.SideEffectRisk, t.SupportsIdempotencyKey, t.FallbackToolID, nullableJSONColumn(t.ArgumentAliases))
 	if e != nil {
 		return nil, e
 	}
@@ -61,7 +98,9 @@ func (r *MySQL) ListTools(ctx context.Context, uid int64, enabledOnly bool) ([]m
 }
 func (r *MySQL) UpdateTool(ctx context.Context, uid, id int64, t model.Tool) (*model.Tool, error) {
 	b, _ := json.Marshal(t.InputSchema)
-	res, e := r.db.ExecContext(ctx, `UPDATE tools SET name=?,description=?,protocol=?,endpoint=?,input_schema=?,risk_level=?,requires_confirmation=?,enabled=? WHERE id=? AND user_id=?`, t.Name, t.Description, t.Protocol, t.Endpoint, string(b), t.RiskLevel, t.RequiresConfirmation, t.Enabled, id, uid)
+	res, e := r.db.ExecContext(ctx, `UPDATE tools SET name=?,description=?,protocol=?,endpoint=?,input_schema=?,risk_level=?,requires_confirmation=?,enabled=?,output_schema=?,side_effect_risk=?,supports_idempotency_key=?,fallback_tool_id=?,argument_aliases=? WHERE id=? AND user_id=?`,
+		t.Name, t.Description, t.Protocol, t.Endpoint, string(b), t.RiskLevel, t.RequiresConfirmation, t.Enabled,
+		nullableJSONColumn(t.OutputSchema), t.SideEffectRisk, t.SupportsIdempotencyKey, t.FallbackToolID, nullableJSONColumn(t.ArgumentAliases), id, uid)
 	if e != nil {
 		return nil, e
 	}

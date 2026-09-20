@@ -84,6 +84,60 @@ class ToolDefinition(BaseModel):
         default_factory=dict
     )
 
+    # =====================================================
+    # P37 Agent Harness extensions (§6.2)
+    #
+    # These optional fields complete strict output validation and the
+    # side-effect-aware recovery policy. They must be threaded through
+    # Python, Go, React and the database together.
+    # =====================================================
+
+    # JSON Schema that a successful response must satisfy. When absent the
+    # output validation status is NOT_CONFIGURED - never recorded as PASS.
+    output_schema: dict[
+        str,
+        Any,
+    ] | None = Field(
+        default=None,
+        alias="outputSchema",
+    )
+
+    # READ_ONLY / IDEMPOTENT_WRITE / NON_IDEMPOTENT_WRITE decide whether an
+    # automatic retry is ever allowed. Legacy tools default to UNKNOWN, which
+    # never justifies an automatic write retry.
+    side_effect_risk: Literal[
+        "READ_ONLY",
+        "IDEMPOTENT_WRITE",
+        "NON_IDEMPOTENT_WRITE",
+        "UNKNOWN",
+    ] = Field(
+        default="UNKNOWN",
+        alias="sideEffectRisk",
+    )
+
+    # Whether write tools support safe replay via an idempotency key.
+    supports_idempotency_key: bool = Field(
+        default=False,
+        alias="supportsIdempotencyKey",
+    )
+
+    # Explicit alternative tool (registry name). The harness never searches
+    # for a replacement on its own.
+    fallback_tool_id: str | None = Field(
+        default=None,
+        alias="fallbackToolId",
+    )
+
+    # Explicit argument alias mapping (alias -> canonical name). No semantic
+    # guessing is performed.
+    argument_aliases: dict[
+        str,
+        str,
+    ] = Field(
+        default_factory=dict,
+        alias="argumentAliases",
+    )
+
 
 class ToolErrorType(
     str,

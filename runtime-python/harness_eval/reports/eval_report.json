@@ -1,0 +1,1075 @@
+{
+  "policyVersion": "p37-v1.0",
+  "modes": [
+    "OFF",
+    "AUTO_REPAIR"
+  ],
+  "metrics": {
+    "faultDetectionRate": 100.0,
+    "supportedRecoveryRate": 100.0,
+    "faultEscapeRateAutoRepair": 0.0,
+    "faultEscapeRateOff": 28.6,
+    "normalFalseBlockRate": 0.0,
+    "loopTerminationRate": 100.0,
+    "successRateOff": 37.5,
+    "successRateAutoRepair": 50.0,
+    "overheadMsP50": 0.0,
+    "overheadMsP95": 342,
+    "harnessEventsTotal": 50
+  },
+  "results": [
+    {
+      "case": {
+        "id": "normal_baseline",
+        "name": "正常基线",
+        "category": "normal",
+        "tool": {
+          "name": "query_order",
+          "protocol": "internal",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "required": [
+              "orderId",
+              "status"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "expected": "OFF 与 AUTO_REPAIR 业务结果一致，不发生修复"
+      },
+      "off": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": false,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "auto": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": false,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": "COMPLETED",
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "diagnosisCount": 0,
+        "validationFailures": 0,
+        "harnessEvents": 4,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725012+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725012+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725012+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "category": "normal"
+    },
+    {
+      "case": {
+        "id": "input_missing_with_default",
+        "name": "输入缺字段",
+        "category": "fault",
+        "fault": "missing_required_with_default",
+        "tool": {
+          "name": "query_order",
+          "protocol": "internal",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string",
+                "default": "ORD-1001"
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "required": [
+              "orderId",
+              "status"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {}
+          }
+        ],
+        "expected": "检测并只补 schema default"
+      },
+      "off": {
+        "businessSuccess": false,
+        "terminated": false,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order failed: invalid_arguments"
+          }
+        ],
+        "finalResult": null
+      },
+      "auto": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": true,
+        "recovered": true,
+        "escaped": false,
+        "harnessOutcome": "COMPLETED",
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [
+          "REPAIR_ARGS"
+        ],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "diagnosisCount": 0,
+        "validationFailures": 1,
+        "harnessEvents": 5,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725678+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725678+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.725678+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "input_unrepairable",
+        "name": "输入不可修复",
+        "category": "fault",
+        "fault": "missing_required_no_default",
+        "tool": {
+          "name": "query_order",
+          "protocol": "internal",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": null
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {}
+          }
+        ],
+        "expected": "不调用工具，明确终止"
+      },
+      "off": {
+        "businessSuccess": false,
+        "terminated": false,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order failed: invalid_arguments"
+          }
+        ],
+        "finalResult": null
+      },
+      "auto": {
+        "businessSuccess": false,
+        "terminated": true,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": "TERMINATED",
+        "terminationReason": "INPUT_VALIDATION_INPUT_REQUIRED_MISSING",
+        "diagnosis": {
+          "category": "INPUT",
+          "rootCauseCode": "INPUT_REQUIRED_MISSING",
+          "evidence": {
+            "fieldPaths": [
+              "$.orderId"
+            ]
+          },
+          "retryable": false,
+          "sideEffectRisk": "READ_ONLY",
+          "confidence": "EXACT",
+          "recommendedAction": "REPLAN"
+        },
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "diagnosisCount": 1,
+        "validationFailures": 1,
+        "harnessEvents": 3,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.726720+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.726720+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.726720+00:00"
+          },
+          {
+            "state": "DIAGNOSING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.726720+00:00"
+          },
+          {
+            "state": "TERMINATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.726720+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "harness terminated before action: INPUT_VALIDATION_INPUT_REQUIRED_MISSING"
+          }
+        ],
+        "finalResult": null
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "output_incomplete",
+        "name": "输出不完整",
+        "category": "fault",
+        "fault": "output_missing_required",
+        "tool": {
+          "name": "query_order",
+          "protocol": "mcp",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "required": [
+              "orderId",
+              "status"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "expected": "检测失败，不把结果作为成功返回"
+      },
+      "off": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": false,
+        "recovered": false,
+        "escaped": true,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001"
+        }
+      },
+      "auto": {
+        "businessSuccess": false,
+        "terminated": true,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": "TERMINATED",
+        "terminationReason": "OUTPUT_SCHEMA_INVALID",
+        "diagnosis": {
+          "category": "OUTPUT",
+          "rootCauseCode": "OUTPUT_SCHEMA_INVALID",
+          "evidence": {
+            "fieldPaths": [
+              "$.status"
+            ],
+            "fallbackAvailable": false
+          },
+          "retryable": true,
+          "sideEffectRisk": "READ_ONLY",
+          "confidence": "EXACT",
+          "recommendedAction": "RETRY"
+        },
+        "recoveryActions": [
+          "RETRY"
+        ],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "diagnosisCount": 1,
+        "validationFailures": 2,
+        "harnessEvents": 7,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.727242+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.727242+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.727242+00:00"
+          },
+          {
+            "state": "DIAGNOSING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.727756+00:00"
+          },
+          {
+            "state": "TERMINATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:58.727767+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "harness terminated before action: OUTPUT_SCHEMA_INVALID"
+          }
+        ],
+        "finalResult": null
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "readonly_timeout",
+        "name": "只读超时",
+        "category": "fault",
+        "fault": "timeout_first_call",
+        "tool": {
+          "name": "query_order",
+          "protocol": "http",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "required": [
+              "orderId",
+              "status"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "expected": "预算内重试一次并记录恢复"
+      },
+      "off": {
+        "businessSuccess": false,
+        "terminated": false,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "elapsedMs": 607,
+        "events": [
+          {
+            "elapsedMs": 606,
+            "message": "tool call query_order failed: timeout"
+          }
+        ],
+        "finalResult": null
+      },
+      "auto": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": true,
+        "recovered": true,
+        "escaped": false,
+        "harnessOutcome": "COMPLETED",
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [
+          "RETRY"
+        ],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "diagnosisCount": 1,
+        "validationFailures": 0,
+        "harnessEvents": 7,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:59.733137+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:59.733137+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:13:59.733137+00:00"
+          }
+        ],
+        "elapsedMs": 949,
+        "events": [
+          {
+            "elapsedMs": 949,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "write_unknown_outcome",
+        "name": "写操作状态未知",
+        "category": "fault",
+        "fault": "non_idempotent_timeout",
+        "tool": {
+          "name": "cancel_order",
+          "protocol": "http",
+          "sideEffectRisk": "NON_IDEMPOTENT_WRITE",
+          "supportsIdempotencyKey": false,
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": {
+            "type": "object",
+            "required": [
+              "canceled"
+            ],
+            "properties": {
+              "canceled": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        "actions": [
+          {
+            "tool": "cancel_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "expected": "不自动重试，终止并提示人工确认"
+      },
+      "off": {
+        "businessSuccess": false,
+        "terminated": false,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "elapsedMs": 602,
+        "events": [
+          {
+            "elapsedMs": 601,
+            "message": "tool call cancel_order failed: timeout"
+          }
+        ],
+        "finalResult": null
+      },
+      "auto": {
+        "businessSuccess": false,
+        "terminated": true,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": "TERMINATED",
+        "terminationReason": "TOOL_OUTCOME_UNKNOWN",
+        "diagnosis": {
+          "category": "TIMEOUT",
+          "rootCauseCode": "TOOL_OUTCOME_UNKNOWN",
+          "evidence": {
+            "tool": "cancel_order",
+            "requestSent": true
+          },
+          "retryable": false,
+          "sideEffectRisk": "NON_IDEMPOTENT_WRITE",
+          "confidence": "EXACT",
+          "recommendedAction": "TERMINATE"
+        },
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 0,
+        "diagnosisCount": 2,
+        "validationFailures": 0,
+        "harnessEvents": 6,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.029768+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.029768+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.029768+00:00"
+          },
+          {
+            "state": "DIAGNOSING",
+            "elapsedMs": 618,
+            "timestamp": "2026-09-19T18:14:02.648191+00:00"
+          },
+          {
+            "state": "TERMINATED",
+            "elapsedMs": 618,
+            "timestamp": "2026-09-19T18:14:02.648699+00:00"
+          }
+        ],
+        "elapsedMs": 619,
+        "events": [
+          {
+            "elapsedMs": 618,
+            "message": "harness terminated before action: TOOL_OUTCOME_UNKNOWN"
+          }
+        ],
+        "finalResult": null
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "loop_no_progress",
+        "name": "循环",
+        "category": "fault",
+        "fault": "loop_same_action",
+        "tool": {
+          "name": "query_order",
+          "protocol": "internal",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": null
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          },
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          },
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          },
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "expected": "第三次执行前终止"
+      },
+      "off": {
+        "businessSuccess": false,
+        "terminated": false,
+        "detected": false,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 4,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "auto": {
+        "businessSuccess": false,
+        "terminated": true,
+        "detected": true,
+        "recovered": false,
+        "escaped": false,
+        "harnessOutcome": "TERMINATED",
+        "terminationReason": "LOOP_DETECTED",
+        "diagnosis": {
+          "category": "LOOP",
+          "rootCauseCode": "LOOP_DETECTED",
+          "evidence": {
+            "fingerprint": "7c826719c86652ebcd5179a6b67c50fd",
+            "tool": "query_order",
+            "noProgressCount": 2,
+            "progressMarker": null,
+            "progressMarkerAvailable": false
+          },
+          "retryable": false,
+          "sideEffectRisk": "UNKNOWN",
+          "confidence": "EXACT",
+          "recommendedAction": "TERMINATE"
+        },
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 2,
+        "diagnosisCount": 1,
+        "validationFailures": 1,
+        "harnessEvents": 11,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.879545+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.879545+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.879545+00:00"
+          },
+          {
+            "state": "DIAGNOSING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          },
+          {
+            "state": "TERMINATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "harness terminated before action: LOOP_DETECTED"
+          }
+        ],
+        "finalResult": {
+          "orderId": "ORD-1001",
+          "status": "PAID"
+        }
+      },
+      "category": "fault"
+    },
+    {
+      "case": {
+        "id": "result_incomplete",
+        "name": "结果不完整",
+        "category": "fault",
+        "fault": "final_result_missing_field",
+        "tool": {
+          "name": "query_order",
+          "protocol": "internal",
+          "sideEffectRisk": "READ_ONLY",
+          "inputSchema": {
+            "type": "object",
+            "required": [
+              "orderId"
+            ],
+            "properties": {
+              "orderId": {
+                "type": "string"
+              }
+            }
+          },
+          "outputSchema": null
+        },
+        "actions": [
+          {
+            "tool": "query_order",
+            "arguments": {
+              "orderId": "ORD-1001"
+            }
+          }
+        ],
+        "resultSchema": {
+          "type": "object",
+          "required": [
+            "answer",
+            "orderId"
+          ],
+          "properties": {
+            "answer": {
+              "type": "string"
+            },
+            "orderId": {
+              "type": "string"
+            }
+          }
+        },
+        "expected": "一次重规划，仍失败则终止"
+      },
+      "off": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": false,
+        "recovered": false,
+        "escaped": true,
+        "harnessOutcome": null,
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          }
+        ],
+        "finalResult": "{\"answer\": \"订单已查询\"}"
+      },
+      "auto": {
+        "businessSuccess": true,
+        "terminated": false,
+        "detected": true,
+        "recovered": true,
+        "escaped": false,
+        "harnessOutcome": "COMPLETED",
+        "terminationReason": null,
+        "diagnosis": null,
+        "recoveryActions": [
+          "REPLAN"
+        ],
+        "toolCalls": 0,
+        "executedActions": 1,
+        "diagnosisCount": 1,
+        "validationFailures": 1,
+        "harnessEvents": 7,
+        "stateTimeline": [
+          {
+            "state": "CREATED",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          },
+          {
+            "state": "EXECUTING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          },
+          {
+            "state": "TOOL_GUARD",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          },
+          {
+            "state": "DIAGNOSING",
+            "elapsedMs": 0,
+            "timestamp": "2026-09-19T18:14:02.880079+00:00"
+          }
+        ],
+        "elapsedMs": 0,
+        "events": [
+          {
+            "elapsedMs": 0,
+            "message": "tool call query_order completed",
+            "resultKind": "dict"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "harness issued one bounded replan"
+          },
+          {
+            "elapsedMs": 0,
+            "message": "replan produced a complete result"
+          }
+        ],
+        "finalResult": "{\"answer\": \"订单已查询\", \"orderId\": \"ORD-1001\"}",
+        "finalValidation": {
+          "validator": "ResultValidator.v1",
+          "status": "FAIL",
+          "code": "RESULT_INCOMPLETE",
+          "message": "final result does not satisfy resultSchema: $.orderId:REQUIRED_MISSING",
+          "fieldPaths": [
+            "$.orderId"
+          ],
+          "evidence": {
+            "violations": [
+              {
+                "fieldPath": "$.orderId",
+                "code": "REQUIRED_MISSING"
+              }
+            ]
+          }
+        }
+      },
+      "category": "fault"
+    }
+  ]
+}

@@ -120,6 +120,12 @@ type Agent struct {
 
 	Protocol string `json:"protocol"`
 
+	// P37 OpenJiuwen adapter: concrete execution framework. "native" (or
+	// empty) keeps the existing executors; "openjiuwen" routes internal-
+	// protocol agents to the OpenJiuwen executor. Independent from
+	// `provider` (model vendor).
+	ExecutorType string `json:"executorType,omitempty"`
+
 	Capabilities []string `json:"capabilities"`
 
 	Provider string `json:"provider"`
@@ -171,6 +177,25 @@ type Tool struct {
 	RequiresConfirmation bool `json:"requiresConfirmation"`
 
 	Enabled bool `json:"enabled"`
+
+	// -----------------------------------------------------
+	// P37 Agent Harness tool contract extensions.
+	//
+	// outputSchema enables strict output validation; the side-effect
+	// classification decides whether an automatic retry is ever allowed.
+	// Legacy tools default to UNKNOWN risk, which never justifies an
+	// automatic write retry.
+	// -----------------------------------------------------
+
+	OutputSchema map[string]any `json:"outputSchema,omitempty"`
+
+	SideEffectRisk string `json:"sideEffectRisk,omitempty"`
+
+	SupportsIdempotencyKey bool `json:"supportsIdempotencyKey,omitempty"`
+
+	FallbackToolID string `json:"fallbackToolId,omitempty"`
+
+	ArgumentAliases map[string]string `json:"argumentAliases,omitempty"`
 
 	CreatedAt time.Time `json:"createdAt"`
 
@@ -389,6 +414,10 @@ type Task struct {
 	SynthesisMode string `json:"synthesisMode"`
 
 	ModelSelection ModelSelection `json:"modelSelection"`
+
+	// P37 Agent Harness configuration snapshot. Frozen at task creation;
+	// resume/replay must reuse this value. nil reads as OFF (legacy tasks).
+	HarnessConfig *HarnessConfig `json:"harnessConfig,omitempty"`
 
 	// direct keeps the historical synchronous request path. durable is P8's
 	// queued/leased worker path and is persisted with the task.

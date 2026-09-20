@@ -3935,3 +3935,14 @@ button.project-resource-card:hover {
 .approval-actions {
   justify-content: space-between;
 }
+
+/* =========================================================
+   P37 Harness run settings
+   ========================================================= */
+
+.harness-mode-hint {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.6;
+}

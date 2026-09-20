@@ -1156,6 +1156,9 @@ export type RunTaskRequest = {
 
   modelSelection?: import("./types").ModelSelection;
 
+  // P37 Agent Harness. Omitted (or mode "OFF") keeps the legacy behaviour.
+  harnessConfig?: import("./types").HarnessConfig;
+
   maxLatencyMs: number;
 
   maxCost: number;
@@ -1166,6 +1169,26 @@ export type RunTaskRequest = {
 
   attachmentIds?: number[];
 };
+
+function buildRunTaskBody(input: RunTaskRequest) {
+  return JSON.stringify({
+    conversationId: input.conversationId,
+    task: input.task,
+    scheduler: input.scheduler,
+    planner: input.planner,
+    executionMode: input.executionMode,
+    synthesisMode: input.synthesisMode,
+    modelSelection: input.modelSelection ?? { mode: "auto" },
+    harnessConfig: input.harnessConfig,
+    attachmentIds: input.attachmentIds ?? [],
+    constraints: {
+      maxLatencyMs: input.maxLatencyMs,
+      maxCost: input.maxCost,
+      minQuality: input.minQuality,
+      retryOnWorkerLoss: input.retryOnWorkerLoss ?? false,
+    },
+  });
+}
 
 export type RunTaskStreamCallbacks = {
   onDelta?: (delta: string) => void;
@@ -1193,22 +1216,7 @@ export async function runTaskStream(
     method: "POST",
     credentials: "include",
     headers,
-    body: JSON.stringify({
-      conversationId: input.conversationId,
-      task: input.task,
-      scheduler: input.scheduler,
-      planner: input.planner,
-      executionMode: input.executionMode,
-      synthesisMode: input.synthesisMode,
-      modelSelection: input.modelSelection ?? { mode: "auto" },
-      attachmentIds: input.attachmentIds ?? [],
-      constraints: {
-        maxLatencyMs: input.maxLatencyMs,
-        maxCost: input.maxCost,
-        minQuality: input.minQuality,
-        retryOnWorkerLoss: input.retryOnWorkerLoss ?? false,
-      },
-    }),
+    body: buildRunTaskBody(input),
   });
 
   if (response.status === 401 && retry && (await refreshAccess())) {
@@ -1281,44 +1289,7 @@ export const runTask = (
     {
       method: "POST",
 
-      body: JSON.stringify({
-        conversationId:
-          input.conversationId,
-
-        task: input.task,
-
-        scheduler:
-          input.scheduler,
-
-        planner:
-          input.planner,
-
-        executionMode:
-          input.executionMode,
-
-        synthesisMode:
-          input.synthesisMode,
-
-        modelSelection:
-          input.modelSelection ?? { mode: "auto" },
-
-        attachmentIds:
-          input.attachmentIds ?? [],
-
-        constraints: {
-          maxLatencyMs:
-            input.maxLatencyMs,
-
-          maxCost:
-            input.maxCost,
-
-          minQuality:
-            input.minQuality,
-
-          retryOnWorkerLoss:
-            input.retryOnWorkerLoss ?? false,
-        },
-      }),
+      body: buildRunTaskBody(input),
     },
   );
 

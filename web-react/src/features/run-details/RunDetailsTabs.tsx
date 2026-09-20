@@ -11,6 +11,7 @@ export type RunDetailTab =
   | "tool-mcp"
   | "desktop"
   | "eval"
+  | "harness"
   | "routing"
   | "reliability"
   | "trace"
@@ -161,6 +162,16 @@ export function RunDetailsTabs({
       label: "质量评估",
       count: result.scorecard ? 1 : 0,
     },
+    // P37: 旧任务没有 Harness 数据时整个页签不出现，不伪造空报告。
+    ...(result.harnessSummary || result.harnessReport
+      ? [
+          {
+            id: "harness" as RunDetailTab,
+            label: "Harness",
+            count: result.harnessReport?.events?.length ?? 0,
+          },
+        ]
+      : []),
     {
       id: "routing",
       label: "路由决策",

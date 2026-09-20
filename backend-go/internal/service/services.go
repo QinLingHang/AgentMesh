@@ -655,6 +655,16 @@ func normalizeAgent(
 		agent.Protocol = "http"
 	}
 
+	// P37 OpenJiuwen adapter: executorType defaults to "native" so existing
+	// agents keep their exact behaviour.
+	agent.ExecutorType = strings.ToLower(
+		strings.TrimSpace(agent.ExecutorType),
+	)
+
+	if agent.ExecutorType == "" {
+		agent.ExecutorType = "native"
+	}
+
 	if agent.Provider == "" {
 		agent.Provider = "internal"
 	}
@@ -709,6 +719,13 @@ func (s *AgentService) Create(
 		len(
 			agent.Capabilities,
 		) == 0 {
+		return nil, ErrInvalidInput
+	}
+
+	// P37: executorType=openjiuwen is only meaningful on the internal
+	// calling boundary; anything else is a configuration error.
+	if agent.ExecutorType == "openjiuwen" &&
+		agent.Protocol != "internal" {
 		return nil, ErrInvalidInput
 	}
 
@@ -966,6 +983,29 @@ func normalizeTool(
 		tool.InputSchema = map[string]any{
 			"type": "object",
 		}
+	}
+
+	// P37 harness contract: side-effect risk decides whether an automatic
+	// retry is ever allowed. Legacy registrations default to UNKNOWN, which
+	// never justifies an automatic write retry.
+	tool.SideEffectRisk = strings.ToUpper(
+		strings.TrimSpace(tool.SideEffectRisk),
+	)
+
+	switch tool.SideEffectRisk {
+	case "":
+		tool.SideEffectRisk = model.HarnessSideEffectUnknown
+	case
+		model.HarnessSideEffectReadOnly,
+		model.HarnessSideEffectIdempotentWrite,
+		model.HarnessSideEffectNonIdempotentWrite,
+		model.HarnessSideEffectUnknown:
+	default:
+		tool.SideEffectRisk = model.HarnessSideEffectUnknown
+	}
+
+	if tool.ArgumentAliases == nil {
+		tool.ArgumentAliases = map[string]string{}
 	}
 
 	return tool
@@ -1818,6 +1858,9 @@ type RunTaskInput struct {
 
 	ModelSelection model.ModelSelection
 
+	// P37 Agent Harness. nil/nil-mode keeps the legacy OFF behaviour.
+	HarnessConfig *model.HarnessConfig
+
 	AttachmentIDs []int64
 
 	Constraints model.TaskConstraints
@@ -2302,6 +2345,11 @@ type RunTaskResult struct {
 	Observability runtimeclient.ObservabilitySummary `json:"observability"`
 
 	Scorecard *runtimeclient.RunScorecard `json:"scorecard"`
+
+	// P37 Agent Harness outputs. nil for OFF runs and legacy tasks.
+	HarnessSummary *model.HarnessSummary `json:"harnessSummary,omitempty"`
+
+	HarnessReport runtimeclient.HarnessReport `json:"harnessReport,omitempty"`
 }
 
 // =========================================================
@@ -2469,6 +2517,10 @@ func buildRunTaskResult(
 		Observability: response.Observability,
 
 		Scorecard: response.Scorecard,
+
+		HarnessSummary: response.HarnessSummary,
+
+		HarnessReport: response.HarnessReport,
 	}
 }
 
@@ -2682,6 +2734,23 @@ func (s *TaskService) Run(
 	}
 
 	// =====================================================
+	// 3.1 P37 Harness Config Snapshot
+	//
+	// The snapshot is normalized once here and then frozen with the
+	// task; the consumer never recomputes it from current defaults.
+	// =====================================================
+
+	if in.HarnessConfig != nil {
+		if err := in.HarnessConfig.Normalize(); err != nil {
+			return nil, ErrInvalidInput
+		}
+
+		if in.HarnessConfig.IsOff() {
+			in.HarnessConfig = nil
+		}
+	}
+
+	// =====================================================
 	// 4. Constraints
 	// =====================================================
 
@@ -2809,6 +2878,8 @@ func (s *TaskService) Run(
 			SynthesisMode: in.SynthesisMode,
 
 			ModelSelection: in.ModelSelection,
+
+			HarnessConfig: in.HarnessConfig,
 		},
 		in.Constraints,
 	)
@@ -2908,6 +2979,8 @@ func (s *TaskService) Run(
 			ModelPool: modelPool,
 
 			ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+
+			HarnessConfig: in.HarnessConfig,
 
 			Attachments: runtimeAttachments,
 		},
@@ -3051,7 +3124,39 @@ func (s *TaskService) Run(
 	}
 
 	// =====================================================
-	// 11. Unsupported Runtime State
+	// 11. Harness-Terminated Failure (P37)
+	//
+	// The runtime returns status FAILED together with the harness
+	// summary/report when supervision terminated the run. Persist the
+	// task as ERROR but keep the structured harness data available to
+	// the caller and the UI instead of collapsing it into a 500.
+	// =====================================================
+
+	if runtimeStatus == "FAILED" {
+		_ = s.tasks.FailTask(
+			ctx,
+			uid,
+			task.ID,
+			response.Answer,
+			response.ElapsedMS,
+		)
+
+		if refreshed, loadErr := s.tasks.TaskByID(ctx, uid, task.ID); loadErr == nil && refreshed != nil {
+			task = refreshed
+		}
+
+		return buildRunTaskResult(
+			task,
+			response,
+			in.Scheduler,
+			in.Planner,
+			in.ExecutionMode,
+			in.SynthesisMode,
+		), nil
+	}
+
+	// =====================================================
+	// 11.1 Unsupported Runtime State
 	// =====================================================
 
 	if runtimeStatus != "COMPLETED" {
@@ -3078,24 +3183,36 @@ func (s *TaskService) Run(
 
 	var assistantMessage *repository.AssistantMessageWrite
 	if in.ConversationID != nil {
+		metadata := map[string]any{
+			"taskId":         task.ID,
+			"runtimePhase":   "completed",
+			"trace":          response.Trace,
+			"dag":            response.DAG,
+			"selectedAgents": response.SelectedAgents,
+			"taskProfile":    response.TaskProfile,
+			"scheduler":      in.Scheduler,
+			"planner":        in.Planner,
+			"executionMode":  in.ExecutionMode,
+			"synthesisMode":  in.SynthesisMode,
+			"observability":  response.Observability,
+			"scorecard":      response.Scorecard,
+			"agentFeedback":  response.AgentFeedback,
+			"citations":      normalizeRuntimeCitations(response.Citations),
+		}
+
+		// P37: harness summary/report ride the existing metadata JSON; no
+		// harness-specific tables are introduced in P0.
+		if response.HarnessSummary != nil {
+			metadata["harnessSummary"] = response.HarnessSummary
+		}
+
+		if response.HarnessReport != nil {
+			metadata["harnessReport"] = response.HarnessReport
+		}
+
 		assistantMessage = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: requestID,
-			Metadata: map[string]any{
-				"taskId":         task.ID,
-				"runtimePhase":   "completed",
-				"trace":          response.Trace,
-				"dag":            response.DAG,
-				"selectedAgents": response.SelectedAgents,
-				"taskProfile":    response.TaskProfile,
-				"scheduler":      in.Scheduler,
-				"planner":        in.Planner,
-				"executionMode":  in.ExecutionMode,
-				"synthesisMode":  in.SynthesisMode,
-				"observability":  response.Observability,
-				"scorecard":      response.Scorecard,
-				"agentFeedback":  response.AgentFeedback,
-				"citations":      normalizeRuntimeCitations(response.Citations),
-			},
+			Metadata: metadata,
 		}
 	}
 
@@ -3524,6 +3641,10 @@ func (s *TaskService) Resume(
 			ModelPool: modelPool,
 
 			ModelSelection: runtimeclient.ModelSelection{Mode: task.ModelSelection.Mode, ServiceID: task.ModelSelection.ServiceID},
+
+			// P37: resume replays the frozen harness snapshot from the
+			// task row, never the current system defaults.
+			HarnessConfig: task.HarnessConfig,
 		},
 	)
 

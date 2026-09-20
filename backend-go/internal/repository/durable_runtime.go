@@ -76,6 +76,14 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	var harnessConfigJSON any
+	if task.HarnessConfig != nil && !task.HarnessConfig.IsOff() {
+		b, marshalErr := json.Marshal(task.HarnessConfig)
+		if marshalErr != nil {
+			return nil, nil, marshalErr
+		}
+		harnessConfigJSON = string(b)
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -89,11 +97,11 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks(
 			user_id, conversation_id, request_id, task_text, scheduler, planner,
-			execution_mode, synthesis_mode, model_selection_json, delivery_mode, constraints_json, status
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
+			execution_mode, synthesis_mode, model_selection_json, harness_config_json, delivery_mode, constraints_json, status
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
 	`, task.UserID, task.ConversationID, task.RequestID, task.TaskText,
 		task.Scheduler, task.Planner, task.ExecutionMode, task.SynthesisMode,
-		string(modelSelectionJSON), string(constraintsJSON))
+		string(modelSelectionJSON), harnessConfigJSON, string(constraintsJSON))
 	if err != nil {
 		return nil, nil, err
 	}

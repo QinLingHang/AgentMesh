@@ -29,6 +29,7 @@ func Migrate(ctx context.Context, database *sql.DB) error {
 		{name: "v3_distributed_runtime", fn: EnsureV3DistributedRuntimeSchema},
 		{name: "v4_platform_ecosystem", fn: EnsureV4PlatformEcosystemSchema},
 		{name: "p21_event_plane", fn: EnsureEventPlaneSchema},
+		{name: "p37_harness", fn: EnsureHarnessSchema},
 	}
 
 	for _, step := range steps {

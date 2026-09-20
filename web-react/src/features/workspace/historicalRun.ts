@@ -1,6 +1,8 @@
 import type {
   AgentFeedback,
   DynamicDAG,
+  HarnessReport,
+  HarnessSummary,
   Message,
   ObservabilitySummary,
   RunResult,
@@ -724,5 +726,14 @@ export function reconstructHistoricalRun(
       normalizeScorecard(
         metadata.scorecard,
       ),
+    // P37: 旧任务没有 harness 字段时保持 undefined，详情页据此隐藏页签。
+    harnessSummary:
+      asRecord(metadata.harnessSummary) != null
+        ? (asRecord(metadata.harnessSummary) as unknown as HarnessSummary)
+        : undefined,
+    harnessReport:
+      asRecord(metadata.harnessReport) != null
+        ? (asRecord(metadata.harnessReport) as unknown as HarnessReport)
+        : undefined,
   };
 }
