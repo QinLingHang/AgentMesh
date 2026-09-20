@@ -407,9 +407,30 @@ class TaskProfile(
 class Assignment(
     BaseModel
 ):
+    model_config = ConfigDict(
+        populate_by_name=True
+    )
+
     capability: str
     agent_id: int
     agent_name: str
+
+    # Optional semantic-plan metadata. Legacy schedulers can continue creating
+    # Assignment with only capability/agent fields.
+    step_id: str | None = Field(
+        default=None,
+        alias="stepId",
+    )
+
+    objective: str | None = None
+
+    depends_on: list[str] = Field(
+        default_factory=list,
+        alias="dependsOn",
+    )
+
+    optional: bool = False
+    condition: str | None = None
 
 
 class DAGNode(
@@ -442,6 +463,16 @@ class DAGNode(
         default=None,
         alias="agentName",
     )
+
+    # Semantic-plan metadata is additive and optional so existing Go/React
+    # consumers that only know legacy DAG fields remain compatible.
+    step_id: str | None = Field(
+        default=None,
+        alias="stepId",
+    )
+
+    objective: str | None = None
+
     optional: bool = False
     condition: str | None = None
 
@@ -578,6 +609,24 @@ class ObservabilitySummary(
     )
 
     reschedules: int = 0
+
+    semantic_plans: int = Field(
+        default=0,
+        alias="semanticPlans",
+    )
+
+    replans: int = 0
+    repairs: int = 0
+
+    quality_gate_degraded: int = Field(
+        default=0,
+        alias="qualityGateDegraded",
+    )
+
+    quality_gate_rejections: int = Field(
+        default=0,
+        alias="qualityGateRejections",
+    )
 
     dag_completed_nodes: int = Field(
         default=0,

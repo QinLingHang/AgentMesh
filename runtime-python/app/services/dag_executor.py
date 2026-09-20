@@ -42,7 +42,16 @@ DAGConditionEvaluator = Callable[
 class DAGExecutionError(
     RuntimeError
 ):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        node_id: str | None = None,
+        partial_result: "DAGExecutionResult | None" = None,
+    ) -> None:
+        super().__init__(message)
+        self.node_id = node_id
+        self.partial_result = partial_result
 
 
 @dataclass(slots=True)
@@ -72,6 +81,7 @@ class DAGExecutor:
         condition_evaluator: (
             DAGConditionEvaluator | None
         ) = None,
+        initial_outputs: dict[str, Any] | None = None,
     ) -> DAGExecutionResult:
         # =================================================
         # Node index
@@ -136,7 +146,7 @@ class DAGExecutor:
         outputs: dict[
             str,
             Any,
-        ] = {}
+        ] = dict(initial_outputs or {})
 
         completion_order: list[
             str
@@ -169,6 +179,16 @@ class DAGExecutor:
                 "skipped",
             }
         }
+
+        # Replanning may carry forward outputs from already completed semantic
+        # steps. Only outputs whose node still exists are trusted as resolved.
+        for node_id in list(outputs):
+            if node_id not in nodes_by_id:
+                outputs.pop(node_id, None)
+                continue
+            if nodes_by_id[node_id].kind == "agent":
+                nodes_by_id[node_id].status = "completed"
+                resolved.add(node_id)
 
         pending: set[str] = {
             node.id
@@ -441,6 +461,7 @@ class DAGExecutor:
             first_error: (
                 BaseException | None
             ) = None
+            first_error_node_id: str | None = None
 
             # =================================================
             # Process Batch Results
@@ -541,6 +562,7 @@ class DAGExecutor:
                         first_error = (
                             result
                         )
+                        first_error_node_id = node_id
 
                     continue
 
@@ -575,8 +597,15 @@ class DAGExecutor:
             # =================================================
 
             if first_error is not None:
+                partial = DAGExecutionResult(
+                    outputs=dict(outputs),
+                    completion_order=list(completion_order),
+                    skipped_nodes=list(skipped_nodes),
+                )
                 raise DAGExecutionError(
-                    "DAG node execution failed"
+                    "DAG node execution failed",
+                    node_id=first_error_node_id,
+                    partial_result=partial,
                 ) from first_error
 
         # =====================================================

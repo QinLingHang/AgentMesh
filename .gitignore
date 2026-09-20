@@ -138,5 +138,11 @@ infra/gateway/tls/*.crt
 CODEX_V4_1_*ACCEPTANCE.md
 CODEX_V4_1_*DIAGNOSTIC.md
 desktop-bridge/data/*.jsonl
-codex-generate
-AGENTS.md
+
+# ============================================================
+# Local QA / development artifacts
+# ============================================================
+
+.tmp-*/
+runtime-python/data/
+*_FIX*_FILES.txt

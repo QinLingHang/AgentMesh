@@ -80,6 +80,31 @@ class Settings(
     max_reschedule_attempts: int = 2
 
     # =====================================================
+    # Adaptive Workflow Orchestration
+    # =====================================================
+
+    # Medium/high-complexity requests can be decomposed into a bounded semantic
+    # ExecutionPlan. Invalid/unavailable model output fails safely to the
+    # existing deterministic profiler/scheduler path.
+    semantic_planner_enabled: bool = True
+    semantic_planner_timeout_seconds: float = 12.0
+    semantic_planner_max_steps: int = 8
+    max_replan_attempts: int = 1
+
+    # Runtime quality gate. Heuristic evaluation is deliberately calibrated
+    # independently from scheduler min_quality because the two scores have
+    # different semantics. Repair/replan stays bounded and side-effect-safe.
+    quality_gate_enabled: bool = True
+    quality_gate_pass_threshold: float = 0.58
+    quality_gate_hard_fail_threshold: float = 0.20
+    max_quality_repair_attempts: int = 1
+
+    # LangGraph workflow-local answer repair. Tool routes are evaluated but are
+    # never replayed solely for quality because tool execution may have effects.
+    langgraph_quality_threshold: float = 0.58
+    langgraph_max_repairs: int = 1
+
+    # =====================================================
     # Local Desktop Bridge
     # =====================================================
 
