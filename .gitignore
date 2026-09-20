@@ -146,3 +146,6 @@ desktop-bridge/data/*.jsonl
 .tmp-*/
 runtime-python/data/
 *_FIX*_FILES.txt
+
+codex-generate
+AGENTS.md

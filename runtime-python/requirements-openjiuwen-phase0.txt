@@ -1,0 +1,5 @@
+# Phase 0 compatibility spike only.
+# Keep this separate from requirements.txt until the dependency conflicts
+# documented in docs/harness/P37_OPENJIUWEN_PHASE0.md are resolved.
+openjiuwen==0.1.18 \
+    --hash=sha256:b5fdc79cfa121324b473d9002d5c8be7514b3932f8866e22a1723147004d6d8a
