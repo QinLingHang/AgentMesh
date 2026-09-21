@@ -24,7 +24,8 @@ The candidate is pinned to `openjiuwen==0.1.18` in
 From `runtime-python`:
 
 ```text
-python -m pip install -r requirements-openjiuwen-phase0.txt
+python -m pip install -r requirements.txt -r requirements-openjiuwen-deps.txt
+python -m pip install --no-deps -r requirements-openjiuwen-phase0.txt
 python scripts/phase0_openjiuwen_probe.py
 ```
 
@@ -56,22 +57,19 @@ successfully ran it through `Runner`. Treat the pinned probe as the compatibilit
 contract and rerun it on every SDK upgrade; do not infer support from comments
 alone.
 
-## Production dependency gate
+## Production dependency gate (resolved in Phase 1)
 
-Do not add OpenJiuwen to `runtime-python/requirements.txt` yet. The official
-`0.1.18` metadata requires:
+The official `0.1.18` metadata requires:
 
-- `openai>=1.108.0`, while the runtime currently pins `openai==1.99.9`;
-- `pymilvus>=2.6.2,<2.6.10`, while the runtime currently pins
-  `pymilvus==3.0.1`.
+- `openai>=1.108.0` (the pre-Phase-1 runtime pinned `openai==1.99.9`);
+- `pymilvus>=2.6.2,<2.6.10` (the pre-Phase-1 runtime pinned
+  `pymilvus==3.0.1`).
 
-These are incompatible constraints. Phase 1 must choose one of the following
-before enabling the SDK in production:
-
-1. upgrade and regression-test the shared runtime dependency set;
-2. split the OpenJiuwen executor into a separately packaged runtime process;
-3. obtain an upstream SDK build compatible with the existing dependency set.
-
-Until that decision is made, `OPENJIUWEN_EXECUTION_MODE=builtin` remains the
-only production-safe mode and the official SDK probe remains an explicit
-compatibility gate.
+The Phase 1 dependency decision is to upgrade the shared OpenAI client range
+to `openai>=1.108.0,<2` and pin Milvus to `pymilvus==2.6.9`, which is the
+supported 2.6.x line. The exact SDK wheel is pinned in
+`runtime-python/requirements-openjiuwen-sdk.txt`; its compatible direct
+dependencies are in `requirements-openjiuwen-deps.txt`. The complete runtime
+install must use both files alongside `requirements.txt` and still run the
+normal regression suites before deployment; the probe remains the compatibility
+gate for future OpenJiuwen upgrades.

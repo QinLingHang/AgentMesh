@@ -27,9 +27,21 @@ from .openjiuwen import (
     OpenJiuwenAgentRunner,
     OpenJiuwenExecutionError,
     OpenJiuwenModelAdapter,
+    OpenJiuwenSdkRunner,
     OpenJiuwenToolBridge,
     OpenJiuwenUnavailableError,
     SdkOpenJiuwenRunner,
+)
+
+from .openjiuwen_runtime import (
+    OpenJiuwenRuntime,
+    OpenJiuwenRuntimeError,
+    OpenJiuwenRuntimeInfo,
+    OpenJiuwenSdk,
+    get_active_openjiuwen_sdk,
+    load_openjiuwen_sdk,
+    normalize_execution_mode,
+    validate_execution_mode,
 )
 
 from .resolver import (
@@ -45,9 +57,18 @@ __all__ = [
     "OpenJiuwenAgentRunner",
     "OpenJiuwenExecutionError",
     "OpenJiuwenModelAdapter",
+    "OpenJiuwenSdkRunner",
     "OpenJiuwenToolBridge",
     "OpenJiuwenUnavailableError",
     "SdkOpenJiuwenRunner",
+    "OpenJiuwenRuntime",
+    "OpenJiuwenRuntimeError",
+    "OpenJiuwenRuntimeInfo",
+    "OpenJiuwenSdk",
+    "get_active_openjiuwen_sdk",
+    "load_openjiuwen_sdk",
+    "normalize_execution_mode",
+    "validate_execution_mode",
     "A2AAgentExecutor",
     "A2AAgentInterruptedError",
 

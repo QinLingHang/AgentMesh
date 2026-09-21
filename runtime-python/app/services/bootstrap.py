@@ -1,3 +1,5 @@
+import logging
+
 from app.kernel import (
     PluginRegistry,
     RuntimeContext,
@@ -14,6 +16,20 @@ from app.plugins import (
     create_model_plugins,
     A2AAgentPlugin,
 )
+
+
+logger = logging.getLogger(__name__)
+
+
+async def _stop_registry_after_start_failure(registry: PluginRegistry) -> None:
+    """Best-effort cleanup when a plugin fails during registry startup."""
+
+    try:
+        await registry.stop_all()
+    except BaseException:
+        # Preserve the original startup exception. Individual plugin cleanup
+        # errors must still be visible in the runtime log.
+        logger.exception("Failed to clean up plugins after startup failure")
 
 
 async def create_registry() -> PluginRegistry:
@@ -59,9 +75,13 @@ async def create_registry() -> PluginRegistry:
     )
 
     registry.register(
-    A2AAgentPlugin()
+        A2AAgentPlugin()
     )
 
-    await registry.start_all()
+    try:
+        await registry.start_all()
+    except BaseException:
+        await _stop_registry_after_start_failure(registry)
+        raise
 
     return registry

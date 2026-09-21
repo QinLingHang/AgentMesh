@@ -82,7 +82,11 @@ app/harness/
 
 - 独立 `AgentExecutor` 实现：自带的有限步框架循环 + `OpenJiuwenModelAdapter`（模型调用经 AgentMesh 网关，统一模型事件/Token/成本）+ `OpenJiuwenToolBridge`（工具回调全部回到 ToolRegistry，审批抛 `ToolApprovalRequired`）。
 - RAG/Memory：消费 Engine 已生成的上下文（`request.task`），OpenJiuwen 侧不自建检索/记忆，避免知识范围绕过。
-- `OPENJIUWEN_EXECUTION_MODE=builtin`（默认，离线确定性）| `sdk`（锁定 SDK 版本后使用；缺依赖明确失败，绝不静默降级）。
+- `OPENJIUWEN_EXECUTION_MODE=sdk`（生产默认，锁定
+  `requirements-openjiuwen-sdk.txt` 中的 `openjiuwen==0.1.18`，并在
+  FastAPI lifespan 管理全局 Runner；缺依赖/版本/API 不兼容明确失败）；
+  `builtin`（仅开发/测试显式设置 `OPENJIUWEN_ALLOW_BUILTIN=true`，绝不作为
+  SDK 的静默回退）。
 - React：智能体创建页 internal 协议下出现“执行器类型”选择；运行详情 Harness 页签/事件中可见实际执行器。
 
 ## 7. React 展示

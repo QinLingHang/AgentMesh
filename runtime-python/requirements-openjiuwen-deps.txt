@@ -1,0 +1,48 @@
+# Direct runtime dependencies declared by openjiuwen==0.1.18.
+#
+# The shared requirements.txt intentionally owns the overlapping constraints
+# for FastAPI, HTTPX, OpenAI, MCP, Milvus, python-docx, and the other platform
+# dependencies. The entries below are the remaining direct dependencies needed
+# by the official Runner/Agent core path.
+#
+# fastmcp is intentionally omitted. openjiuwen advertises fastmcp>=2.14.2,<3,
+# while fastmcp 2.x requires mcp<2 and this project is committed to mcp 2.x.
+# The validated Runner/ReActAgent path does not import fastmcp. If a future SDK
+# release makes it mandatory, the compatibility gate must be updated instead
+# of silently changing the project's MCP major version.
+
+aiohttp>=3.11.12
+requests>=2.32.3
+python-dateutil>=2.9.0.post0
+filelock>=3.25.0
+portalocker>=3.2.0
+aiofiles>=25.1.0
+sqlalchemy[asyncio]>=2.0.41
+sqlmodel>=0.0.37
+agentdescent==0.4.6
+anthropic>=0.120.2
+transformers>=4.52.4
+tiktoken>=0.12.0
+dashscope>=1.25.6
+beautifulsoup4>=4.12.0
+trafilatura>=1.6.0
+docx2txt>=0.8
+pdfplumber>=0.11.8
+openpyxl>=3.1.0
+numpy!=2.4.0
+cacheout>=0.16.0
+mermaid-py>=0.8,<0.9
+pycryptodome>=3.23.0
+charset-normalizer>=3.4.4
+pysbd>=0.3.4
+oauthlib>=3.3.1
+python-dotenv>=1.2.1
+json-repair>=0.55.0
+PyYAML>=6.0.2
+tenacity>=9.1.2
+alembic>=1.13.1
+anyio>=4.0.0
+loguru>=0.7.3
+gitcode-api>=1.2.20
+pyoxigraph>=0.5.8
+matplotlib>=3.11.1

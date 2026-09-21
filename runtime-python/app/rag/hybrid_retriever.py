@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import time
 from typing import Any
 
@@ -30,6 +31,48 @@ from app.rag.runtime import (
     RetrievalDocument,
     RetrievalHit,
 )
+
+
+def _ann_search_request(
+    *,
+    data: Any,
+    anns_field: str,
+    param: dict[str, Any],
+    limit: int,
+    expression: str | None,
+) -> AnnSearchRequest:
+    """Build a request across the Milvus 2.6 filter/expr API transition."""
+
+    kwargs: dict[str, Any] = {
+        "data": data,
+        "anns_field": anns_field,
+        "param": param,
+        "limit": limit,
+    }
+    try:
+        parameters = inspect.signature(AnnSearchRequest).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    preferred = "filter" if "filter" in parameters else "expr"
+    kwargs[preferred] = expression or None
+    try:
+        request = AnnSearchRequest(**kwargs)
+    except TypeError:
+        # Keep compatibility with extension-backed or transitional clients
+        # whose signature cannot be inspected reliably.
+        alternate = "expr" if preferred == "filter" else "filter"
+        kwargs.pop(preferred, None)
+        kwargs[alternate] = expression or None
+        request = AnnSearchRequest(**kwargs)
+
+    # Keep the old attribute available to local fakes and diagnostics while
+    # the real client consumes ``expr`` on the newer API.
+    if preferred != "filter":
+        try:
+            setattr(request, "filter", expression or None)
+        except Exception:
+            pass
+    return request
 
 
 class HybridMilvusRetriever(
@@ -346,66 +389,30 @@ class HybridMilvusRetriever(
         # 2. Dense Request
         # =================================================
 
-        dense_request = (
-            AnnSearchRequest(
-                data=[
-                    query_vector
-                ],
-
-                anns_field=(
-                    "vector"
-                ),
-
-                param={
-                    "metric_type":
-                        "COSINE",
-
-                    "params":
-                        {},
-                },
-
-                limit=(
-                    candidate_k
-                ),
-
-                filter=(
-                    milvus_filter
-                    or None
-                ),
-            )
+        dense_request = _ann_search_request(
+            data=[query_vector],
+            anns_field="vector",
+            param={
+                "metric_type": "COSINE",
+                "params": {},
+            },
+            limit=candidate_k,
+            expression=milvus_filter,
         )
 
         # =================================================
         # 3. BM25 Request
         # =================================================
 
-        sparse_request = (
-            AnnSearchRequest(
-                data=[
-                    query
-                ],
-
-                anns_field=(
-                    "sparse"
-                ),
-
-                param={
-                    "metric_type":
-                        "BM25",
-
-                    "params":
-                        {},
-                },
-
-                limit=(
-                    candidate_k
-                ),
-
-                filter=(
-                    milvus_filter
-                    or None
-                ),
-            )
+        sparse_request = _ann_search_request(
+            data=[query],
+            anns_field="sparse",
+            param={
+                "metric_type": "BM25",
+                "params": {},
+            },
+            limit=candidate_k,
+            expression=milvus_filter,
         )
 
         client = (

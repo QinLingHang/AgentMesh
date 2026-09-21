@@ -59,3 +59,41 @@ async def test_timeout_is_normalized_and_bounded():
     with pytest.raises(ModelError) as raised:
         await ModelGateway(provider, timeout=0.001, max_retries=0).generate(request())
     assert raised.value.error_type == ModelErrorType.TIMEOUT and provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_preserves_deltas_and_completion_event():
+    class StreamingProvider:
+        name = "streaming"
+
+        async def stream(self, req):
+            yield {"type": "delta", "delta": "a"}
+            yield {"type": "delta", "delta": "b"}
+            yield {"type": "done", "content": "ab", "provider": self.name, "model": req.model}
+
+    events = []
+    items = [
+        item
+        async for item in ModelGateway(
+            StreamingProvider(), timeout=1, max_retries=0
+        ).stream(request(), events.append)
+    ]
+
+    assert [item["type"] for item in items] == ["delta", "delta", "done"]
+    assert [item["delta"] for item in items[:2]] == ["a", "b"]
+    assert events[0]["kind"] == "model_stream_started"
+    assert events[-1]["kind"] == "model_stream_completed"
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_adapts_non_streaming_provider():
+    events = []
+    items = [
+        item
+        async for item in ModelGateway(
+            FakeProvider(), timeout=1, max_retries=0
+        ).stream(request(), events.append)
+    ]
+
+    assert items[0] == {"type": "delta", "delta": "ok"}
+    assert items[-1]["type"] == "done"

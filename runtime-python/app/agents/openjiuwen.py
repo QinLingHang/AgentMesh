@@ -29,7 +29,10 @@ package must be importable; a missing/unusable SDK fails explicitly and
 never silently degrades to another executor.
 """
 
+import asyncio
+
 from time import (
+    monotonic as time_monotonic,
     perf_counter,
 )
 
@@ -43,15 +46,22 @@ from app.agents.contracts import (
     AgentExecutionRequest,
     AgentExecutionResult,
 )
+from app.agents.openjiuwen_runtime import (
+    OpenJiuwenRuntimeError,
+    get_active_openjiuwen_sdk,
+    validate_execution_mode,
+)
+from app.agents.openjiuwen_sdk import (
+    OpenJiuwenModelAdapter,
+    OpenJiuwenSdkAdapterError,
+    OpenJiuwenSdkDeadlineError,
+    OpenJiuwenSdkRunner,
+    _find_agentmesh_approval,
+)
 from app.config import (
     settings,
 )
-from app.models.contracts import (
-    ModelMessage,
-    ModelRequest,
-    ModelResponse,
-    ModelTool,
-)
+from app.models.contracts import ModelMessage, ModelTool
 from app.tools import (
     ToolApprovalRequest,
     ToolApprovalRequired,
@@ -74,56 +84,27 @@ class OpenJiuwenExecutionError(
     """The OpenJiuwen agent execution failed inside the framework loop."""
 
 
-# =========================================================
-# Model adapter
-# =========================================================
+def _find_exception_in_chain(
+    error: BaseException,
+    expected: type[BaseException],
+) -> BaseException | None:
+    """Find a platform control-flow exception hidden by an SDK wrapper."""
 
-
-class OpenJiuwenModelAdapter:
-    """Bridges AgentMesh's ResolvedModelRuntime into the OpenJiuwen model
-    interface. Model calls always pass through the gateway so model events,
-    token usage, cost, timeout and errors stay on the AgentMesh event
-    boundary."""
-
-    def __init__(
-        self,
-        model_runtime: Any,
-    ):
-        self.model_runtime = model_runtime
-
-    @property
-    def model_name(
-        self,
-    ) -> str:
-        return (
-            settings.openjiuwen_model_name
-            or getattr(
-                self.model_runtime,
-                "model",
-                "",
-            )
-            or "default"
-        )
-
-    async def generate(
-        self,
-        messages: list[ModelMessage],
-        tools: list[ModelTool],
-        on_model_event: Any = None,
-    ) -> ModelResponse:
-        gateway = self.model_runtime.gateway
-
-        request = ModelRequest(
-            model=self.model_name,
-            messages=messages,
-            tools=tools or None,
-            temperature=0.2,
-        )
-
-        return await gateway.generate(
-            request,
-            on_model_event,
-        )
+    pending: list[BaseException] = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        marker = id(current)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        if isinstance(current, expected):
+            return current
+        for attribute in ("__cause__", "__context__", "cause"):
+            nested = getattr(current, attribute, None)
+            if isinstance(nested, BaseException):
+                pending.append(nested)
+    return None
 
 
 # =========================================================
@@ -143,13 +124,25 @@ class OpenJiuwenToolBridge:
 
     def __init__(
         self,
-        registry: ToolRegistry,
+        registry: ToolRegistry | None,
         *,
         on_tool_event: Any = None,
     ):
         self._registry = registry
 
         self._on_tool_event = on_tool_event
+        self._session_id = ""
+
+    @property
+    def registry(self) -> ToolRegistry | None:
+        """Expose the request-scoped registry to the SDK projection only."""
+
+        return self._registry
+
+    def set_session_id(self, session_id: str) -> None:
+        """Attach the request-local SDK session to subsequent audit events."""
+
+        self._session_id = str(session_id or "")
 
     @property
     def available(
@@ -215,6 +208,9 @@ class OpenJiuwenToolBridge:
         payload.update(
             detail,
         )
+        payload.setdefault("executorType", "openjiuwen")
+        if self._session_id:
+            payload.setdefault("sessionId", self._session_id)
 
         self._on_tool_event(
             payload,
@@ -228,7 +224,19 @@ class OpenJiuwenToolBridge:
         approved_tools: set[str]
         | frozenset[str]
         | None = None,
+        deadline_at: float | None = None,
+        cancel_event: asyncio.Event | None = None,
     ) -> Any:
+        if self._registry is None:
+            raise ToolError(
+                ToolErrorType.UNAVAILABLE,
+                "OpenJiuwen tool registry is unavailable",
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError
+        if deadline_at is not None and time_monotonic() >= deadline_at:
+            raise TimeoutError("OPENJIUWEN_DEADLINE_EXCEEDED")
+
         tool = self._registry.get(
             name,
         )
@@ -274,11 +282,52 @@ class OpenJiuwenToolBridge:
         started = perf_counter()
 
         try:
-            result = await self._registry.execute(
+            execute = self._registry.execute(
                 name,
                 arguments,
                 approved_tools=approved_tools,
             )
+            remaining = None
+            if deadline_at is not None:
+                remaining = deadline_at - time_monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("OPENJIUWEN_DEADLINE_EXCEEDED")
+            if cancel_event is None and remaining is None:
+                result = await execute
+            else:
+                execute_task = asyncio.create_task(execute)
+                cancel_task = (
+                    asyncio.create_task(cancel_event.wait())
+                    if cancel_event is not None
+                    else None
+                )
+                wait_set = {execute_task}
+                if cancel_task is not None:
+                    wait_set.add(cancel_task)
+                try:
+                    done, _ = await asyncio.wait(wait_set, timeout=remaining)
+                    # A completed tool call is already a committed side
+                    # effect; only interrupt a still-running call so the SDK
+                    # cannot mistake a committed action for a retryable
+                    # timeout/cancellation.
+                    if (
+                        execute_task not in done
+                        and cancel_task is not None
+                        and cancel_task in done
+                        and cancel_event.is_set()
+                    ):
+                        execute_task.cancel()
+                        await asyncio.gather(execute_task, return_exceptions=True)
+                        raise asyncio.CancelledError
+                    if execute_task not in done:
+                        execute_task.cancel()
+                        await asyncio.gather(execute_task, return_exceptions=True)
+                        raise TimeoutError("OPENJIUWEN_DEADLINE_EXCEEDED")
+                    result = await execute_task
+                finally:
+                    if cancel_task is not None and not cancel_task.done():
+                        cancel_task.cancel()
+                        await asyncio.gather(cancel_task, return_exceptions=True)
 
         except ToolError as exc:
             self._emit(
@@ -299,6 +348,27 @@ class OpenJiuwenToolBridge:
             )
 
             raise
+
+        except asyncio.CancelledError:
+            self._emit(
+                "Tool Cancelled",
+                "canceled",
+                tool=tool,
+                latency_ms=int((perf_counter() - started) * 1000),
+            )
+            raise
+
+        except TimeoutError as exc:
+            self._emit(
+                "Tool Failed",
+                "error",
+                tool=tool,
+                latency_ms=int((perf_counter() - started) * 1000),
+                error={"type": ToolErrorType.TIMEOUT.value, "message": str(exc)},
+            )
+            if str(exc) == "OPENJIUWEN_DEADLINE_EXCEEDED":
+                raise OpenJiuwenSdkDeadlineError(str(exc)) from exc
+            raise ToolError(ToolErrorType.TIMEOUT, str(exc)) from exc
 
         self._emit(
             "Tool Completed",
@@ -388,7 +458,6 @@ class BuiltinOpenJiuwenRunner:
             response = await model_adapter.generate(
                 session_messages,
                 tools,
-                request.on_model_event,
             )
 
             if not response.tool_calls:
@@ -413,6 +482,8 @@ class BuiltinOpenJiuwenRunner:
                     call.name,
                     call.arguments,
                     approved_tools=approved_tools,
+                    deadline_at=request.deadline_at,
+                    cancel_event=request.cancel_event,
                 )
 
                 session_messages.append(
@@ -433,81 +504,11 @@ class BuiltinOpenJiuwenRunner:
         )
 
 
-class SdkOpenJiuwenRunner:
-    """OpenJiuwen SDK backed runner (used after the SDK version is locked).
-
-    The SDK must expose a synchronous agent factory. The bridge keeps the
-    tool callback inside AgentMesh; any SDK failure surfaces as
-    OpenJiuwenExecutionError - never as a fallback to another executor.
-    """
-
-    def __init__(
-        self,
-        module: Any,
-        *,
-        max_iterations: int = 8,
-    ):
-        self._module = module
-
-        self.max_iterations = max_iterations
-
-    async def run(
-        self,
-        request: AgentExecutionRequest,
-        *,
-        model_adapter: OpenJiuwenModelAdapter,
-        tool_bridge: OpenJiuwenToolBridge,
-        approved_tools: set[str]
-        | frozenset[str]
-        | None = None,
-    ) -> AgentExecutionResult:
-        try:
-            runner_factory = getattr(
-                self._module,
-                "AgentRunner",
-                None,
-            )
-
-            if runner_factory is None:
-                raise OpenJiuwenUnavailableError(
-                    (
-                        "openjiuwen package does not expose "
-                        "AgentRunner; SDK version not supported"
-                    ),
-                )
-
-            # The SDK integration point. Tool descriptors are projected as
-            # plain dictionaries; execution is delegated back into AgentMesh
-            # through the same bridge used by the builtin runner.
-            session = runner_factory(
-                tools=tool_bridge.descriptors(),
-            )
-
-            result = session.run(
-                request.task,
-            )
-
-        except (
-            OpenJiuwenUnavailableError,
-            OpenJiuwenExecutionError,
-        ):
-            raise
-
-        except Exception as exc:
-            raise OpenJiuwenExecutionError(
-                f"openjiuwen SDK execution failed: {exc}",
-            ) from exc
-
-        return AgentExecutionResult(
-            content=str(
-                result,
-            ),
-            metadata=_runner_metadata(
-                request,
-                iterations=1,
-                sdk=True,
-            ),
-        )
+# Backwards-compatible import name for callers that imported the old class.
+# The implementation is now the official Runner/ReActAgent adapter in the
+# narrow ``openjiuwen_sdk`` module; it no longer probes a fictional
+# ``AgentRunner`` symbol.
+SdkOpenJiuwenRunner = OpenJiuwenSdkRunner
 
 
 def _runner_metadata(
@@ -515,8 +516,9 @@ def _runner_metadata(
     *,
     iterations: int,
     sdk: bool = False,
+    **detail: Any,
 ) -> dict[str, Any]:
-    return {
+    metadata = {
         "protocol": request.agent.protocol,
         "executor": "openjiuwen",
         "executorType": "openjiuwen",
@@ -524,6 +526,8 @@ def _runner_metadata(
         "iterations": iterations,
         "sdk": sdk,
     }
+    metadata.update(detail)
+    return metadata
 
 
 def _stringify_tool_result(
@@ -569,7 +573,8 @@ class OpenJiuwenAgentExecutor:
     ):
         self._execution_mode = (
             execution_mode
-            or settings.openjiuwen_execution_mode
+            if execution_mode is not None
+            else settings.openjiuwen_execution_mode
         )
 
         self._max_iterations = (
@@ -585,26 +590,26 @@ class OpenJiuwenAgentExecutor:
     def resolve_runner(
         self,
     ) -> OpenJiuwenAgentRunner:
-        mode = (
-            self._execution_mode.strip().lower()
-            or "builtin"
-        )
+        try:
+            mode = validate_execution_mode(
+                self._execution_mode,
+                allow_builtin=settings.openjiuwen_allow_builtin,
+            )
+        except OpenJiuwenRuntimeError as exc:
+            raise OpenJiuwenUnavailableError(str(exc)) from exc
 
         if mode == "sdk":
-            try:
-                import openjiuwen  # noqa: F401  (version locked at deploy time)
-            except ImportError as exc:
+            sdk = get_active_openjiuwen_sdk()
+            if sdk is None:
                 raise OpenJiuwenUnavailableError(
-                    (
-                        "OpenJiuwen SDK is not installed; "
-                        "openjiuwen agents fail explicitly and never "
-                        "degrade to other executors. Install the pinned "
-                        "SDK or set OPENJIUWEN_EXECUTION_MODE=builtin."
-                    ),
-                ) from exc
+                    "OpenJiuwen Runner is not initialized; the FastAPI "
+                    "lifespan must start the pinned SDK before requests "
+                    "can execute (openjiuwen=="
+                    f"{settings.openjiuwen_sdk_version})"
+                )
 
-            return SdkOpenJiuwenRunner(
-                openjiuwen,
+            return OpenJiuwenSdkRunner(
+                sdk,
                 max_iterations=self._max_iterations,
             )
 
@@ -659,11 +664,70 @@ class OpenJiuwenAgentExecutor:
                 request,
                 model_adapter=OpenJiuwenModelAdapter(
                     model_runtime,
+                    attachments=request.attachments,
+                    on_model_event=request.on_model_event,
+                    deadline_at=request.deadline_at,
+                    cancel_event=request.cancel_event,
+                    session_id=request.session_id or "",
                 ),
                 tool_bridge=tool_bridge,
+                approved_tools=request.approved_tools,
             )
 
+        except OpenJiuwenSdkDeadlineError as exc:
+            self._emit_runtime(
+                request,
+                "OpenJiuwen Agent Deadline Exceeded",
+                "error",
+                errorType="deadline_exceeded",
+                message=str(exc),
+            )
+            raise OpenJiuwenExecutionError(str(exc)) from exc
+
+        except OpenJiuwenSdkAdapterError as exc:
+            self._emit_runtime(
+                request,
+                "OpenJiuwen SDK Adapter Failed",
+                "error",
+                errorType="sdk_incompatible",
+                message=str(exc)[:300],
+            )
+            raise OpenJiuwenUnavailableError(str(exc)) from exc
+
+        except asyncio.CancelledError:
+            self._emit_runtime(
+                request,
+                "OpenJiuwen Agent Canceled",
+                "canceled",
+            )
+            raise
+
         except Exception as exc:
+            approval = _find_exception_in_chain(exc, ToolApprovalRequired)
+            if approval is None:
+                # Some SDK versions surface the HITL envelope on the
+                # interrupt exception instead of retaining the original
+                # ToolApprovalRequired as its cause.
+                approval = _find_agentmesh_approval(exc)
+            if approval is not None:
+                # The SDK AbilityManager may wrap tool exceptions while
+                # building its ToolMessage. Preserve the platform approval
+                # control-flow signal instead of converting it to a retryable
+                # agent failure.
+                raise approval from exc
+            deadline = _find_exception_in_chain(
+                exc,
+                OpenJiuwenSdkDeadlineError,
+            )
+            if deadline is not None:
+                self._emit_runtime(
+                    request,
+                    "OpenJiuwen Agent Deadline Exceeded",
+                    "error",
+                    errorType="deadline_exceeded",
+                    message=str(deadline),
+                )
+                raise OpenJiuwenExecutionError(str(deadline)) from exc
             self._emit_runtime(
                 request,
                 "OpenJiuwen Agent Failed",
@@ -688,6 +752,7 @@ class OpenJiuwenAgentExecutor:
             iterations=result.metadata.get(
                 "iterations",
             ),
+            metadata=dict(result.metadata),
         )
 
         return result

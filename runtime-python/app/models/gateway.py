@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Callable
+from collections.abc import AsyncIterator
 from typing import Any
 from app.models.contracts import ModelProvider, ModelRequest, ModelResponse
 from app.models.errors import ModelError, ModelErrorType
@@ -37,6 +38,129 @@ class ModelGateway:
             if not will_retry: raise error
             await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
         raise AssertionError("unreachable")
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        on_event: ModelEventHandler | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Stream provider deltas while preserving the Gateway boundary.
+
+        Streaming calls intentionally do not retry after the first frame: a
+        replay would duplicate already-visible output. Providers that do not
+        expose ``stream`` are adapted to one generated response so custom test
+        providers retain the same contract.
+        """
+
+        timeout = request.timeout or self.timeout
+        self._emit(
+            on_event,
+            "model_stream_started",
+            provider=self.provider.name,
+            model=request.model,
+        )
+
+        stream_method = getattr(self.provider, "stream", None)
+        if not callable(stream_method):
+            response = await self.generate(request, on_event)
+            if response.content:
+                delta = {"type": "delta", "delta": response.content}
+                self._emit(on_event, "model_stream_delta", **delta)
+                yield delta
+            done = {
+                "type": "done",
+                "content": response.content,
+                "provider": response.provider,
+                "model": response.model,
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "total_tokens": response.total_tokens,
+                "latency_ms": response.latency_ms,
+                "finish_reason": response.finish_reason,
+                "estimated_cost": response.estimated_cost,
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "name": call.name,
+                        "arguments": dict(call.arguments),
+                    }
+                    for call in response.tool_calls
+                ],
+            }
+            self._emit(on_event, "model_stream_completed", **done)
+            yield done
+            return
+
+        started = asyncio.get_running_loop().time()
+        chunks: list[str] = []
+        completed = False
+        try:
+            async with asyncio.timeout(timeout):
+                async for item in stream_method(request):
+                    if not isinstance(item, dict):
+                        item = {"type": "delta", "delta": str(item)}
+                    else:
+                        item = dict(item)
+                    if item.get("type") == "delta" and item.get("delta"):
+                        chunks.append(str(item["delta"]))
+                    self._emit(on_event, "model_stream_delta", **item)
+                    yield item
+                    if item.get("type") == "done":
+                        completed = True
+                        self._emit(on_event, "model_stream_completed", **item)
+                        return
+        except asyncio.TimeoutError as exc:
+            error = ModelError(
+                ModelErrorType.TIMEOUT,
+                f"model stream timed out after {timeout}s",
+                retryable=False,
+            )
+            self._emit(
+                on_event,
+                "model_stream_failed",
+                provider=self.provider.name,
+                model=request.model,
+                error_type=error.error_type.value,
+            )
+            raise error from exc
+        except asyncio.CancelledError:
+            self._emit(
+                on_event,
+                "model_stream_cancelled",
+                provider=self.provider.name,
+                model=request.model,
+            )
+            raise
+        except ModelError as exc:
+            self._emit(
+                on_event,
+                "model_stream_failed",
+                provider=self.provider.name,
+                model=request.model,
+                error_type=exc.error_type.value,
+            )
+            raise
+        except Exception as exc:
+            error = normalize_provider_error(exc)
+            self._emit(
+                on_event,
+                "model_stream_failed",
+                provider=self.provider.name,
+                model=request.model,
+                error_type=error.error_type.value,
+            )
+            raise error from exc
+
+        if not completed:
+            done = {
+                "type": "done",
+                "content": "".join(chunks),
+                "provider": self.provider.name,
+                "model": request.model,
+                "latency_ms": int((asyncio.get_running_loop().time() - started) * 1000),
+            }
+            self._emit(on_event, "model_stream_completed", **done)
+            yield done
 
     @staticmethod
     def _emit(handler: ModelEventHandler | None, kind: str, **detail: Any) -> None:

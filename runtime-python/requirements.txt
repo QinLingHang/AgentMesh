@@ -3,18 +3,25 @@ uvicorn[standard]>=0.35,<1
 httpx==0.28.1
 pydantic>=2.12,<3
 pydantic-settings==2.10.1
-openai==1.99.9
+# OpenJiuwen 0.1.18 requires the post-1.108 OpenAI client API.
+openai>=1.108.0,<2
 pytest==8.4.1
 pytest-asyncio==1.1.0
 mcp>=2.1,<3
 langgraph>=1.2.11,<2
 redis>=5.2,<7
-pymilvus==3.0.1
+# OpenJiuwen 0.1.18 is compatible with the 2.6.x Milvus client line only.
+pymilvus==2.6.9
 a2a-sdk==1.1.2
 pypdf>=5,<7
-python-docx>=1.1,<2
+python-docx>=1.2,<2
 python-multipart>=0.0.20,<1
 tzdata>=2025.2,<2027
 PyMuPDF>=1.25,<2
 
 aiokafka>=0.14,<0.15
+
+# OpenJiuwen is installed by the dedicated SDK dependency layer. Its upstream
+# fastmcp integration dependency conflicts with this runtime's MCP 2.x contract;
+# the exact pin is openjiuwen==0.1.18 in requirements-openjiuwen-sdk.txt.
+# See requirements-openjiuwen-deps.txt for its compatible direct dependencies.

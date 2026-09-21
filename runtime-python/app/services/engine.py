@@ -2412,6 +2412,22 @@ class RuntimeEngine:
             detail: str = "",
         ) -> None:
 
+            # TraceEvent is a cross-service contract shared with the Go and
+            # React consumers.  Tool/agent callbacks may use the richer
+            # ``canceled`` spelling, so normalize it at the boundary instead
+            # of letting cancellation mask the original execution signal with
+            # a schema-validation error.
+            normalized_status = str(status).strip().lower()
+            if normalized_status in {"canceled", "cancelled"}:
+                normalized_status = "error"
+            if normalized_status not in {
+                "running",
+                "completed",
+                "error",
+                "skipped",
+            }:
+                normalized_status = "error"
+
             trace.append(
                 TraceEvent(
                     kind=(
@@ -2420,9 +2436,7 @@ class RuntimeEngine:
                     title=(
                         title
                     ),
-                    status=(
-                        status
-                    ),
+                    status=normalized_status,
                     detail=(
                         detail
                     ),
@@ -2462,11 +2476,30 @@ class RuntimeEngine:
 
                 "model_call_failed":
                     "Model Call Failed",
+
+                "model_stream_started":
+                    "Model Stream Started",
+
+                "model_stream_delta":
+                    "Model Stream Delta",
+
+                "model_stream_completed":
+                    "Model Stream Completed",
+
+                "model_stream_failed":
+                    "Model Stream Failed",
+
+                "model_stream_cancelled":
+                    "Model Stream Canceled",
             }
 
             if (
                 kind
                 == "model_call_failed"
+                or kind
+                == "model_stream_failed"
+                or kind
+                == "model_stream_cancelled"
             ):
 
                 status = (
@@ -2476,6 +2509,8 @@ class RuntimeEngine:
             elif (
                 kind
                 == "model_call_completed"
+                or kind
+                == "model_stream_completed"
             ):
 
                 status = (
@@ -5393,6 +5428,23 @@ class RuntimeEngine:
 
                         attachments=(
                             model_attachments
+                        ),
+
+                        # OpenJiuwen receives the same request budget and a
+                        # tenant-qualified scope for its temporary Session.
+                        # The durable worker cancels the enclosing asyncio task
+                        # on user cancellation; ``cancel_event`` remains
+                        # available for direct in-process callers.
+                        deadline_at=(
+                            time.monotonic()
+                            + max(
+                                0.05,
+                                float(req.constraints.max_latency_ms) / 1000.0,
+                            )
+                        ),
+                        tenant_scope=(
+                            f"user:{req.user_id}:conversation:"
+                            f"{req.conversation_id or 'none'}"
                         ),
 
                         # P37: AUTO_REPAIR owns tool retries inside the

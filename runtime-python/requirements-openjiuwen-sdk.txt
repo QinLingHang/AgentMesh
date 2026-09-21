@@ -1,0 +1,6 @@
+# The production SDK artifact is intentionally installed with --no-deps.
+# Its compatible direct dependencies are in requirements-openjiuwen-deps.txt;
+# this keeps the project's MCP 2.x constraint separate from OpenJiuwen's
+# incompatible fastmcp integration metadata.
+openjiuwen==0.1.18 \
+    --hash=sha256:b5fdc79cfa121324b473d9002d5c8be7514b3932f8866e22a1723147004d6d8a

@@ -137,11 +137,19 @@ class Settings(
     # routed to OpenJiuwenAgentExecutor. There is no second orchestration
     # service; tools always run through the AgentMesh ToolRegistry.
     #
-    # builtin: deterministic in-process framework loop over the AgentMesh
-    #          model gateway (default; works without the external SDK).
-    # sdk:     uses the pinned `openjiuwen` package; a missing SDK fails
-    #          explicitly and never degrades to another executor.
-    openjiuwen_execution_mode: str = "builtin"
+    # sdk:     production mode; uses the exact pinned `openjiuwen` package
+    #          from requirements-openjiuwen-sdk.txt and its process-wide Runner.
+    # builtin: deterministic in-process framework loop. It is disabled unless
+    #          OPENJIUWEN_ALLOW_BUILTIN=true is explicitly set for local/test
+    #          environments, and it is never an implicit SDK fallback.
+    openjiuwen_execution_mode: str = "sdk"
+
+    # Exact version validated at startup and again when an SDK executor is
+    # resolved. Keep this synchronized with requirements-openjiuwen-sdk.txt.
+    openjiuwen_sdk_version: str = "0.1.18"
+
+    # Safety gate for the development/test-only builtin executor.
+    openjiuwen_allow_builtin: bool = False
 
     openjiuwen_model_name: str = ""
 

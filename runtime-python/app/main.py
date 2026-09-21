@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import logging
 
 from fastapi import (
     FastAPI,
@@ -11,6 +12,10 @@ from fastapi import (
 from pydantic import BaseModel, Field, ValidationError
 from fastapi.responses import StreamingResponse
 
+from app.agents.openjiuwen_runtime import (
+    OpenJiuwenRuntime,
+    OpenJiuwenRuntimeInfo,
+)
 from app.config import settings
 from app.distributed import (
     DurableExecutionEnvelope,
@@ -43,79 +48,131 @@ from app.harness import HarnessTerminatedError
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
 
+
+logger = logging.getLogger(__name__)
+
 registry = None
 engine = None
 knowledge_indexer: KnowledgeIndexer | None = None
 knowledge_scope_client: KnowledgeScopeClient | None = None
 execution_manager: DurableExecutionManager | None = None
+openjiuwen_runtime: OpenJiuwenRuntime | None = None
+openjiuwen_runtime_info: OpenJiuwenRuntimeInfo | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global registry, engine, knowledge_indexer, knowledge_scope_client, execution_manager
+    global registry, engine, knowledge_indexer, knowledge_scope_client
+    global execution_manager, openjiuwen_runtime, openjiuwen_runtime_info
 
-    registry = await create_registry()
-    engine = RuntimeEngine(registry)
+    openjiuwen_runtime = OpenJiuwenRuntime()
+    openjiuwen_runtime_info = None
 
-    # Keep the concrete Milvus/Hybrid retriever for ingestion.
-    # Runtime retrieval is wrapped with request-local KnowledgeBase scope.
-    base_retriever, _ = install_scoped_retriever(engine)
-    default_model_runtime = registry.context.get("model.runtime.default")
-    default_provider = str(getattr(default_model_runtime, "provider", "")).strip().lower()
-    configured_vision_model = str(getattr(default_model_runtime, "vision_model", "") or "").strip()
-    if default_provider == "mock":
-        vision_analyzer = DeterministicVisionAnalyzer()
-    elif default_model_runtime is not None and configured_vision_model:
-        vision_analyzer = ModelVisionAnalyzer(default_model_runtime)
-    else:
-        # Text knowledge remains fully available when the deployment has no
-        # vision-capable model configured. Image-only knowledge will fail with
-        # an explicit ingestion error instead of being sent to a text-only model.
-        vision_analyzer = None
-    knowledge_indexer = KnowledgeIndexer(base_retriever, vision_analyzer=vision_analyzer)
-    knowledge_scope_client = KnowledgeScopeClient(
-        internal_token=settings.internal_token,
-    )
-
-    if settings.runtime_worker_enabled:
-        result_transport = build_result_transport(
-            mode=settings.runtime_result_transport,
-            internal_token=settings.internal_token,
-            callback_timeout_seconds=settings.runtime_worker_callback_timeout_seconds,
-            callback_max_retries=settings.runtime_worker_callback_max_retries,
-            kafka_brokers=settings.kafka_brokers,
-            kafka_topic=settings.kafka_runtime_result_topic,
-            kafka_client_id=settings.kafka_client_id,
-            kafka_outbox_path=settings.kafka_outbox_path,
-            kafka_publish_timeout_seconds=settings.kafka_publish_timeout_seconds,
+    try:
+        logger.info(
+            "Starting OpenJiuwen runtime: mode=%s expected_version=%s",
+            str(settings.openjiuwen_execution_mode).strip().lower(),
+            settings.openjiuwen_sdk_version,
         )
-        execution_manager = DurableExecutionManager(
-            worker_id=settings.runtime_worker_id,
-            worker_endpoint=settings.runtime_worker_endpoint,
-            capacity=settings.runtime_worker_capacity,
-            internal_token=settings.internal_token,
-            control_plane_base_url=settings.control_plane_internal_base_url,
-            heartbeat_interval_seconds=settings.runtime_worker_heartbeat_seconds,
-            callback_timeout_seconds=settings.runtime_worker_callback_timeout_seconds,
-            callback_max_retries=settings.runtime_worker_callback_max_retries,
-            shutdown_grace_seconds=settings.runtime_worker_shutdown_grace_seconds,
-            dedupe_retention_seconds=settings.runtime_worker_dedupe_retention_seconds,
-            runner=run_scoped_runtime,
-            node_id=settings.runtime_node_id or settings.runtime_worker_id,
-            node_zone=settings.runtime_node_zone,
-            node_version=settings.runtime_node_version,
-            node_capacity=settings.runtime_node_capacity or settings.runtime_worker_capacity,
-            result_transport=result_transport,
+        openjiuwen_runtime_info = await openjiuwen_runtime.start()
+        logger.info(
+            "OpenJiuwen runtime initialized: mode=%s sdk_version=%s "
+            "expected_version=%s runner_started=%s",
+            openjiuwen_runtime_info.mode,
+            openjiuwen_runtime_info.sdk_version or "none",
+            openjiuwen_runtime_info.expected_version,
+            openjiuwen_runtime_info.runner_started,
         )
-        await execution_manager.start()
 
-    yield
+        registry = await create_registry()
+        engine = RuntimeEngine(registry)
 
-    if execution_manager is not None:
-        await execution_manager.stop()
-        execution_manager = None
+        # Keep the concrete Milvus/Hybrid retriever for ingestion.
+        # Runtime retrieval is wrapped with request-local KnowledgeBase scope.
+        base_retriever, _ = install_scoped_retriever(engine)
+        default_model_runtime = registry.context.get("model.runtime.default")
+        default_provider = str(getattr(default_model_runtime, "provider", "")).strip().lower()
+        configured_vision_model = str(getattr(default_model_runtime, "vision_model", "") or "").strip()
+        if default_provider == "mock":
+            vision_analyzer = DeterministicVisionAnalyzer()
+        elif default_model_runtime is not None and configured_vision_model:
+            vision_analyzer = ModelVisionAnalyzer(default_model_runtime)
+        else:
+            # Text knowledge remains fully available when the deployment has no
+            # vision-capable model configured. Image-only knowledge will fail with
+            # an explicit ingestion error instead of being sent to a text-only model.
+            vision_analyzer = None
+        knowledge_indexer = KnowledgeIndexer(base_retriever, vision_analyzer=vision_analyzer)
+        knowledge_scope_client = KnowledgeScopeClient(
+            internal_token=settings.internal_token,
+        )
 
-    await registry.stop_all()
+        if settings.runtime_worker_enabled:
+            result_transport = build_result_transport(
+                mode=settings.runtime_result_transport,
+                internal_token=settings.internal_token,
+                callback_timeout_seconds=settings.runtime_worker_callback_timeout_seconds,
+                callback_max_retries=settings.runtime_worker_callback_max_retries,
+                kafka_brokers=settings.kafka_brokers,
+                kafka_topic=settings.kafka_runtime_result_topic,
+                kafka_client_id=settings.kafka_client_id,
+                kafka_outbox_path=settings.kafka_outbox_path,
+                kafka_publish_timeout_seconds=settings.kafka_publish_timeout_seconds,
+            )
+            execution_manager = DurableExecutionManager(
+                worker_id=settings.runtime_worker_id,
+                worker_endpoint=settings.runtime_worker_endpoint,
+                capacity=settings.runtime_worker_capacity,
+                internal_token=settings.internal_token,
+                control_plane_base_url=settings.control_plane_internal_base_url,
+                heartbeat_interval_seconds=settings.runtime_worker_heartbeat_seconds,
+                callback_timeout_seconds=settings.runtime_worker_callback_timeout_seconds,
+                callback_max_retries=settings.runtime_worker_callback_max_retries,
+                shutdown_grace_seconds=settings.runtime_worker_shutdown_grace_seconds,
+                dedupe_retention_seconds=settings.runtime_worker_dedupe_retention_seconds,
+                runner=run_scoped_runtime,
+                node_id=settings.runtime_node_id or settings.runtime_worker_id,
+                node_zone=settings.runtime_node_zone,
+                node_version=settings.runtime_node_version,
+                node_capacity=settings.runtime_node_capacity or settings.runtime_worker_capacity,
+                result_transport=result_transport,
+            )
+            await execution_manager.start()
+
+        yield
+    finally:
+        if execution_manager is not None:
+            try:
+                await execution_manager.stop()
+            except Exception:
+                logger.exception("Failed to stop the runtime worker")
+            finally:
+                execution_manager = None
+
+        if registry is not None:
+            try:
+                await registry.stop_all()
+            except Exception:
+                logger.exception("Failed to stop the runtime plugin registry")
+            finally:
+                registry = None
+
+        if openjiuwen_runtime is not None:
+            try:
+                await openjiuwen_runtime.stop()
+            except Exception:
+                logger.exception("Failed to stop the OpenJiuwen Runner")
+            finally:
+                openjiuwen_runtime_info = getattr(
+                    openjiuwen_runtime,
+                    "info",
+                    None,
+                )
+                openjiuwen_runtime = None
+
+        engine = None
+        knowledge_indexer = None
+        knowledge_scope_client = None
 
 
 app = FastAPI(
@@ -135,11 +192,18 @@ def verify_internal(x_internal_token: str) -> None:
 
 @app.get("/health")
 async def health():
+    runtime_info = openjiuwen_runtime_info
     return {
         "status": "ok",
         "service": "agentmesh-runtime",
         "provider": settings.model_provider,
         "model": settings.model_name,
+        "openjiuwen": {
+            "mode": str(settings.openjiuwen_execution_mode).strip().lower(),
+            "expectedVersion": settings.openjiuwen_sdk_version,
+            "sdkVersion": runtime_info.sdk_version if runtime_info else None,
+            "runnerStarted": runtime_info.runner_started if runtime_info else False,
+        },
         "workerEnabled": settings.runtime_worker_enabled,
         "workerId": settings.runtime_worker_id if settings.runtime_worker_enabled else None,
         "nodeId": execution_manager.node_id if execution_manager is not None else None,
@@ -171,6 +235,14 @@ async def readyz():
         "engine": engine is not None,
         "knowledgeScope": knowledge_scope_client is not None,
     }
+
+    # Builtin test/dev mode has no SDK Runner. Production sdk mode is admitted
+    # only after the lifespan has started the process-wide Runner.
+    if str(settings.openjiuwen_execution_mode).strip().lower() == "sdk":
+        checks["openjiuwenRunner"] = (
+            openjiuwen_runtime_info is not None
+            and openjiuwen_runtime_info.runner_started
+        )
 
     if settings.runtime_worker_enabled:
         checks["worker"] = execution_manager is not None

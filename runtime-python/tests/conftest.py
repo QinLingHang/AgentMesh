@@ -27,6 +27,11 @@ os.environ["RERANKER_BACKEND"] = "heuristic"
 # The ordinary full suite must never depend on a live Go/MySQL memory service.
 os.environ["MEMORY_RETRIEVAL_ENABLED"] = "false"
 
+# The production default is the pinned SDK. Tests opt into the deterministic
+# builtin executor explicitly so the offline suite remains SDK-independent.
+os.environ["OPENJIUWEN_EXECUTION_MODE"] = "builtin"
+os.environ["OPENJIUWEN_ALLOW_BUILTIN"] = "true"
+
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "asyncio: run an async test")
