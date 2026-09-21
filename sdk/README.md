@@ -4,6 +4,6 @@ V4 提供 Python 与 TypeScript 官方 SDK，统一使用项目级 Service Accou
 
 - Python：`sdk/python`
 - TypeScript：`sdk/typescript`
-- OpenAPI：`docs/v4/openapi.yaml`
+- OpenAPI：`docs/platform/openapi.yaml`
 
-完整说明见 `docs/v4/SDK.md` 与 `docs/v4/PUBLIC_API.md`。
+完整说明见 `docs/platform/SDK.md` 与 `docs/platform/PUBLIC_API.md`。

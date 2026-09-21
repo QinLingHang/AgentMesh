@@ -25,7 +25,7 @@ cd backend-go
 go test ./... -count=1 -v
 ```
 
-If the DSN variables are omitted, MySQL integration acceptance tests are
+If the DSN variables are omitted, MySQL integration tests are
 explicitly skipped instead of touching a developer database.
 
 ## 2. Python runtime
@@ -64,24 +64,24 @@ truth for TypeScript/Vite compilation.
 The current Vite bundle can emit a >500 kB chunk warning. That is a performance
 backlog item, not a failed build when npm exits with code 0.
 
-## 4. Full P3 automated acceptance
+## 4. Full automated regression
 
-Run the three codebase-native suites above. For a full acceptance run, set the
+Run the three codebase-native suites above. For a full database-backed run, set the
 MySQL DSNs before `go test` so the ownership, Project Runtime, Knowledge, and
 Memory integration tests execute rather than skip.
 
-No P2/P3 wrapper calls another P-stage wrapper. Historical phase runners were
-removed after P3 closure; capability tests remain in the Go, Python, and React
+Legacy wrapper scripts are not chained together. Historical phase runners were
+removed after their capabilities were moved into the Go, Python, and React
 codebases.
 
-## 5. V2 Intelligence sprint
+## 5. Intelligence and multimodal testing
 
-V2 multimodal RAG, advanced evaluation, cost accounting, and observability
-acceptance is documented in `docs/v2/ACCEPTANCE.md`. The normal codebase-native
-Python, Go, and React suites remain authoritative; V2 adds targeted coverage rather
+Multimodal RAG, advanced evaluation, cost accounting, and observability
+capabilities are covered by the normal codebase-native
+Python, Go, and React suites remain authoritative; Targeted tests add focused coverage rather
 than replacing earlier regressions.
 
-Deterministic V2-specific entry points:
+Targeted entry points:
 
 ```powershell
 cd runtime-python
@@ -93,12 +93,12 @@ npm run test:e2e:v2
 ```
 
 For full database-backed acceptance, both `P2_TEST_MYSQL_DSN` and
-`P3_TEST_MYSQL_DSN` must be configured before Go/P12 execution. A missing DSN is
+`P3_TEST_MYSQL_DSN` must be configured before database-backed Go integration testing. A missing DSN is
 an environment blocker and must not be converted into a false PASS.
 
-## 6. V3 Distributed Runtime sprint
+## 6. Distributed Runtime
 
-V3 targeted acceptance is documented in `docs/v3/ACCEPTANCE.md`.
+Targeted distributed-runtime validation:
 
 Convenience runner:
 
@@ -127,15 +127,15 @@ npm run build
 npm run test:e2e:v3
 ```
 
-The V3 Go tests require an isolated MySQL DSN and must not be accepted as PASS
+The distributed-runtime Go tests require an isolated MySQL DSN and must not be accepted as PASS
 when skipped. The browser runner validates the sanitized multi-node topology and
 a deterministic dispatcher/node failover transition; database integration tests
 remain authoritative for lease, fencing, capacity and reassignment semantics.
 
 
-## 7. V4 Platform Ecosystem sprint
+## 7. Platform Ecosystem
 
-V4 targeted acceptance is documented in `docs/v4/ACCEPTANCE.md`.
+Platform ecosystem validation uses the native commands below.
 
 Native commands:
 
@@ -157,4 +157,4 @@ npm run build
 npm run test:e2e:v4
 ```
 
-The Go V4 integration suite requires a working MySQL DSN and must not be accepted when skipped. The SDK tests use local deterministic HTTP fixtures and do not require a model provider. Public API acceptance must preserve project binding, scope enforcement, idempotency, raw-key privacy and Marketplace permission boundaries.
+The platform integration suite requires a working MySQL DSN and must not be accepted when skipped. The SDK tests use local deterministic HTTP fixtures and do not require a model provider. Public API acceptance must preserve project binding, scope enforcement, idempotency, raw-key privacy and Marketplace permission boundaries.
