@@ -1,7 +1,10 @@
 import type {
   DeliveryMode,
   ExecutionMode,
+  KnowledgeBase,
   Planner,
+  RagMode,
+  RagScope,
   Scheduler,
   SynthesisMode,
 } from "../../types";
@@ -21,6 +24,14 @@ export function RunSettingsDrawer({
   setSynthesisMode,
   deliveryMode,
   setDeliveryMode,
+  ragMode,
+  setRagMode,
+  ragScopes,
+  setRagScopes,
+  knowledgeBases,
+  selectedKnowledgeBaseIds,
+  setSelectedKnowledgeBaseIds,
+  knowledgeCatalogError,
   latency,
   setLatency,
   cost,
@@ -42,6 +53,14 @@ export function RunSettingsDrawer({
   setSynthesisMode: (value: SynthesisMode) => void;
   deliveryMode: DeliveryMode;
   setDeliveryMode: (value: DeliveryMode) => void;
+  ragMode: RagMode;
+  setRagMode: (value: RagMode) => void;
+  ragScopes: RagScope[];
+  setRagScopes: (value: RagScope[]) => void;
+  knowledgeBases: KnowledgeBase[];
+  selectedKnowledgeBaseIds: number[];
+  setSelectedKnowledgeBaseIds: (value: number[]) => void;
+  knowledgeCatalogError: string;
   latency: number;
   setLatency: (value: number) => void;
   cost: number;
@@ -121,6 +140,14 @@ export function RunSettingsDrawer({
           setSynthesisMode={setSynthesisMode}
           deliveryMode={deliveryMode}
           setDeliveryMode={setDeliveryMode}
+          ragMode={ragMode}
+          setRagMode={setRagMode}
+          ragScopes={ragScopes}
+          setRagScopes={setRagScopes}
+          knowledgeBases={knowledgeBases}
+          selectedKnowledgeBaseIds={selectedKnowledgeBaseIds}
+          setSelectedKnowledgeBaseIds={setSelectedKnowledgeBaseIds}
+          knowledgeCatalogError={knowledgeCatalogError}
           latency={latency}
           setLatency={setLatency}
           cost={cost}
@@ -144,6 +171,7 @@ export function RunSettingsDrawer({
 
           <button
             className="primary-button compact-button"
+            data-testid="run-settings-done"
             onClick={onClose}
             type="button"
           >

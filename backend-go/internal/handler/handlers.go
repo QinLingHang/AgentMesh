@@ -184,6 +184,8 @@ func domain(
 			"当前项目已属于其他团队工作空间，如需迁移，请先解除原有归属",
 		)
 
+	case errors.Is(err, service.ErrIdempotencyConflict):
+		fail(c, http.StatusConflict, 40941, "该请求标识已用于不同内容，请重新提交")
 	case errors.Is(
 		err,
 		service.ErrConflict,
@@ -903,7 +905,8 @@ func NewTaskHandler(
 // =========================================================
 
 type runReq struct {
-	ConversationID *int64 `json:"conversationId"`
+	ClientRequestID string `json:"clientRequestId"`
+	ConversationID  *int64 `json:"conversationId"`
 
 	Task string `json:"task" binding:"required"`
 
@@ -918,6 +921,8 @@ type runReq struct {
 	ModelSelection model.ModelSelection `json:"modelSelection"`
 
 	AttachmentIDs []int64 `json:"attachmentIds"`
+
+	RagPolicy model.RagPolicy `json:"ragPolicy"`
 
 	Constraints model.TaskConstraints `json:"constraints"`
 }
@@ -935,21 +940,14 @@ func writeNDJSON(c *gin.Context, payload any) error {
 	return nil
 }
 
-func (h *TaskHandler) RunStream(c *gin.Context) {
+func (h *TaskHandler) DecideRoute(c *gin.Context) {
 	var req runReq
 	if c.ShouldBindJSON(&req) != nil {
 		fail(c, http.StatusBadRequest, 40040, "Task 参数不合法")
 		return
 	}
-
-	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
-	c.Header("Cache-Control", "no-cache, no-transform")
-	c.Header("X-Accel-Buffering", "no")
-	c.Status(http.StatusOK)
-	c.Writer.Flush()
-
-	input := service.RunTaskInput{
-		ConversationID: req.ConversationID,
+	decision := h.s.DecideDeliveryMode(service.RunTaskInput{
+		ClientRequestID: req.ClientRequestID, ConversationID: req.ConversationID,
 		Task:           req.Task,
 		Scheduler:      req.Scheduler,
 		Planner:        req.Planner,
@@ -957,12 +955,87 @@ func (h *TaskHandler) RunStream(c *gin.Context) {
 		SynthesisMode:  req.SynthesisMode,
 		ModelSelection: req.ModelSelection,
 		AttachmentIDs:  req.AttachmentIDs,
+		RagPolicy:      req.RagPolicy,
+		Constraints:    req.Constraints,
+	})
+	ok(c, decision)
+}
+
+func (h *TaskHandler) RunStream(c *gin.Context) {
+	var req runReq
+	if c.ShouldBindJSON(&req) != nil {
+		fail(c, http.StatusBadRequest, 40040, "Task 参数不合法")
+		return
+	}
+	h.runStreamRequest(c, req, nil)
+}
+
+// RunAutoStream is the single-submit endpoint. The server makes its routing
+// decision from the SAME validated request that it executes: the browser must
+// never issue a second POST after asking a preflight endpoint for a route.
+// The legacy direct/durable endpoints remain available for older clients.
+func (h *TaskHandler) RunAutoStream(c *gin.Context, durable *DurableRuntimeHandler) {
+	var req runReq
+	if c.ShouldBindJSON(&req) != nil {
+		fail(c, http.StatusBadRequest, 40040, "Task 参数不合法")
+		return
+	}
+	input := service.RunTaskInput{
+		ClientRequestID: req.ClientRequestID, ConversationID: req.ConversationID, Task: req.Task,
+		Scheduler: req.Scheduler, Planner: req.Planner,
+		ExecutionMode: req.ExecutionMode, SynthesisMode: req.SynthesisMode,
+		ModelSelection: req.ModelSelection, AttachmentIDs: req.AttachmentIDs,
+		RagPolicy: req.RagPolicy, Constraints: req.Constraints,
+	}
+	decision := h.s.DecideDeliveryMode(input)
+	if decision.Mode == "durable" {
+		if durable == nil {
+			fail(c, http.StatusServiceUnavailable, 50340, "Durable Runtime 不可用，不能降级执行需要可靠性的任务")
+			return
+		}
+		result, err := durable.s.Run(c, uid(c), input)
+		if err != nil {
+			domain(c, err)
+			return
+		}
+		c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+		c.Header("Cache-Control", "no-cache, no-transform")
+		c.Header("X-Accel-Buffering", "no")
+		_ = writeNDJSON(c, gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason})
+		_ = writeNDJSON(c, gin.H{"type": "result", "result": result})
+		return
+	}
+	h.runStreamRequest(c, req, &decision)
+}
+
+func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *service.DeliveryDecision) {
+
+	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("X-Accel-Buffering", "no")
+	c.Status(http.StatusOK)
+	c.Writer.Flush()
+	if decision != nil {
+		_ = writeNDJSON(c, gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason})
+	}
+
+	input := service.RunTaskInput{
+		ClientRequestID: req.ClientRequestID, ConversationID: req.ConversationID,
+		Task:           req.Task,
+		Scheduler:      req.Scheduler,
+		Planner:        req.Planner,
+		ExecutionMode:  req.ExecutionMode,
+		SynthesisMode:  req.SynthesisMode,
+		ModelSelection: req.ModelSelection,
+		AttachmentIDs:  req.AttachmentIDs,
+		RagPolicy:      req.RagPolicy,
 		Constraints:    req.Constraints,
 	}
 
 	var result *service.RunTaskResult
 	var err error
-	if service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs) {
+	forceFullRuntimeForKnowledge := req.RagPolicy.Mode == model.RagModeOn || len(req.RagPolicy.SelectedKnowledgeBaseIDs) > 0
+	if !forceFullRuntimeForKnowledge && service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs) {
 		result, err = h.s.RunInteractiveStream(c, uid(c), input, func(event runtimeclient.InteractiveStreamEvent) error {
 			return writeNDJSON(c, event)
 		})
@@ -972,7 +1045,21 @@ func (h *TaskHandler) RunStream(c *gin.Context) {
 			"phase":   "agent_runtime",
 			"message": "正在进行 Agent 协作执行…",
 		})
-		result, err = h.s.Run(c, uid(c), input)
+
+		streamCtx := runtimeclient.WithStreamEventSink(c, func(event map[string]any) {
+			eventType, _ := event["type"].(string)
+			if eventType != "trace" && eventType != "delta" {
+				return
+			}
+			if eventType == "delta" {
+				delta, ok := event["delta"].(string)
+				if !ok || len(delta) > 32*1024 {
+					return
+				}
+			}
+			_ = writeNDJSON(c, event)
+		})
+		result, err = h.s.Run(streamCtx, uid(c), input)
 	}
 
 	if err != nil {
@@ -1013,7 +1100,7 @@ func (h *TaskHandler) Run(
 			c,
 		),
 		service.RunTaskInput{
-			ConversationID: req.ConversationID,
+			ClientRequestID: req.ClientRequestID, ConversationID: req.ConversationID,
 
 			Task: req.Task,
 
@@ -1028,6 +1115,8 @@ func (h *TaskHandler) Run(
 			ModelSelection: req.ModelSelection,
 
 			AttachmentIDs: req.AttachmentIDs,
+
+			RagPolicy: req.RagPolicy,
 
 			Constraints: req.Constraints,
 		},

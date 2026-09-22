@@ -299,8 +299,9 @@ async def stream_interactive_answer(
                 latency_ms=response.latency_ms,
                 cost=response.estimated_cost,
             )
-        if response.content:
-            yield {"type": "delta", "delta": response.content}
+        # A provider without a native stream has only a completed response.
+        # Publishing that response as a delta would mislabel a one-shot result
+        # as genuine model-token streaming in the browser.
         _CONVERSATION_MEMORY_COMPACTOR.schedule(
             user_id=req.user_id,
             conversation_id=req.conversation_id,

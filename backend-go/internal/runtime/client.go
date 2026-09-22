@@ -1,9 +1,11 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -244,6 +246,12 @@ type ExecuteRequest struct {
 
 	Constraints model.TaskConstraints `json:"constraints"`
 
+	RagPolicy model.RagPolicy `json:"ragPolicy"`
+
+	EffectiveRagPolicy model.EffectiveRagPolicy `json:"effectiveRagPolicy"`
+
+	KnowledgeCatalog []model.KnowledgeCatalogItem `json:"knowledgeCatalog,omitempty"`
+
 	Agents []model.Agent `json:"agents"`
 
 	Tools []model.Tool `json:"tools,omitempty"`
@@ -384,13 +392,39 @@ func (c *Client) StreamInteractive(
 	}
 
 	decoder := json.NewDecoder(resp.Body)
+	// EOF is not evidence of model success. A transport that closes after a
+	// partial delta (or before sending any events) must never allow Go to
+	// persist a truncated answer as COMPLETED. The terminal done event is the
+	// sole success signal for this protocol.
+	var accumulated strings.Builder
+	sawDelta := false
+	sawDone := false
 	for {
 		var event InteractiveStreamEvent
 		if err := decoder.Decode(&event); err != nil {
 			if err == io.EOF {
-				return nil
+				if sawDone {
+					return nil
+				}
+				return errors.New("interactive stream ended without a done event")
 			}
 			return err
+		}
+		if sawDone {
+			return errors.New("interactive stream emitted an event after done")
+		}
+		switch event.Type {
+		case "delta":
+			sawDelta = true
+			accumulated.WriteString(event.Delta)
+		case "done":
+			// The provider's final answer and its actual token deltas must
+			// agree byte-for-byte. Do not forward a false done event to the
+			// browser before checking the invariant.
+			if sawDelta && event.Content != accumulated.String() {
+				return errors.New("interactive stream final answer does not match deltas")
+			}
+			sawDone = true
 		}
 		if onEvent != nil {
 			if err := onEvent(event); err != nil {
@@ -475,6 +509,33 @@ type PluginInfo struct {
 }
 
 // ============================================================
+// Full Runtime stream bridge
+//
+// The sink is request-local observability only. It never becomes part of the
+// authoritative Runtime state and a disconnected consumer must not cancel the
+// underlying task.
+// ============================================================
+
+type StreamEventSink func(map[string]any)
+
+type streamEventSinkKey struct{}
+
+func WithStreamEventSink(ctx context.Context, sink StreamEventSink) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, streamEventSinkKey{}, sink)
+}
+
+func streamEventSinkFromContext(ctx context.Context) StreamEventSink {
+	if ctx == nil {
+		return nil
+	}
+	sink, _ := ctx.Value(streamEventSinkKey{}).(StreamEventSink)
+	return sink
+}
+
+// ============================================================
 // Execute Runtime
 // ============================================================
 
@@ -484,6 +545,10 @@ func (
 	ctx context.Context,
 	req ExecuteRequest,
 ) (*ExecuteResponse, error) {
+	if sink := streamEventSinkFromContext(ctx); sink != nil {
+		return c.executeStream(ctx, req, sink)
+	}
+
 	body, err := json.Marshal(
 		req,
 	)
@@ -527,10 +592,7 @@ func (
 	defer resp.Body.Close()
 
 	if (resp.StatusCode / 100) != 2 {
-		return nil, fmt.Errorf(
-			"runtime returned %s",
-			resp.Status,
-		)
+		return nil, runtimeResponseError(resp)
 	}
 
 	var out ExecuteResponse
@@ -544,6 +606,84 @@ func (
 	}
 
 	return &out, nil
+}
+
+func (c *Client) executeStream(
+	ctx context.Context,
+	req ExecuteRequest,
+	sink StreamEventSink,
+) (*ExecuteResponse, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+	r, err := http.NewRequestWithContext(
+		ctx,
+		http.MethodPost,
+		c.baseURL+"/internal/v1/runtime/execute-stream",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return nil, err
+	}
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Internal-Token", c.token)
+	resp, err := c.http.Do(r)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if (resp.StatusCode / 100) != 2 {
+		return nil, runtimeResponseError(resp)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var final *ExecuteResponse
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var event map[string]any
+		if err := json.Unmarshal(line, &event); err != nil {
+			return nil, fmt.Errorf("invalid runtime stream event: %w", err)
+		}
+		if sink != nil {
+			// Observability sinks are deliberately fail-open. A client-side stream
+			// writer failure must not alter the Runtime result.
+			func() {
+				defer func() { _ = recover() }()
+				sink(event)
+			}()
+		}
+		typeValue, _ := event["type"].(string)
+		switch typeValue {
+		case "result":
+			raw, err := json.Marshal(event["result"])
+			if err != nil {
+				return nil, err
+			}
+			var out ExecuteResponse
+			if err := json.Unmarshal(raw, &out); err != nil {
+				return nil, err
+			}
+			final = &out
+		case "error":
+			message, _ := event["message"].(string)
+			if strings.TrimSpace(message) == "" {
+				message = "runtime stream failed"
+			}
+			return nil, errors.New(message)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if final == nil {
+		return nil, errors.New("runtime stream ended without result")
+	}
+	return final, nil
 }
 
 // ============================================================

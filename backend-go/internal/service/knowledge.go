@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -885,4 +886,71 @@ func (s *KnowledgeService) RuntimeScope(
 		return nil, ErrNotFound
 	}
 	return scope, err
+}
+
+// LiveAuthorizedKnowledgeBaseIDs re-checks current ownership and conversation
+// binding at the point of retrieval. It does not grant new access: callers
+// MUST intersect this result with the frozen effective RAG policy snapshot.
+// This method does not create a default global knowledge base as a side effect.
+func (s *KnowledgeService) LiveAuthorizedKnowledgeBaseIDs(
+	ctx context.Context, uid int64, conversationID *int64, requested []int64,
+) ([]int64, error) {
+	if uid <= 0 || len(requested) > 256 {
+		return nil, ErrInvalidInput
+	}
+	if len(requested) == 0 {
+		return []int64{}, nil
+	}
+	indexRepo, ok := s.repo.(knowledgeIndexRepository)
+	if !ok {
+		return nil, errors.New("knowledge repository does not support runtime scope")
+	}
+	scope, err := indexRepo.ResolveRuntimeKnowledgeScope(ctx, uid, conversationID)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	bases, err := s.repo.ListKnowledgeBases(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	return filterLiveKnowledgeIDs(scope, bases, uid, requested), nil
+}
+
+// filterLiveKnowledgeIDs is intentionally independent of the old scope ID
+// list: it historically contains only project-bound globals whereas V1.1
+// allows explicitly opted-in, user-owned global bases. The snapshot is still
+// the upper bound and the project conversation is validated by the repository.
+func filterLiveKnowledgeIDs(
+	scope *model.RuntimeKnowledgeScope, bases []model.KnowledgeBase,
+	uid int64, requested []int64,
+) []int64 {
+	if scope == nil || uid <= 0 || scope.UserID != uid {
+		return []int64{}
+	}
+	available := make(map[int64]bool, len(bases))
+	for _, base := range bases {
+		switch base.Scope {
+		case model.KnowledgeBaseScopeGlobal:
+			if base.UserID == uid {
+				available[base.ID] = true
+			}
+		case model.KnowledgeBaseScopeProject:
+			if scope.ProjectID != nil && base.ProjectID != nil && *scope.ProjectID == *base.ProjectID {
+				available[base.ID] = true
+			}
+		}
+	}
+	seen := make(map[int64]bool, len(requested))
+	result := make([]int64, 0, len(requested))
+	for _, id := range requested {
+		if id > 0 && available[id] && !seen[id] {
+			seen[id] = true
+			result = append(result, id)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }

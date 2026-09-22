@@ -8,6 +8,7 @@ from typing import Any, Callable
 from app.planning.contracts import ExecutionPlan, PlanStep, SemanticPlanningOutcome
 from app.planning.validator import PlanValidationError, PlanValidator
 from app.schemas import AgentProfile, TaskProfile
+from app.semantics.contracts import TaskSemanticIntent
 
 
 class SemanticTaskPlanner:
@@ -118,6 +119,7 @@ class SemanticTaskPlanner:
         profile: TaskProfile,
         agents: list[AgentProfile],
         model: Any | None,
+        semantic: TaskSemanticIntent | None = None,
         on_model_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> SemanticPlanningOutcome:
         available = self.available_capabilities(agents, profile)
@@ -126,7 +128,7 @@ class SemanticTaskPlanner:
             try:
                 raw = await asyncio.wait_for(
                     model.generate(
-                        self._build_prompt(task, profile, available),
+                        self._build_prompt(task, profile, available, semantic),
                         on_model_event,
                     ),
                     timeout=self.timeout_seconds,
@@ -139,7 +141,7 @@ class SemanticTaskPlanner:
                 )
                 return SemanticPlanningOutcome(plan=validated, used_model=True)
             except Exception as exc:
-                fallback = self._deterministic_fallback(task, profile, available)
+                fallback = self._deterministic_fallback(task, profile, available, semantic)
                 return SemanticPlanningOutcome(
                     plan=fallback,
                     used_model=False,
@@ -149,7 +151,7 @@ class SemanticTaskPlanner:
                 )
 
         return SemanticPlanningOutcome(
-            plan=self._deterministic_fallback(task, profile, available),
+            plan=self._deterministic_fallback(task, profile, available, semantic),
             used_model=False,
             fallback_reason="planning model unavailable",
         )
@@ -171,6 +173,7 @@ class SemanticTaskPlanner:
         task: str,
         profile: TaskProfile,
         available: set[str],
+        semantic: TaskSemanticIntent | None = None,
     ) -> ExecutionPlan:
         capabilities = list(dict.fromkeys(profile.required_capabilities or ["general"]))
         general = next((item for item in available if item.casefold() == "general"), None)
@@ -192,6 +195,8 @@ class SemanticTaskPlanner:
                         objective=self._bounded_objective(clause),
                         capability=capability,
                         dependsOn=depends,
+                        knowledgeDependency=(semantic.knowledge_dependency.value if semantic is not None else "NONE"),
+                        forbiddenActions=(list(semantic.forbidden_actions) if semantic is not None else []),
                     )
                 )
         else:
@@ -207,6 +212,8 @@ class SemanticTaskPlanner:
                         ),
                         capability=capability,
                         dependsOn=depends,
+                        knowledgeDependency=(semantic.knowledge_dependency.value if semantic is not None else "NONE"),
+                        forbiddenActions=(list(semantic.forbidden_actions) if semantic is not None else []),
                     )
                 )
 
@@ -217,6 +224,8 @@ class SemanticTaskPlanner:
                     id="step_1",
                     objective=self._bounded_objective(task),
                     capability="general",
+                    knowledgeDependency=(semantic.knowledge_dependency.value if semantic is not None else "NONE"),
+                    forbiddenActions=(list(semantic.forbidden_actions) if semantic is not None else []),
                 )
             ],
             requiresSynthesis=len(steps) > 1,
@@ -271,7 +280,12 @@ class SemanticTaskPlanner:
         return clauses[:8]
 
     @staticmethod
-    def _build_prompt(task: str, profile: TaskProfile, available: set[str]) -> str:
+    def _build_prompt(
+        task: str,
+        profile: TaskProfile,
+        available: set[str],
+        semantic: TaskSemanticIntent | None = None,
+    ) -> str:
         catalog = sorted(available, key=str.casefold)
         return (
             "You are the AgentMesh semantic task planner. Produce JSON only.\n"
@@ -283,9 +297,12 @@ class SemanticTaskPlanner:
             "Schema:\n"
             '{"goal":"...","requiresSynthesis":true,"steps":['
             '{"id":"short_id","objective":"...","capability":"...",'
-            '"dependsOn":[],"optional":false,"condition":null}]}\n'
+            '"dependsOn":[],"optional":false,"condition":null,'
+            '"knowledgeDependency":"NONE|OPTIONAL|REQUIRED","forbiddenActions":[]}]}\n'
             f"AVAILABLE_CAPABILITIES={json.dumps(catalog, ensure_ascii=False)}\n"
             f"BASELINE_PROFILE={profile.model_dump_json()}\n"
+            f"SEMANTIC_CONSTRAINTS={(semantic.model_dump_json(by_alias=True) if semantic is not None else '{}')}\n"
+            "Never weaken forbiddenActions. Knowledge dependency describes evidence requirements; it does not grant access.\n"
             "USER_GOAL_BEGIN\n"
             f"{task}\n"
             "USER_GOAL_END"

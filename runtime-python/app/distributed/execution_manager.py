@@ -79,6 +79,7 @@ class DurableExecutionManager:
         shutdown_grace_seconds: float,
         dedupe_retention_seconds: float,
         runner: Callable[[RuntimeRequest], Awaitable[RuntimeResponse]],
+        event_runner: Callable[[RuntimeRequest, Callable[[object], None]], Awaitable[RuntimeResponse]] | None = None,
         node_id: str = "",
         node_zone: str = "",
         node_version: str = "",
@@ -101,6 +102,7 @@ class DurableExecutionManager:
         self.shutdown_grace_seconds = max(1.0, shutdown_grace_seconds)
         self.dedupe_retention_seconds = max(30.0, dedupe_retention_seconds)
         self._runner = runner
+        self._event_runner = event_runner
         self._result_transport = result_transport or HttpResultTransport(
             internal_token=internal_token,
             timeout_seconds=callback_timeout_seconds,
@@ -258,32 +260,120 @@ class DurableExecutionManager:
             return True
 
     async def _execute(self, envelope: DurableExecutionEnvelope) -> None:
+        # Trace delivery is a bounded, best-effort side channel. No user text,
+        # tool arguments/results or raw trace titles ever leave this worker.
+        phase_queue: asyncio.Queue[tuple[int, str, str]] | None = None
+        phase_sender: asyncio.Task[None] | None = None
+        sequence = 0
+        if self._event_runner is not None and self.control_plane_base_url and envelope.fence_epoch > 0:
+            phase_queue = asyncio.Queue(maxsize=64)
+            phase_sender = asyncio.create_task(
+                self._send_worker_phases(envelope, phase_queue),
+                name=f"agentmesh-phase-{envelope.execution_id}",
+            )
+
+        loop = asyncio.get_running_loop()
+
+        def on_trace(trace: object) -> None:
+            nonlocal sequence
+            if phase_queue is None or not self._is_current_attempt(envelope):
+                return
+            kind = str(getattr(trace, "kind", "")).strip().lower()
+            status = str(getattr(trace, "status", "")).strip().lower()
+            if kind not in {"task", "planner", "scheduler", "agent", "tool", "mcp", "rag", "knowledge", "memory", "model"}:
+                return
+            if status not in {"running", "completed", "error", "skipped"} or sequence >= 256:
+                return
+            sequence += 1
+            ordinal = sequence
+
+            def enqueue() -> None:
+                try:
+                    phase_queue.put_nowait((ordinal, kind, status))
+                except asyncio.QueueFull:
+                    # Never block model/tool execution on disconnected observability.
+                    pass
+
+            loop.call_soon_threadsafe(enqueue)
+
+        async def flush_phases() -> None:
+            if phase_sender is None or phase_queue is None:
+                return
+            # Run scheduled callbacks before waiting for pending HTTP writes.
+            await asyncio.sleep(0)
+            try:
+                await asyncio.wait_for(phase_queue.join(), timeout=1.5)
+            except asyncio.TimeoutError:
+                pass
+
         try:
-            response = await self._runner(envelope.request)
+            if self._event_runner is not None and phase_queue is not None:
+                response = await self._event_runner(envelope.request, on_trace)
+            else:
+                response = await self._runner(envelope.request)
         except asyncio.CancelledError:
             # Do not generate a second, conflicting outcome for an attempt
             # canceled by a higher fence. A previously stored outbox event is
             # preserved and Go will apply the authoritative fence.
             if self._is_current_attempt(envelope):
+                await flush_phases()
                 await self._deliver_callback(envelope, status="canceled")
             raise
         except Exception as exc:
             # Never send raw exception text: it may contain prompt/tool/provider
             # data. The class name is enough for control-plane failure taxonomy.
             category = type(exc).__name__.strip() or "RuntimeExecutionError"
+            await flush_phases()
             await self._deliver_callback(
                 envelope,
                 status="failed",
                 error_category=category,
             )
         else:
+            await flush_phases()
             await self._deliver_callback(
                 envelope,
                 status="completed",
                 response=response,
             )
         finally:
+            if phase_sender is not None:
+                phase_sender.cancel()
+                await asyncio.gather(phase_sender, return_exceptions=True)
             asyncio.create_task(self._send_heartbeat_once())
+
+    async def _send_worker_phases(
+        self,
+        envelope: DurableExecutionEnvelope,
+        queue: asyncio.Queue[tuple[int, str, str]],
+    ) -> None:
+        endpoint = (
+            f"{self.control_plane_base_url}/internal/v1/runtime/jobs/"
+            f"{envelope.job_id}/phase"
+        )
+        headers = {"X-Internal-Token": self.internal_token}
+        async with httpx.AsyncClient(timeout=1.5, trust_env=False) as client:
+            while True:
+                ordinal, kind, status = await queue.get()
+                try:
+                    if not self._is_current_attempt(envelope):
+                        continue
+                    payload = {
+                        "workerId": self.worker_id,
+                        "executionId": envelope.execution_id,
+                        "leaseToken": envelope.lease_token,
+                        "fenceEpoch": envelope.fence_epoch,
+                        "ordinal": ordinal,
+                        "phase": kind,
+                        "status": status,
+                    }
+                    try:
+                        await client.post(endpoint, json=payload, headers=headers)
+                    except (httpx.HTTPError, OSError):
+                        # Loss of transient phase telemetry never retries a job.
+                        pass
+                finally:
+                    queue.task_done()
 
     def _is_current_attempt(self, envelope: DurableExecutionEnvelope) -> bool:
         record = self._records.get(envelope.execution_id)

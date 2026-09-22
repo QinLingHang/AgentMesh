@@ -6,6 +6,8 @@ from app.knowledge.scope import (
     install_scoped_retriever,
     reset_knowledge_scope,
     set_knowledge_scope,
+    reset_candidate_knowledge_ids,
+    set_candidate_knowledge_ids,
 )
 
 __all__ = [
@@ -16,4 +18,10 @@ __all__ = [
     "install_scoped_retriever",
     "reset_knowledge_scope",
     "set_knowledge_scope",
+    "reset_candidate_knowledge_ids",
+    "set_candidate_knowledge_ids",
 ]
+
+from .discovery import KnowledgeDiscoveryResult, discover_knowledge_bases
+
+__all__ += ["KnowledgeDiscoveryResult", "discover_knowledge_bases"]

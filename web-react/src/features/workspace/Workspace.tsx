@@ -7,9 +7,11 @@ import {
   deleteConversationAttachment,
   friendlyApiError,
   listUserModelServices,
+  listKnowledgeBases,
   resumeTask,
   runTask,
   runTaskStream,
+  subscribeDurableTaskEvents,
   uploadConversationAttachment,
 } from "../../api";
 import type {
@@ -20,9 +22,12 @@ import type {
   MCPServer,
   Message,
   MessageAttachmentMetadata,
+  KnowledgeBase,
   ModelSelection,
   Planner,
   Project,
+  RagMode,
+  RagScope,
   RunResult,
   Scheduler,
   SynthesisMode,
@@ -248,8 +253,20 @@ export function Workspace({
 
   const [deliveryMode, setDeliveryMode] =
     useState<DeliveryMode>(
-      "direct",
+      "auto",
     );
+
+  const [ragMode, setRagMode] =
+    useState<RagMode>("AUTO");
+
+  const [ragScopes, setRagScopes] =
+    useState<RagScope[]>(["PROJECT"]);
+
+  // Knowledge selection is optional. An empty list means AUTO discovery
+  // restricted by the selected scopes, NOT access to every global base.
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [selectedKnowledgeBaseIds, setSelectedKnowledgeBaseIds] = useState<number[]>([]);
+  const [knowledgeCatalogError, setKnowledgeCatalogError] = useState("");
 
   const [latency, setLatency] =
     useState(8000);
@@ -315,6 +332,27 @@ export function Workspace({
 
   const [showSettings, setShowSettings] =
     useState(false);
+
+  useEffect(() => {
+    if (!showSettings || ragMode === "OFF") return;
+    let active = true;
+    listKnowledgeBases().then((bases) => {
+      if (!active) return;
+      setKnowledgeBases(bases);
+      setKnowledgeCatalogError("");
+    }).catch(() => {
+      if (active) setKnowledgeCatalogError("知识库目录读取失败，请重试。实际权限仍由服务端判定。");
+    });
+    return () => { active = false; };
+  }, [showSettings, ragMode]);
+
+  const activeProjectId = projects.find(
+    (project) => current != null && project.conversationIds.includes(current.id),
+  )?.id;
+  const selectableKnowledgeBases = knowledgeBases.filter((base) =>
+    (base.scope === "PROJECT" && ragScopes.includes("PROJECT") && base.projectId === activeProjectId) ||
+    (base.scope === "GLOBAL" && ragScopes.includes("USER_GLOBAL")),
+  );
 
   const [railCollapsed, setRailCollapsed] = useState(() => {
     try {
@@ -1004,37 +1042,99 @@ export function Workspace({
   }, []);
 
 
-  const durablePending =
-    latestRun != null &&
+  // A browser reload loses the transient latestRunState, but MySQL-backed
+  // tasks are still available. Recover a pending durable task from the active
+  // conversation's newest persisted task; never revive an older task after a
+  // newer turn supersedes it.
+  const persistedDurableTask = latestConversationTask &&
+    latestConversationTask.deliveryMode === "durable" &&
+    (latestConversationTask.status === "QUEUED" || latestConversationTask.status === "RUNNING")
+      ? latestConversationTask : null;
+  const transientDurableTask = latestRun &&
     latestRun.task.deliveryMode === "durable" &&
-    (latestRun.status === "QUEUED" ||
-      latestRun.status === "RUNNING");
+    (latestRun.status === "QUEUED" || latestRun.status === "RUNNING") &&
+    (latestConversationTask == null ||
+      (latestConversationTask.id === latestRun.task.id &&
+       (latestConversationTask.status === "QUEUED" || latestConversationTask.status === "RUNNING")))
+      ? latestRun.task : null;
+  const activeDurableTask = persistedDurableTask ?? transientDurableTask;
+  const durablePending = activeDurableTask != null;
 
   useEffect(
     () => {
-      if (!durablePending || !current) {
-        return;
-      }
-
+      if (!durablePending || !current || !activeDurableTask) return;
+      const taskId = activeDurableTask.id;
+      const conversationId = current.id;
+      const controller = new AbortController();
+      let stopped = false;
+      let streaming = false;
+      let cursor = 0;
       const refresh = () => {
+        if (stopped) return;
         void Promise.allSettled([
           reloadTasks(),
-          reloadMessages(current.id),
+          reloadMessages(conversationId),
           reloadConversations(),
         ]);
       };
-
       refresh();
-      const timer = window.setInterval(
-        refresh,
-        1000,
-      );
-
-      return () =>
-        window.clearInterval(timer);
+      // Poll only if the event stream is disconnected. This is also the
+      // compatibility fallback for servers that predate P22 SSE.
+      const fallback = window.setInterval(() => {
+        if (!streaming) refresh();
+      }, 1000);
+      void (async () => {
+        while (!stopped) {
+          try {
+            const next = await subscribeDurableTaskEvents(
+              taskId, cursor,
+              (event) => {
+                if (stopped) return;
+                cursor = Math.max(cursor, event.sequence);
+                if (activeConversationIdRef.current === conversationId) {
+                  const phaseNames: Record<string, string> = {
+                    task: "任务", planner: "规划", scheduler: "调度",
+                    agent: "Agent", tool: "工具", mcp: "MCP",
+                    rag: "知识检索", knowledge: "知识", memory: "记忆", model: "模型",
+                  };
+                  if (event.eventType === "trace" && event.phase && event.phaseStatus) {
+                    // Do not display remote trace titles or details in Workspace.
+                    setStreamingPhase(`${phaseNames[event.phase] ?? "执行"}：${event.phaseStatus}`);
+                  } else {
+                    setStreamingPhase(`任务状态：${event.status}`);
+                  }
+                }
+                // A trace is a progress hint, not an authoritative task status
+                // transition. Avoid multiple task/history fetches per tool step.
+                if (event.eventType !== "trace") refresh();
+              },
+              controller.signal,
+              () => { streaming = true; },
+            );
+            cursor = Math.max(cursor, next.cursor);
+            streaming = false;
+            if (next.terminal) {
+              refresh();
+              break;
+            }
+          } catch {
+            // Never resubmit a task to repair a broken SSE connection.
+            // Authoritative task/message polling remains available.
+            streaming = false;
+            if (controller.signal.aborted) break;
+          }
+          if (!stopped) await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
+        }
+      })();
+      return () => {
+        stopped = true;
+        controller.abort();
+        window.clearInterval(fallback);
+      };
     },
     [
       durablePending,
+      activeDurableTask?.id,
       current?.id,
       reloadTasks,
       reloadMessages,
@@ -1335,18 +1435,28 @@ export function Workspace({
         executionMode,
         synthesisMode,
         deliveryMode,
+        ragPolicy: {
+          mode: ragMode,
+          scopes: ragScopes,
+          selectedKnowledgeBaseIds: selectedKnowledgeBaseIds.filter((id) =>
+            selectableKnowledgeBases.some((base) => base.id === id),
+          ),
+        },
         modelSelection,
         maxLatencyMs: latency,
         maxCost: cost,
         minQuality: quality,
-        retryOnWorkerLoss: deliveryMode === "durable" ? retryOnWorkerLoss : false,
+        retryOnWorkerLoss: deliveryMode === "direct" ? false : retryOnWorkerLoss,
         attachmentIds: submittedAttachments.map((item) => item.server!.id),
       };
 
       const isSubmissionConversationActive = () =>
         activeConversationIdRef.current === submissionConversationId;
 
-      const result = deliveryMode === "direct"
+      // Exactly one submit request. Go selects the execution mode from the
+      // request it actually accepts; a separate preflight risks stale policy
+      // and doubles requests in case of retry or connection failure.
+      const result = deliveryMode !== "durable"
         ? await runTaskStream(input, {
             onDelta: (delta) => {
               // Keep the active-conversation guard as an explicit first gate.
@@ -2039,6 +2149,7 @@ export function Workspace({
 
                     <button
                       className="composer-settings-button composer-settings-button-compact"
+                      data-testid="run-settings-open"
                       onClick={() => {
                         setShowModelPicker(false);
                         setShowSettings(true);
@@ -2144,6 +2255,14 @@ export function Workspace({
           setSynthesisMode={setSynthesisMode}
           deliveryMode={deliveryMode}
           setDeliveryMode={setDeliveryMode}
+          ragMode={ragMode}
+          setRagMode={setRagMode}
+          ragScopes={ragScopes}
+          setRagScopes={setRagScopes}
+          knowledgeBases={selectableKnowledgeBases}
+          selectedKnowledgeBaseIds={selectedKnowledgeBaseIds}
+          setSelectedKnowledgeBaseIds={setSelectedKnowledgeBaseIds}
+          knowledgeCatalogError={knowledgeCatalogError}
           latency={latency}
           setLatency={setLatency}
           cost={cost}

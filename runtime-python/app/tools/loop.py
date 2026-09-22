@@ -194,6 +194,7 @@ class ToolLoopRunner:
             | None
         ) = None,
         attachments: list[ModelInputAttachment] | None = None,
+        on_delta: Callable[[str], None] | None = None,
     ) -> str:
 
         messages = [
@@ -296,12 +297,32 @@ class ToolLoopRunner:
                 )
             )
 
-            if not (
-                response.tool_calls
-            ):
-                return (
-                    response.content
-                )
+            if not response.tool_calls:
+                # Provider streaming currently has no tool-call parser. Never
+                # stream a tool-decision turn: its text might be an intermediate
+                # thought followed by a side-effecting tool call. After the
+                # authoritative non-stream decision yields zero tool calls,
+                # start a separate NATIVE stream with no tools. The streamed
+                # completion is the result (not the earlier draft); no tool
+                # execution or retry is repeated. Mock cannot emit real deltas.
+                provider = getattr(self.gateway, "provider", None)
+                if (on_delta is not None
+                        and callable(getattr(self.gateway, "generate_stream", None))
+                        and callable(getattr(provider, "stream", None))
+                        and getattr(provider, "name", "") != "mock"):
+                    final = await self.gateway.generate_stream(
+                        ModelRequest(
+                            model=request_model,
+                            messages=messages,
+                            tools=[],
+                            temperature=0.2,
+                            attachments=request_attachments,
+                        ),
+                        on_model_event,
+                        on_delta,
+                    )
+                    return final.content
+                return response.content
 
             messages.append(
                 ModelMessage(

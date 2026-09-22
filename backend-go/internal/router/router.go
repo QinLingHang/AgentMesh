@@ -101,6 +101,7 @@ func New(
 		"/knowledge/scope",
 		deps.KnowledgeHandler.ResolveRuntimeScope,
 	)
+	internal.POST("/knowledge/authorize", deps.KnowledgeHandler.LiveAuthorize)
 	internal.GET(
 		"/users/:userId/memories",
 		deps.MemoryHandler.InternalListActive,

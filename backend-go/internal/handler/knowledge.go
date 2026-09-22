@@ -493,3 +493,27 @@ func (h *KnowledgeHandler) ResolveRuntimeScope(
 
 	ok(c, scope)
 }
+
+// LiveAuthorize is internal-token protected at the router level. It returns
+// only IDs, never metadata of resources whose access has been revoked.
+func (h *KnowledgeHandler) LiveAuthorize(c *gin.Context) {
+	var request struct {
+		UserID           int64   `json:"userId" binding:"required"`
+		ConversationID   *int64  `json:"conversationId"`
+		KnowledgeBaseIDs []int64 `json:"knowledgeBaseIds" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil || request.UserID <= 0 || len(request.KnowledgeBaseIDs) > 256 {
+		fail(c, http.StatusBadRequest, 40092, "知识库实时授权参数不合法")
+		return
+	}
+	if request.ConversationID != nil && *request.ConversationID <= 0 {
+		fail(c, http.StatusBadRequest, 40092, "conversationId 不合法")
+		return
+	}
+	ids, err := h.s.LiveAuthorizedKnowledgeBaseIDs(c, request.UserID, request.ConversationID, request.KnowledgeBaseIDs)
+	if err != nil {
+		domain(c, err)
+		return
+	}
+	ok(c, gin.H{"knowledgeBaseIds": ids})
+}

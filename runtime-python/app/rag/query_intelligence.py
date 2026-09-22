@@ -479,7 +479,10 @@ class QueryAnalyzer:
 
         if (
             transaction_signals and
-            (
+            not document_signals
+            and not knowledge_signals
+            and not (capability_set & document_capabilities)
+            and (
                 identifiers or
                 capability_set &
                 transactional_capabilities
@@ -640,9 +643,10 @@ class QueryAnalyzer:
         # =================================================
 
         if (
-            transaction_signals or
-            capability_set &
-            transactional_capabilities
+            (transaction_signals or capability_set & transactional_capabilities)
+            and not document_signals
+            and not knowledge_signals
+            and not (capability_set & document_capabilities)
         ):
             matched.extend(
                 transaction_signals

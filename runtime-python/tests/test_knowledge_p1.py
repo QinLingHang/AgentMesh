@@ -125,8 +125,10 @@ async def test_p2_concurrent_project_and_global_retrieval_isolation():
         token = set_knowledge_scope(KnowledgeScope(7, 10, project, "PROJECT" if project else "GLOBAL", bases))
         try:
             await asyncio.sleep(0)
-            hits = await scoped.retrieve("AgentMesh", filters={"userId": 7, "knowledgeBaseId": 14})
+            hits = await scoped.retrieve("AgentMesh", filters={"userId": 7})
             assert {hit.document.id for hit in hits} == expected
+            # User filters cannot widen the Go-authorized base scope.
+            assert await scoped.retrieve("AgentMesh", filters={"userId": 7, "knowledgeBaseId": 14}) == []
             assert await scoped.retrieve("AgentMesh", filters={"userId": 8}) == []
         finally:
             reset_knowledge_scope(token)

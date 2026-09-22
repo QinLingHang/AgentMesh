@@ -175,6 +175,15 @@ async def test_project_specific_question_discovers_knowledge_without_saying_know
             RuntimeRequest(
                 user_id=1,
                 request_id="v4-1-auto-knowledge",
+                ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+                effectiveRagPolicy={
+                    "mode": "ON", "allowedScopes": ["PROJECT"],
+                    "allowedKnowledgeBaseIds": [9],
+                },
+                knowledgeCatalog=[{
+                    "knowledgeBaseId": 9, "name": "AgentMesh P9 BYOK 设计实现",
+                    "scope": "PROJECT", "accessible": True,
+                }],
                 task="AgentMesh P9 BYOK 是怎么设计和实现的？",
                 agents=[_agent(1, "General", ["general"])],
             )
@@ -197,6 +206,15 @@ async def test_knowledge_continuation_retrieves_previous_topic_instead_of_bare_f
             RuntimeRequest(
                 user_id=1,
                 request_id="v4-1-knowledge-continuation",
+                ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+                effectiveRagPolicy={
+                    "mode": "ON", "allowedScopes": ["PROJECT"],
+                    "allowedKnowledgeBaseIds": [9],
+                },
+                knowledgeCatalog=[{
+                    "knowledgeBaseId": 9, "name": "AgentMesh P9 BYOK 设计实现",
+                    "scope": "PROJECT", "accessible": True,
+                }],
                 conversationId=86,
                 task="展开讲讲",
                 history=[

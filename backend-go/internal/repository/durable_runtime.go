@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"time"
 
 	"example.com/agentmesh-control-plane/internal/model"
@@ -76,6 +78,14 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	ragPolicyJSON, err := json.Marshal(task.RagPolicy)
+	if err != nil {
+		return nil, nil, err
+	}
+	effectiveRagPolicyJSON, err := json.Marshal(task.EffectiveRagPolicy)
+	if err != nil {
+		return nil, nil, err
+	}
 	if maxAttempts < 1 {
 		maxAttempts = 1
 	}
@@ -85,17 +95,57 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 		return nil, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// The task request_id unique key can fail BEFORE the idempotency ledger
+	// INSERT. Handle both collision sites identically; a duplicate must not
+	// escape as a raw MySQL 1062 or create an extra queue job/message.
+	replayOnDuplicate := func(insertErr error) (*model.Task, *model.RuntimeJob, error) {
+		var duplicate *mysqlDriver.MySQLError
+		if !errors.As(insertErr, &duplicate) || duplicate.Number != 1062 || task.ClientRequestID == "" {
+			return nil, nil, insertErr
+		}
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return nil, nil, rollbackErr
+		}
+		original, fingerprint, lookupErr := r.LookupDurableSubmission(ctx, task.UserID, task.ClientRequestID)
+		if lookupErr != nil {
+			return nil, nil, lookupErr
+		}
+		if original == nil || fingerprint != task.RequestFingerprint || original.DeliveryMode != "durable" {
+			return nil, nil, ErrSubmissionConflict
+		}
+		originalJob, lookupErr := r.runtimeJobByTaskID(ctx, original.ID)
+		if errors.Is(lookupErr, sql.ErrNoRows) || (lookupErr == nil && originalJob == nil) {
+			return nil, nil, ErrSubmissionConflict
+		}
+		return original, originalJob, lookupErr
+	}
+
+	// Lock the conversation while inserting the task and its user message.
+	// A rejected/duplicate request cannot leave an orphan chat message.
+	if task.ConversationID != nil {
+		var ownedID int64
+		if err := tx.QueryRowContext(ctx, `
+			SELECT id FROM conversations WHERE id = ? AND user_id = ? FOR UPDATE
+		`, *task.ConversationID, task.UserID).Scan(&ownedID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, nil, ErrNotOwned
+			}
+			return nil, nil, err
+		}
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO tasks(
 			user_id, conversation_id, request_id, task_text, scheduler, planner,
-			execution_mode, synthesis_mode, model_selection_json, delivery_mode, constraints_json, status
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
+			execution_mode, synthesis_mode, model_selection_json, rag_policy_json,
+			effective_rag_policy_json, delivery_mode, constraints_json, status
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'durable', ?, 'QUEUED')
 	`, task.UserID, task.ConversationID, task.RequestID, task.TaskText,
 		task.Scheduler, task.Planner, task.ExecutionMode, task.SynthesisMode,
-		string(modelSelectionJSON), string(constraintsJSON))
+		string(modelSelectionJSON), string(ragPolicyJSON), string(effectiveRagPolicyJSON),
+		string(constraintsJSON))
 	if err != nil {
-		return nil, nil, err
+		return replayOnDuplicate(err)
 	}
 	taskID, err := res.LastInsertId()
 	if err != nil {
@@ -116,6 +166,41 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 	if err != nil {
 		return nil, nil, err
 	}
+	// The QUEUED event commits with the task, job and idempotency ledger.
+	if err := appendDurableSnapshotTx(ctx, tx, taskID, "QUEUED", "QUEUED", executionID, 0); err != nil {
+		return nil, nil, err
+	}
+	// Duplicate requests race on the MySQL unique key: the losing transaction
+	// rolls back its temporary task/job, then returns the original task. A
+	// mismatched payload on the same key is rejected, never silently replayed.
+	if task.ClientRequestID != "" {
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO task_submission_keys(user_id, client_request_id, request_fingerprint, task_id)
+			VALUES(?, ?, ?, ?)
+		`, task.UserID, task.ClientRequestID, task.RequestFingerprint, taskID); err != nil {
+			return replayOnDuplicate(err)
+		}
+	}
+
+	if task.ConversationID != nil {
+		metadataJSON, marshalErr := json.Marshal(task.PendingUserMessageMetadata)
+		if marshalErr != nil {
+			return nil, nil, marshalErr
+		}
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO messages(conversation_id, role, content, status, request_id, metadata_json)
+			VALUES(?, 'user', ?, 'COMPLETED', ?, ?)
+		`, *task.ConversationID, task.TaskText, task.RequestID, string(metadataJSON)); err != nil {
+			return nil, nil, err
+		}
+		if _, err = tx.ExecContext(ctx, `
+			UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP(6),
+			updated_at = CURRENT_TIMESTAMP(6) WHERE id = ? AND user_id = ?
+		`, *task.ConversationID, task.UserID); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if err = tx.Commit(); err != nil {
 		return nil, nil, err
 	}
@@ -129,6 +214,45 @@ func (r *MySQL) CreateQueuedTaskAndRuntimeJob(
 		return nil, nil, err
 	}
 	return createdTask, job, nil
+}
+
+// runtimeJobByTaskID returns the original durable job after a duplicate submit.
+// A missing job is an invariant violation; it must not trigger a new enqueue.
+// LookupDurableSubmission is used before queue-capacity checks, so a transport
+// retry never fails merely because the ORIGINAL request filled the queue.
+// A retained key pointing to a deleted task fails closed (no second execution).
+func (r *MySQL) LookupDurableSubmission(ctx context.Context, uid int64, key string) (*model.Task, string, error) {
+	if key == "" {
+		return nil, "", nil
+	}
+	var taskID int64
+	var fingerprint string
+	err := r.db.QueryRowContext(ctx, `
+		SELECT task_id, request_fingerprint FROM task_submission_keys
+		WHERE user_id = ? AND client_request_id = ?
+	`, uid, key).Scan(&taskID, &fingerprint)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, "", nil
+	}
+	if err != nil {
+		return nil, "", err
+	}
+	task, err := r.TaskByID(ctx, uid, taskID)
+	if err != nil {
+		return nil, "", err
+	}
+	if task == nil {
+		return nil, "", ErrSubmissionConflict
+	}
+	return task, fingerprint, nil
+}
+
+func (r *MySQL) runtimeJobByTaskID(ctx context.Context, taskID int64) (*model.RuntimeJob, error) {
+	var id int64
+	if err := r.db.QueryRowContext(ctx, `SELECT id FROM runtime_jobs WHERE task_id = ?`, taskID).Scan(&id); err != nil {
+		return nil, err
+	}
+	return r.RuntimeJobByID(ctx, id)
 }
 
 func (r *MySQL) HeartbeatRuntimeWorker(ctx context.Context, worker model.RuntimeWorker) error {
@@ -518,6 +642,14 @@ func (r *MySQL) ClaimNextRuntimeJob(
 	if affected != 1 {
 		return nil, nil, ErrInvalidTaskState
 	}
+	var currentExecutionID string
+	var currentFence int64
+	if err = tx.QueryRowContext(ctx, `SELECT execution_id, fence_epoch FROM runtime_jobs WHERE id = ?`, jobID).Scan(&currentExecutionID, &currentFence); err != nil {
+		return nil, nil, err
+	}
+	if err = appendDurableSnapshotTx(ctx, tx, taskID, "RUNNING", "LEASED", currentExecutionID, currentFence); err != nil {
+		return nil, nil, err
+	}
 	if err = tx.Commit(); err != nil {
 		return nil, nil, err
 	}
@@ -700,6 +832,14 @@ func (r *MySQL) CancelRuntimeTask(ctx context.Context, uid, taskID int64) (*mode
 		WHERE id = ? AND status NOT IN ('COMPLETED','FAILED','CANCELED')
 	`, jobID)
 	if err != nil {
+		return nil, err
+	}
+	var currentExecutionID string
+	var currentFence int64
+	if err = tx.QueryRowContext(ctx, `SELECT execution_id, fence_epoch FROM runtime_jobs WHERE id = ?`, jobID).Scan(&currentExecutionID, &currentFence); err != nil {
+		return nil, err
+	}
+	if err = appendDurableSnapshotTx(ctx, tx, taskID, "CANCELED", "CANCELED", currentExecutionID, currentFence); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {

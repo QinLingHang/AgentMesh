@@ -61,11 +61,63 @@ func EnsureDurableRuntimeSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// A separate ledger avoids changing the existing task scanner. The key is
+	// scoped per user. Keep the ledger after a task is deleted, so a retry cannot
+	// execute an old request again (deliberately no task_id foreign key).
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS task_submission_keys (
+			user_id BIGINT NOT NULL,
+			client_request_id VARCHAR(64) NOT NULL,
+			request_fingerprint CHAR(64) NOT NULL,
+			task_id BIGINT NOT NULL,
+			created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+			PRIMARY KEY (user_id, client_request_id),
+			UNIQUE KEY uk_submission_task(task_id),
+			CONSTRAINT fk_submission_user FOREIGN KEY(user_id)
+				REFERENCES users(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+	`); err != nil {
+		return err
+	}
+
 	if err := ensureColumn(ctx, db, "tasks", "delivery_mode", `
 		ALTER TABLE tasks
 		ADD COLUMN delivery_mode VARCHAR(24) NOT NULL DEFAULT 'direct' AFTER synthesis_mode
 	`); err != nil {
 		return err
+	}
+
+	// P22: metadata-only durable task state journal. The sequence is a durable,
+	// globally monotonic replay cursor; filtering always uses the owned task ID.
+	if _, err := db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS durable_task_events (
+			sequence BIGINT NOT NULL AUTO_INCREMENT,
+			task_id BIGINT NOT NULL,
+			state_hash CHAR(64) NOT NULL,
+			task_status VARCHAR(32) NOT NULL,
+			job_status VARCHAR(32) NOT NULL,
+			fence_epoch BIGINT NOT NULL,
+			created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+			PRIMARY KEY(sequence),
+			UNIQUE KEY uk_durable_event_state(task_id, state_hash),
+			KEY idx_durable_event_replay(task_id, sequence),
+			CONSTRAINT fk_durable_event_task FOREIGN KEY(task_id)
+				REFERENCES tasks(id) ON DELETE CASCADE
+		) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+	`); err != nil {
+		return err
+	}
+	// ROUND5: append metadata-only worker phases to the *same* journal so SSE
+	// state and phase events share a monotonic cursor. Existing rows default to
+	// state, and upgrades never drop or rewrite historical events.
+	for _, column := range []struct{ name, ddl string }{
+		{"event_type", "ALTER TABLE durable_task_events ADD COLUMN event_type VARCHAR(16) NOT NULL DEFAULT 'state'"},
+		{"phase", "ALTER TABLE durable_task_events ADD COLUMN phase VARCHAR(32) NOT NULL DEFAULT ''"},
+		{"phase_status", "ALTER TABLE durable_task_events ADD COLUMN phase_status VARCHAR(16) NOT NULL DEFAULT ''"},
+	} {
+		if err := ensureColumn(ctx, db, "durable_task_events", column.name, column.ddl); err != nil {
+			return err
+		}
 	}
 
 	return nil

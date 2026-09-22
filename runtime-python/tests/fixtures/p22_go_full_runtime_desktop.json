@@ -1,0 +1,76 @@
+{
+  "user_id": 7,
+  "request_id": "contract-desktop",
+  "task": "请查看授权测试目录里有哪些文件，并告诉我文件名",
+  "scheduler": "greedy",
+  "planner": "heuristic",
+  "executionMode": "auto",
+  "synthesisMode": "auto",
+  "constraints": {
+    "maxLatencyMs": 8000,
+    "maxCost": 0.15,
+    "minQuality": 0.8
+  },
+  "ragPolicy": {
+    "mode": "AUTO",
+    "scopes": [],
+    "selectedKnowledgeBaseIds": []
+  },
+  "effectiveRagPolicy": {
+    "mode": "AUTO",
+    "allowedScopes": [],
+    "allowedKnowledgeBaseIds": [],
+    "explicitlySelectedIds": [],
+    "policyVersion": "rag-v1.1"
+  },
+  "agents": [
+    {
+      "id": 1,
+      "userId": 0,
+      "name": "GeneralAgent",
+      "description": "",
+      "endpoint": "internal://general",
+      "protocol": "internal",
+      "capabilities": [
+        "general"
+      ],
+      "provider": "",
+      "modelName": "",
+      "qualityScore": 0,
+      "avgLatencyMs": 0,
+      "avgCost": 0,
+      "successRate": 0,
+      "failureRate": 0,
+      "currentLoad": 0,
+      "status": "",
+      "createdAt": "0001-01-01T00:00:00Z",
+      "updatedAt": "0001-01-01T00:00:00Z",
+      "capabilityProfiles": []
+    }
+  ],
+  "tools": [
+    {
+      "id": 1,
+      "userId": 0,
+      "name": "local.fs.list",
+      "description": "",
+      "protocol": "internal",
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "riskLevel": "low",
+      "requiresConfirmation": false,
+      "enabled": true,
+      "createdAt": "0001-01-01T00:00:00Z",
+      "updatedAt": "0001-01-01T00:00:00Z"
+    }
+  ],
+  "modelSelection": {
+    "mode": "auto"
+  }
+}

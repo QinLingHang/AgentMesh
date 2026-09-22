@@ -283,6 +283,36 @@ class InteractiveStreamRequest(BaseModel):
     attachments: list[RuntimeAttachment] = Field(default_factory=list, max_length=6)
 
 
+
+
+class RagPolicy(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["OFF", "AUTO", "ON"] = "AUTO"
+    scopes: list[Literal["PROJECT", "USER_GLOBAL"]] = Field(default_factory=lambda: ["PROJECT"])
+    selected_knowledge_base_ids: list[int] = Field(default_factory=list, alias="selectedKnowledgeBaseIds")
+
+
+class EffectiveRagPolicy(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    mode: Literal["OFF", "AUTO", "ON"] = "AUTO"
+    allowed_scopes: list[Literal["PROJECT", "USER_GLOBAL"]] = Field(default_factory=list, alias="allowedScopes")
+    allowed_knowledge_base_ids: list[int] = Field(default_factory=list, alias="allowedKnowledgeBaseIds")
+    explicitly_selected_ids: list[int] = Field(default_factory=list, alias="explicitlySelectedIds")
+    policy_version: str = Field(default="rag-v1.1", alias="policyVersion")
+
+
+class KnowledgeCatalogItem(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    knowledge_base_id: int = Field(alias="knowledgeBaseId")
+    name: str = ""
+    description: str = ""
+    scope: Literal["PROJECT", "USER_GLOBAL"]
+    project_id: int | None = Field(default=None, alias="projectId")
+    accessible: bool = True
+
 class RuntimeRequest(
     BaseModel
 ):
@@ -363,6 +393,18 @@ class RuntimeRequest(
 
     constraints: TaskConstraints = Field(
         default_factory=TaskConstraints
+    )
+
+    rag_policy: RagPolicy = Field(default_factory=RagPolicy, alias="ragPolicy")
+
+    effective_rag_policy: EffectiveRagPolicy | None = Field(
+        default=None,
+        alias="effectiveRagPolicy",
+    )
+
+    knowledge_catalog: list[KnowledgeCatalogItem] = Field(
+        default_factory=list,
+        alias="knowledgeCatalog",
     )
 
     agents: list[AgentProfile]

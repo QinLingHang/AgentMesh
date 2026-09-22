@@ -14,7 +14,7 @@ func registerGovernanceRoutes(protected *gin.RouterGroup, deps Dependencies) {
 	protected.PUT("/me/model-services/:serviceId", deps.GovernanceHandler.UpdateUserModelService)
 	protected.DELETE("/me/model-services/:serviceId", deps.GovernanceHandler.DeleteUserModelService)
 	protected.GET("/costs/summary", deps.GovernanceHandler.UserCostSummary)
-	protected.GET("/tasks/:taskId/cost", deps.GovernanceHandler.RunCost)
+	protected.GET("/tasks/:id/cost", deps.GovernanceHandler.RunCost)
 	protected.GET("/projects/:id/governance", deps.GovernanceHandler.Overview)
 	protected.GET("/projects/:id/costs", deps.GovernanceHandler.ProjectCostSummary)
 	protected.POST("/projects/:id/members", deps.GovernanceHandler.AddMember)

@@ -22,6 +22,15 @@ func registerRateLimitedTaskRoutes(
 	deps Dependencies,
 ) {
 	rateLimited.POST(
+		"/tasks/submit-stream",
+		func(c *gin.Context) { deps.TaskHandler.RunAutoStream(c, deps.DurableRuntimeHandler) },
+	)
+	rateLimited.POST(
+		"/tasks/execution-route",
+		deps.TaskHandler.DecideRoute,
+	)
+
+	rateLimited.POST(
 		"/tasks/run",
 		deps.TaskHandler.Run,
 	)

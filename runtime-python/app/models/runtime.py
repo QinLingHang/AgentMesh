@@ -83,6 +83,36 @@ class ResolvedModelRuntime:
             )
         return response
 
+    async def generate_stream(
+        self,
+        prompt: str,
+        on_event: ModelEventHandler | None = None,
+        on_delta: Any = None,
+    ) -> str:
+        request = ModelRequest(
+            model=self.model,
+            messages=[
+                ModelMessage(role="system", content="You are an AgentMesh Runtime execution model."),
+                ModelMessage(role="user", content=prompt),
+            ],
+            temperature=0.2,
+        )
+        try:
+            response = await self.gateway.generate_stream(request, on_event, on_delta)
+        except Exception:
+            if self.router is not None:
+                self.router.performance.record_execution(
+                    self.runtime_id, self.plugin, success=False, latency_ms=0, cost=None,
+                )
+            raise
+        self.last_response = response
+        if self.router is not None:
+            self.router.performance.record_execution(
+                self.runtime_id, self.plugin, success=True,
+                latency_ms=response.latency_ms, cost=response.estimated_cost,
+            )
+        return response.content
+
     def record_quality(self, quality: float) -> None:
         if self.router is not None:
             self.router.performance.record_quality(

@@ -323,8 +323,24 @@ export type SynthesisMode =
   | "never";
 
 export type DeliveryMode =
+  | "auto"
   | "direct"
   | "durable";
+
+export type RagMode =
+  | "OFF"
+  | "AUTO"
+  | "ON";
+
+export type RagScope =
+  | "PROJECT"
+  | "USER_GLOBAL";
+
+export type RagPolicy = {
+  mode: RagMode;
+  scopes: RagScope[];
+  selectedKnowledgeBaseIds?: number[];
+};
 
 // =========================================================
 // Runtime Lifecycle

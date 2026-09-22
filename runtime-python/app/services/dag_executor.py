@@ -82,6 +82,7 @@ class DAGExecutor:
             DAGConditionEvaluator | None
         ) = None,
         initial_outputs: dict[str, Any] | None = None,
+        blocked_node_reasons: dict[str, str] | None = None,
     ) -> DAGExecutionResult:
         # =================================================
         # Node index
@@ -250,6 +251,30 @@ class DAGExecutor:
                 payload
             )
 
+        blocked_node_reasons = dict(blocked_node_reasons or {})
+        if any(node_id not in nodes_by_id or nodes_by_id[node_id].kind != "agent"
+               for node_id in blocked_node_reasons):
+            raise DAGExecutionError("invalid blocked knowledge step node")
+        if any(node_id in outputs for node_id in blocked_node_reasons):
+            raise DAGExecutionError("blocked knowledge step cannot have carried output")
+        if any(nodes_by_id[node_id].status == "completed"
+               for node_id in blocked_node_reasons):
+            raise DAGExecutionError("blocked knowledge step cannot be previously completed")
+        # Propagate the evidence gate through the *compiled* DAG too. A plan
+        # dependency and its compiled edge must agree before we run anything;
+        # even a malformed caller must not execute a downstream Agent of a
+        # blocked knowledge step. Non-agent synthesis is handled separately.
+        changed = True
+        while changed:
+            changed = False
+            for node in dag.nodes:
+                if (node.kind == "agent" and node.id not in blocked_node_reasons
+                        and incoming[node.id].intersection(blocked_node_reasons)):
+                    if node.id in outputs or node.status == "completed":
+                        raise DAGExecutionError("blocked downstream node has carried output")
+                    blocked_node_reasons[node.id] = "upstream_required_evidence_unavailable"
+                    changed = True
+
         # =================================================
         # Dependency Loop
         # =================================================
@@ -297,6 +322,18 @@ class DAGExecutor:
                 node = nodes_by_id[
                     node_id
                 ]
+
+                # Knowledge evidence is a hard pre-execution gate. A skipped
+                # node is resolved for DAG termination but its dependants must
+                # also be explicitly blocked by the caller, never executed.
+                if node_id in blocked_node_reasons:
+                    node.status = "skipped"
+                    pending.remove(node_id)
+                    resolved.add(node_id)
+                    skipped_nodes.append(node_id)
+                    emit("DAG Node Blocked: Missing Knowledge", "skipped", node,
+                         reason=blocked_node_reasons[node_id])
+                    continue
 
                 upstream_outputs = {
                     dependency_id:

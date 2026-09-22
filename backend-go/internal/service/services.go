@@ -1804,7 +1804,8 @@ func (s *TaskService) resolveRequestModelRuntimePool(
 //
 
 type RunTaskInput struct {
-	ConversationID *int64
+	ClientRequestID string
+	ConversationID  *int64
 
 	Task string
 
@@ -1820,7 +1821,57 @@ type RunTaskInput struct {
 
 	AttachmentIDs []int64
 
+	RagPolicy model.RagPolicy
+
 	Constraints model.TaskConstraints
+}
+
+// DeliveryDecision is intentionally independent from Agent capability routing.
+// It chooses the reliability/transport strategy, not which Agent or Tool will
+// execute the task.
+type DeliveryDecision struct {
+	Mode   string `json:"mode"`
+	Reason string `json:"reason"`
+}
+
+func (s *TaskService) DecideDeliveryMode(in RunTaskInput) DeliveryDecision {
+	task := strings.TrimSpace(in.Task)
+	// Explicit reliability intent is the strongest deterministic signal.
+	if in.Constraints.RetryOnWorkerLoss {
+		return DeliveryDecision{Mode: "durable", Reason: "retry_on_worker_loss"}
+	}
+	// Multiple attachments usually imply a longer ingestion/analysis lifecycle
+	// that benefits from queue persistence and browser-refresh recovery.
+	if len(in.AttachmentIDs) >= 3 {
+		return DeliveryDecision{Mode: "durable", Reason: "multi_attachment"}
+	}
+	// Explicit background/recovery intent and broad multi-step repository work
+	// require an execution independent from the browser connection. These
+	// transparent hints are intentionally conservative; the chosen route is
+	// recorded for observability and can be overridden by the legacy endpoints.
+	lower := strings.ToLower(task)
+	for _, phrase := range []string{
+		"后台运行", "后台执行", "断线继续", "关闭页面继续", "耗时任务",
+		"整个项目", "整个仓库", "全仓库", "全量测试", "完整回归", "完整测试",
+		"批量修改", "批量处理", "多步骤执行", "全部文件", "全部测试",
+		"run in background", "keep running", "whole repository", "entire repository",
+		"full regression", "all tests", "batch processing", "batch update",
+	} {
+		if strings.Contains(lower, phrase) {
+			return DeliveryDecision{Mode: "durable", Reason: "long_running_intent"}
+		}
+	}
+	// Very large task bodies are treated conservatively without introducing an
+	// extra model call just to choose the transport.
+	if len([]rune(task)) >= 4000 {
+		return DeliveryDecision{Mode: "durable", Reason: "large_request"}
+	}
+	// A latency budget at or above 30s signals that the caller accepts a longer
+	// task lifecycle. Default interactive budgets remain direct.
+	if in.Constraints.MaxLatencyMS >= 30000 {
+		return DeliveryDecision{Mode: "durable", Reason: "long_latency_budget"}
+	}
+	return DeliveryDecision{Mode: "direct", Reason: "interactive_default"}
 }
 
 func isContinuationTurn(task string) bool {
@@ -2030,6 +2081,15 @@ func (s *TaskService) RunInteractiveStream(
 	if in.Task == "" {
 		return nil, ErrInvalidInput
 	}
+	// Network retries must resolve to the original task before preflight and
+	// before any tool/model side effects. Compare the caller's raw intent.
+	clientKey, requestFingerprint, identityErr := directRequestIdentity(in)
+	if identityErr != nil {
+		return nil, identityErr
+	}
+	if replay, replayErr := s.findDirectReplay(ctx, uid, clientKey, requestFingerprint); replayErr != nil || replay != nil {
+		return replay, replayErr
+	}
 	if in.Scheduler == "" {
 		in.Scheduler = "adaptive"
 	}
@@ -2098,30 +2158,28 @@ func (s *TaskService) RunInteractiveStream(
 	in.ModelSelection = normalizedSelection
 
 	requestID := uuid.NewString()
-	if in.ConversationID != nil {
-		if _, err := s.messages.CreateMessage(ctx, uid, *in.ConversationID, "user", in.Task, "COMPLETED", requestID, map[string]any{
-			"runtimePhase": "interactive_stream",
-			"attachments":  attachmentMeta,
-		}); err != nil {
-			if errors.Is(err, repository.ErrNotOwned) {
-				return nil, ErrNotFound
-			}
-			return nil, err
-		}
-	}
-
-	task, err := s.tasks.CreateTask(ctx, model.Task{
+	task, replayed, err := s.insertDirectTask(ctx, model.Task{
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID, TaskText: in.Task,
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		ModelSelection: in.ModelSelection,
+		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy,
+		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
+		PendingUserMessageMetadata: map[string]any{"runtimePhase": "interactive_stream", "attachments": attachmentMeta},
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
 	}
+	if replayed {
+		return replayDirectTask(task), nil
+	}
 
 	if emit != nil {
 		if err := emit(runtimeclient.InteractiveStreamEvent{Type: "meta", Mode: "interactive_stream"}); err != nil {
-			_ = s.tasks.FailTask(ctx, uid, task.ID, err.Error(), 0)
+			// The browser may have disconnected and canceled ctx. Finalize the
+			// already-committed task with a short independent DB context instead
+			// of leaving an unrecoverable RUNNING row on every network abort.
+			cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+			_ = s.tasks.FailTask(cleanupCtx, uid, task.ID, err.Error(), 0)
 			return nil, err
 		}
 	}
@@ -2155,12 +2213,16 @@ func (s *TaskService) RunInteractiveStream(
 	})
 	elapsed := time.Since(started).Milliseconds()
 	if streamErr != nil {
-		_ = s.tasks.FailTask(ctx, uid, task.ID, streamErr.Error(), elapsed)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = s.tasks.FailTask(cleanupCtx, uid, task.ID, streamErr.Error(), elapsed)
 		return nil, streamErr
 	}
 
-	finalAnswer := strings.TrimSpace(answer.String())
-	if finalAnswer == "" {
+	// Preserve the exact token text displayed in the browser. Trimming would
+	// silently make the persisted answer differ from the streamed deltas.
+	finalAnswer := answer.String()
+	if strings.TrimSpace(finalAnswer) == "" {
 		finalAnswer = "模型没有返回可展示的内容，请重试。"
 	}
 	cost := 0.0
@@ -2558,6 +2620,16 @@ func (s *TaskService) Run(
 		return nil, ErrInvalidInput
 	}
 
+	// Resolve the original request identity before runtime policy normalization.
+	// The idempotency ledger remains authoritative across reconnects.
+	clientKey, requestFingerprint, identityErr := directRequestIdentity(in)
+	if identityErr != nil {
+		return nil, identityErr
+	}
+	if replay, replayErr := s.findDirectReplay(ctx, uid, clientKey, requestFingerprint); replayErr != nil || replay != nil {
+		return replay, replayErr
+	}
+
 	in.Scheduler = strings.ToLower(
 		strings.TrimSpace(
 			in.Scheduler,
@@ -2728,7 +2800,21 @@ func (s *TaskService) Run(
 	in.ModelSelection = normalizedSelection
 
 	// =====================================================
-	// 4.2 Authoritative recent conversation history
+	// 4.2 Effective RAG policy
+	//
+	// Go is authoritative for what knowledge this request may access. Python
+	// may decide whether/where to retrieve only inside this filtered catalog.
+	// =====================================================
+	normalizedRagPolicy, effectiveRagPolicy, knowledgeCatalog, err := s.resolveEffectiveRagPolicy(
+		ctx, uid, in.ConversationID, in.RagPolicy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	in.RagPolicy = normalizedRagPolicy
+
+	// =====================================================
+	// 4.3 Authoritative recent conversation history
 	//
 	// The Go/MySQL conversation log contains turns produced by both the
 	// low-latency interactive path and the full Agent Runtime.  Send the same
@@ -2754,67 +2840,20 @@ func (s *TaskService) Run(
 
 	requestID := uuid.NewString()
 
-	// =====================================================
-	// 6. Persist Initial User Message
-	// =====================================================
-
-	if in.ConversationID != nil {
-		_, err := s.messages.CreateMessage(
-			ctx,
-			uid,
-			*in.ConversationID,
-			"user",
-			in.Task,
-			"COMPLETED",
-			requestID,
-			map[string]any{
-				"runtimePhase": "initial",
-				"attachments":  attachmentMeta,
-			},
-		)
-
-		if errors.Is(
-			err,
-			repository.ErrNotOwned,
-		) {
-			return nil, ErrNotFound
-		}
-
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// =====================================================
-	// 7. Create Long-lived Task
-	// =====================================================
-
-	task, err := s.tasks.CreateTask(
-		ctx,
-		model.Task{
-			UserID: uid,
-
-			ConversationID: in.ConversationID,
-
-			RequestID: requestID,
-
-			TaskText: in.Task,
-
-			Scheduler: in.Scheduler,
-
-			Planner: in.Planner,
-
-			ExecutionMode: in.ExecutionMode,
-
-			SynthesisMode: in.SynthesisMode,
-
-			ModelSelection: in.ModelSelection,
-		},
-		in.Constraints,
-	)
-
+	// The user message, task and submission key must commit atomically. A
+	// concurrent duplicate can replay, but cannot start a second execution.
+	task, replayed, err := s.insertDirectTask(ctx, model.Task{
+		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID, TaskText: in.Task,
+		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
+		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy, EffectiveRagPolicy: effectiveRagPolicy,
+		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
+		PendingUserMessageMetadata: map[string]any{"runtimePhase": "initial", "attachments": attachmentMeta},
+	}, in.Constraints)
 	if err != nil {
 		return nil, err
+	}
+	if replayed {
+		return replayDirectTask(task), nil
 	}
 
 	// =====================================================
@@ -2908,6 +2947,12 @@ func (s *TaskService) Run(
 			ModelPool: modelPool,
 
 			ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+
+			RagPolicy: in.RagPolicy,
+
+			EffectiveRagPolicy: effectiveRagPolicy,
+
+			KnowledgeCatalog: knowledgeCatalog,
 
 			Attachments: runtimeAttachments,
 		},
@@ -3471,6 +3516,20 @@ func (s *TaskService) Resume(
 		}
 	}
 
+	// Revalidate knowledge authorization at resume time. The persisted policy
+	// snapshot remains an upper bound; live revocation wins, newly granted
+	// knowledge is not silently added to the suspended task.
+	_, liveEffectiveRagPolicy, liveKnowledgeCatalog, ragErr := s.resolveEffectiveRagPolicy(
+		ctx, uid, task.ConversationID, task.RagPolicy,
+	)
+	if ragErr != nil {
+		restoreSuspension()
+		return nil, ragErr
+	}
+	effectiveRagPolicy, knowledgeCatalog := constrainEffectiveRagPolicyToSnapshot(
+		task.EffectiveRagPolicy, liveEffectiveRagPolicy, liveKnowledgeCatalog,
+	)
+
 	modelPool, projectModel, normalizedSelection, err := s.resolveRequestModelRuntimePool(ctx, uid, projectRuntimeContext, task.ModelSelection)
 	if err != nil {
 		restoreSuspension()
@@ -3524,6 +3583,12 @@ func (s *TaskService) Resume(
 			ModelPool: modelPool,
 
 			ModelSelection: runtimeclient.ModelSelection{Mode: task.ModelSelection.Mode, ServiceID: task.ModelSelection.ServiceID},
+
+			RagPolicy: task.RagPolicy,
+
+			EffectiveRagPolicy: effectiveRagPolicy,
+
+			KnowledgeCatalog: knowledgeCatalog,
 		},
 	)
 

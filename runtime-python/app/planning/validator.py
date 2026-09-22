@@ -108,6 +108,8 @@ class PlanValidator:
                     dependsOn=dependencies,
                     optional=bool(step.optional),
                     condition=step.condition,
+                    knowledgeDependency=step.knowledge_dependency,
+                    forbiddenActions=list(dict.fromkeys(step.forbidden_actions)),
                 )
             )
 

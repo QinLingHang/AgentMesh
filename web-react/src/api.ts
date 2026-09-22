@@ -1142,6 +1142,9 @@ export const deleteConversationAttachment = (conversationId: number, attachmentI
 export type RunTaskRequest = {
   conversationId: number | null;
 
+  // The same key must survive a transport/auth retry of one user action.
+  clientRequestId?: string;
+
   task: string;
 
   scheduler: Scheduler;
@@ -1153,6 +1156,8 @@ export type RunTaskRequest = {
   synthesisMode: SynthesisMode;
 
   deliveryMode: DeliveryMode;
+
+  ragPolicy?: import("./types").RagPolicy;
 
   modelSelection?: import("./types").ModelSelection;
 
@@ -1175,9 +1180,12 @@ export type RunTaskStreamCallbacks = {
 
 type RunTaskStreamEvent = {
   type?: string;
+  mode?: "direct" | "durable";
+  reason?: string;
   delta?: string;
   message?: string;
   phase?: string;
+  trace?: { title?: string; status?: string; detail?: string; kind?: string; elapsedMs?: number };
   result?: RunResult;
 };
 
@@ -1186,21 +1194,29 @@ export async function runTaskStream(
   callbacks: RunTaskStreamCallbacks = {},
   retry = true,
 ): Promise<RunResult> {
+  const clientRequestId = input.clientRequestId ?? crypto.randomUUID();
   const headers = new Headers({ "Content-Type": "application/json; charset=utf-8" });
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
 
-  const response = await fetch(`${BASE}/api/tasks/run-stream`, {
+  // AUTO is decided and submitted atomically by Go. The legacy direct
+  // endpoint stays available to older clients and explicit overrides.
+  const endpoint = input.deliveryMode === "auto"
+    ? "/api/tasks/submit-stream"
+    : "/api/tasks/run-stream";
+  const response = await fetch(`${BASE}${endpoint}`, {
     method: "POST",
     credentials: "include",
     headers,
     body: JSON.stringify({
       conversationId: input.conversationId,
+      clientRequestId,
       task: input.task,
       scheduler: input.scheduler,
       planner: input.planner,
       executionMode: input.executionMode,
       synthesisMode: input.synthesisMode,
       modelSelection: input.modelSelection ?? { mode: "auto" },
+      ragPolicy: input.ragPolicy ?? { mode: "AUTO", scopes: ["PROJECT"], selectedKnowledgeBaseIds: [] },
       attachmentIds: input.attachmentIds ?? [],
       constraints: {
         maxLatencyMs: input.maxLatencyMs,
@@ -1212,7 +1228,7 @@ export async function runTaskStream(
   });
 
   if (response.status === 401 && retry && (await refreshAccess())) {
-    return runTaskStream(input, callbacks, false);
+    return runTaskStream({ ...input, clientRequestId }, callbacks, false);
   }
   if (!response.ok) throw await readApiError(response);
   if (!response.body) throw new ApiError("服务器没有返回流式响应", 502, null);
@@ -1240,7 +1256,13 @@ export async function runTaskStream(
         continue;
       }
       if (event.type === "delta" && event.delta) callbacks.onDelta?.(event.delta);
+      if (event.type === "route" && event.mode === "durable") {
+        callbacks.onStatus?.("任务已进入可靠队列，后台继续执行…");
+      }
       if (event.type === "status" && event.message) callbacks.onStatus?.(event.message);
+      if (event.type === "trace" && event.trace?.title) {
+        callbacks.onStatus?.(event.trace.title);
+      }
       if (event.type === "ready") callbacks.onStatus?.("模型已连接，正在生成回答…");
       if (event.type === "error") {
         const message = event.message || "任务执行失败";
@@ -1270,6 +1292,113 @@ export async function runTaskStream(
   if (!finalResult) throw new ApiError("流式响应意外结束，请重试。", 502, null);
   return finalResult;
 }
+
+// P22: one owner-scoped replay cursor for committed task states and sanitized
+// worker phases. Never includes prompts, raw tool payloads or model deltas.
+export type DurableTaskStateEvent = {
+  sequence: number;
+  taskId: number;
+  status: string;
+  jobStatus: string;
+  fenceEpoch: number;
+  eventType?: "state" | "trace";
+  phase?: string;
+  phaseStatus?: "running" | "completed" | "error" | "skipped";
+  createdAt: string;
+};
+
+export async function subscribeDurableTaskEvents(
+  taskId: number,
+  after: number,
+  onEvent: (event: DurableTaskStateEvent) => void,
+  signal: AbortSignal,
+  onConnected?: () => void,
+  retryAuth = true,
+): Promise<{ cursor: number; terminal: boolean }> {
+  const headers = new Headers({ Accept: "text/event-stream", "Last-Event-ID": String(after) });
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  const response = await fetch(`${BASE}/api/tasks/${taskId}/events`, {
+    method: "GET", credentials: "include", headers, signal,
+  });
+  if (response.status === 401 && retryAuth && (await refreshAccess())) {
+    return subscribeDurableTaskEvents(taskId, after, onEvent, signal, onConnected, false);
+  }
+  if (!response.ok) throw await readApiError(response);
+  if (!response.body) throw new ApiError("任务事件订阅不可用", 502, null);
+  onConnected?.();
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let cursor = after;
+  let terminal = false;
+  const terminalStatuses = new Set([
+    "COMPLETED", "ERROR", "FAILED", "CANCELED", "INPUT_REQUIRED", "AUTH_REQUIRED",
+  ]);
+  const acceptFrame = (frame: string) => {
+    let id: number | null = null;
+    let kind = "";
+    let data = "";
+    for (const line of frame.split("\n")) {
+      if (line.startsWith("id:")) {
+        const parsed = Number(line.slice(3).trim());
+        if (Number.isSafeInteger(parsed) && parsed > 0) id = parsed;
+      }
+      if (line.startsWith("event:")) kind = line.slice(6).trim();
+      if (line.startsWith("data:")) data += line.slice(5).trimStart();
+    }
+    if (kind === "access_lost") throw new ApiError("任务访问权限或事件服务已失效", 403, null);
+    if (kind !== "task" || id == null || !data || id <= cursor) return;
+    const event = JSON.parse(data) as DurableTaskStateEvent;
+    if (event.sequence !== id || event.taskId !== taskId) return;
+    cursor = id;
+    terminal = terminalStatuses.has(event.status);
+    onEvent(event);
+  };
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+      let boundary = buffer.indexOf("\n\n");
+      while (boundary !== -1) {
+        acceptFrame(buffer.slice(0, boundary));
+        buffer = buffer.slice(boundary + 2);
+        boundary = buffer.indexOf("\n\n");
+      }
+    }
+    if (buffer.trim()) acceptFrame(buffer);
+    return { cursor, terminal };
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+export type TaskExecutionRoute = {
+  mode: "direct" | "durable";
+  reason: string;
+};
+
+export const decideTaskExecutionRoute = (input: RunTaskRequest) =>
+  request<TaskExecutionRoute>("/api/tasks/execution-route", {
+    method: "POST",
+    body: JSON.stringify({
+      conversationId: input.conversationId,
+      task: input.task,
+      scheduler: input.scheduler,
+      planner: input.planner,
+      executionMode: input.executionMode,
+      synthesisMode: input.synthesisMode,
+      modelSelection: input.modelSelection ?? { mode: "auto" },
+      ragPolicy: input.ragPolicy ?? { mode: "AUTO", scopes: ["PROJECT"], selectedKnowledgeBaseIds: [] },
+      attachmentIds: input.attachmentIds ?? [],
+      constraints: {
+        maxLatencyMs: input.maxLatencyMs,
+        maxCost: input.maxCost,
+        minQuality: input.minQuality,
+        retryOnWorkerLoss: input.retryOnWorkerLoss ?? false,
+      },
+    }),
+  });
 
 export const runTask = (
   input: RunTaskRequest,
@@ -1301,6 +1430,9 @@ export const runTask = (
 
         modelSelection:
           input.modelSelection ?? { mode: "auto" },
+
+        ragPolicy:
+          input.ragPolicy ?? { mode: "AUTO", scopes: ["PROJECT"], selectedKnowledgeBaseIds: [] },
 
         attachmentIds:
           input.attachmentIds ?? [],

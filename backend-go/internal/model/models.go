@@ -343,7 +343,12 @@ type TaskApproval struct {
 // =========================================================
 
 type Task struct {
-	ID int64 `json:"id"`
+	// Durable submission identity and fingerprint are repository-internal;
+	// the worker must never receive these values through the Task JSON.
+	ClientRequestID            string         `json:"-"`
+	RequestFingerprint         string         `json:"-"`
+	PendingUserMessageMetadata map[string]any `json:"-"`
+	ID                         int64          `json:"id"`
 
 	UserID int64 `json:"userId"`
 
@@ -389,6 +394,10 @@ type Task struct {
 	SynthesisMode string `json:"synthesisMode"`
 
 	ModelSelection ModelSelection `json:"modelSelection"`
+
+	RagPolicy RagPolicy `json:"ragPolicy"`
+
+	EffectiveRagPolicy EffectiveRagPolicy `json:"effectiveRagPolicy"`
 
 	// direct keeps the historical synchronous request path. durable is P8's
 	// queued/leased worker path and is persisted with the task.

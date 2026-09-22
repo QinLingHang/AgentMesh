@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from app.mcp.contracts import MCPServerDefinition
     from app.schemas import AgentProfile
     from app.tools.contracts import ToolDefinition
+    from app.semantics.contracts import TaskSemanticIntent
 
 
 class CapabilityKind(str, Enum):
@@ -1170,6 +1171,21 @@ def _expand_desktop_dependencies(selected: set[str], available: set[str]) -> Non
                 selected.add(dependency)
 
 
+
+def _tool_is_forbidden(name: str, semantic: "TaskSemanticIntent | None") -> bool:
+    """Advisory task-negation filter; executor authorization remains mandatory."""
+    if semantic is None:
+        return False
+    forbidden = {value.casefold() for value in semantic.forbidden_actions}
+    lowered = name.casefold()
+    return bool(
+        ("refund" in forbidden and "refund" in lowered)
+        or ("cancel_order" in forbidden and "cancel" in lowered and "order" in lowered)
+        or ("delete" in forbidden and any(t in lowered for t in ("delete", "remove", "drop")))
+        or ("modify" in forbidden and any(t in lowered for t in ("write", "edit", "update", "modify")))
+        or ("write" in forbidden and any(t in lowered for t in ("write", "create", "update", "edit")))
+    )
+
 def discover_capabilities(
     task: str,
     *,
@@ -1177,6 +1193,7 @@ def discover_capabilities(
     mcp_servers: Iterable[MCPServerDefinition] = (),
     agents: Iterable[AgentProfile] = (),
     has_attachments: bool = False,
+    semantic_intent: "TaskSemanticIntent | None" = None,
     max_tools: int = 8,
     max_mcp_servers: int = 3,
     max_skills: int = 4,
@@ -1193,12 +1210,12 @@ def discover_capabilities(
     selected_tool_names: set[str] = {
         item.name
         for item in tool_candidates[: max(1, max_tools)]
-        if item.score >= 0.30
+        if item.score >= 0.30 and not _tool_is_forbidden(item.name, semantic_intent)
     }
 
     if not selected_tool_names and tool_candidates:
         best = tool_candidates[0]
-        if best.name.startswith("local.") and best.score >= 0.24:
+        if best.name.startswith("local.") and best.score >= 0.24 and not _tool_is_forbidden(best.name, semantic_intent):
             selected_tool_names.add(best.name)
 
     available_names = {tool.name for tool in enabled_tools}
@@ -1211,18 +1228,6 @@ def discover_capabilities(
         for item in mcp_candidates[: max(1, max_mcp_servers)]
         if item.score >= 0.28
     ]
-
-    if (
-        not selected_mcp_ids
-        and len(enabled_mcp) == 1
-        and _contains_any(task, _EXTERNAL_ACTION_SIGNALS)
-        and not _is_explanatory_only(task)
-    ):
-        # When exactly one governed connector is available, an explicit
-        # external-data/action intent may use it as a bounded fallback. Never
-        # fan out to multiple unrelated MCP servers merely because the user
-        # asked for an external action.
-        selected_mcp_ids = [enabled_mcp[0].id]
 
     skill_candidates = _skill_candidates(task, agents)
     skill_candidates.sort(key=lambda item: (-item.score, item.name.casefold(), item.source.casefold()))
@@ -1240,7 +1245,24 @@ def discover_capabilities(
             break
 
     knowledge = _knowledge_candidate(task, has_attachments=has_attachments)
-    use_project_knowledge = knowledge.score >= 0.38
+    if semantic_intent is None:
+        # Standalone V4.1 callers do not pass a semantic result. Derive it from
+        # the same V1.1 analyzer; never make omission mean "knowledge disabled".
+        # This signal is descriptive only and MUST NOT authorize retrieval.
+        from app.semantics import analyze_task_semantics
+
+        semantic_intent = analyze_task_semantics(task, has_attachments=has_attachments)
+    # A named project's implementation or a concrete personal document may
+    # need scoped knowledge without explicitly saying "knowledge base". The
+    # score is NOT an authorization: Engine selects ONLY Go-authorized catalog
+    # IDs and fails closed if the authorized catalog is empty.
+    use_project_knowledge = bool(
+        semantic_intent.rag_preference.value != "DISABLE"
+        and (
+            semantic_intent.knowledge_dependency.value == "REQUIRED"
+            or knowledge.score >= 0.40
+        )
+    )
 
     selected_tool_lookup = {name.casefold() for name in selected_tool_names}
     selected_mcp_lookup = {str(value) for value in selected_mcp_ids}
@@ -1264,7 +1286,7 @@ def discover_capabilities(
     selected_scores = [item.score for item in candidates if item.selected]
     confidence = max(selected_scores, default=0.0)
     if selected_tool_names or selected_mcp_ids or selected_skill_names or use_project_knowledge:
-        reason = "relevant capabilities were discovered from the request-scoped catalog"
+        reason = "request semantics suggest relevant capabilities; execution and retrieval require separate authorization"
     else:
         reason = "no request-scoped capability exceeded the relevance threshold; use base model"
 
@@ -1283,6 +1305,7 @@ def discover_mcp_tools(
     task: str,
     tools: Iterable[ToolDefinition],
     *,
+    semantic_intent: "TaskSemanticIntent | None" = None,
     max_tools: int = 6,
 ) -> CapabilityDiscoveryResult:
     candidates = [
@@ -1295,11 +1318,11 @@ def discover_mcp_tools(
     selected = [
         item.name
         for item in candidates[: max(1, max_tools)]
-        if item.score >= 0.25
+        if item.score >= 0.25 and not _tool_is_forbidden(item.name, semantic_intent)
     ]
 
-    if not selected and 0 < len(candidates) <= 3:
-        selected = [item.name for item in candidates]
+    # An MCP server exposing only a few tools is not evidence that its tools
+    # match the request. Never widen discovery solely because the list is small.
 
     selected_lookup = {name.casefold() for name in selected}
     marked = [_mark(item, item.name.casefold() in selected_lookup) for item in candidates]

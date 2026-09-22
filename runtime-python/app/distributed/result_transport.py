@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -322,7 +323,25 @@ class DurableKafkaResultTransport:
             request_timeout_ms=int(self._publish_timeout_seconds * 1000),
             max_batch_size=1024 * 1024,
         )
-        await producer.start()
+        try:
+            await producer.start()
+        except BaseException:
+            # AIOKafkaProducer.start() may allocate network/background resources
+            # before failing (including on cancellation). The instance has not
+            # been assigned to self._producer yet, so _close_producer() cannot
+            # release it. Preserve the original startup failure even if cleanup
+            # also fails; the outbox row remains durable for the next retry.
+            try:
+                await producer.stop()
+            except BaseException as cleanup_error:
+                # Never log the raw exception: broker URLs may carry secrets.
+                # A failed stop cannot guarantee cleanup; make it observable
+                # without replacing the original startup exception.
+                logging.getLogger(__name__).warning(
+                    "Kafka producer cleanup after failed startup raised %s",
+                    type(cleanup_error).__name__,
+                )
+            raise
         self._producer = producer
         return producer
 
