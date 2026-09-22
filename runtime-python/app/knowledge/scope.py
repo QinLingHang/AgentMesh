@@ -4,7 +4,7 @@ import asyncio
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -18,10 +18,18 @@ class KnowledgeScope:
     project_id: int | None
     mode: str
     knowledge_base_ids: tuple[int, ...]
+    # Optional live Go-authority check, injected only for policy-governed tasks.
+    live_authorizer: Callable[[int, int | None, tuple[int, ...]], Awaitable[tuple[int, ...]]] | None = None
+    require_live_authorization: bool = False
 
 
 _current_scope: ContextVar[KnowledgeScope | None] = ContextVar(
     "agentmesh_knowledge_scope",
+    default=None,
+)
+
+_current_candidate_ids: ContextVar[tuple[int, ...] | None] = ContextVar(
+    "agentmesh_knowledge_candidate_ids",
     default=None,
 )
 
@@ -32,6 +40,15 @@ def set_knowledge_scope(scope: KnowledgeScope | None) -> Token:
 
 def reset_knowledge_scope(token: Token) -> None:
     _current_scope.reset(token)
+
+
+def set_candidate_knowledge_ids(ids: tuple[int, ...] | list[int] | None) -> Token:
+    normalized = None if ids is None else tuple(sorted({int(value) for value in ids if int(value) > 0}))
+    return _current_candidate_ids.set(normalized)
+
+
+def reset_candidate_knowledge_ids(token: Token) -> None:
+    _current_candidate_ids.reset(token)
 
 
 class KnowledgeScopeClient:
@@ -92,14 +109,37 @@ class KnowledgeScopeClient:
                 if data.get("conversationId") is not None
                 else conversation_id
             ),
-            project_id=(
-                int(project_id)
-                if project_id is not None
-                else None
-            ),
+            project_id=int(project_id) if project_id is not None else None,
             mode=str(data.get("mode", "GLOBAL")),
             knowledge_base_ids=ids,
         )
+
+    async def authorize(
+        self, user_id: int, conversation_id: int | None, knowledge_base_ids: tuple[int, ...]
+    ) -> tuple[int, ...]:
+        """Check *current* access at retrieval time, never grant IDs beyond request."""
+        if not knowledge_base_ids:
+            return ()
+        request: dict[str, Any] = {
+            "userId": user_id,
+            "knowledgeBaseIds": list(knowledge_base_ids),
+        }
+        if conversation_id is not None:
+            request["conversationId"] = conversation_id
+        async with httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=False) as client:
+            response = await client.post(
+                f"{self.base_url}/internal/v1/knowledge/authorize",
+                json=request,
+                headers={"X-Internal-Token": self.internal_token},
+            )
+            response.raise_for_status()
+            payload = response.json()
+        data = payload.get("data", payload)
+        values = data.get("knowledgeBaseIds")
+        if not isinstance(values, list):
+            raise ValueError("invalid live knowledge authorization response")
+        original = set(knowledge_base_ids)
+        return tuple(sorted({int(value) for value in values if int(value) in original}))
 
 
 class ScopedRetriever:
@@ -147,6 +187,34 @@ class ScopedRetriever:
         if not scope.knowledge_base_ids:
             return []
 
+        allowed_ids = set(scope.knowledge_base_ids)
+        candidate_ids = _current_candidate_ids.get()
+        if candidate_ids is not None:
+            allowed_ids &= set(candidate_ids)
+        if not allowed_ids:
+            return []
+
+        requested_one = base_filters.pop("knowledgeBaseId", None)
+        requested_many = base_filters.pop("knowledgeBaseIds", None)
+        if requested_one is not None:
+            allowed_ids &= {int(requested_one)}
+        elif isinstance(requested_many, (list, tuple, set)):
+            allowed_ids &= {int(value) for value in requested_many if int(value) > 0}
+        if not allowed_ids:
+            return []
+
+        # Live authorization is mandatory for policy-governed requests. A Go
+        # outage must not silently fall back to a stale task-creation snapshot.
+        if scope.require_live_authorization:
+            if scope.live_authorizer is None:
+                raise RuntimeError("live knowledge authorization is unavailable")
+            current_ids = await scope.live_authorizer(
+                scope.user_id, scope.conversation_id, tuple(sorted(allowed_ids))
+            )
+            allowed_ids &= set(current_ids)
+            if not allowed_ids:
+                return []
+
         groups = await asyncio.gather(
             *[
                 self.inner.retrieve(
@@ -157,12 +225,26 @@ class ScopedRetriever:
                         "knowledgeBaseId": base_id,
                     },
                 )
-                for base_id in scope.knowledge_base_ids
+                for base_id in sorted(allowed_ids)
             ]
         )
 
+        # Revocation during an in-flight search must also suppress the result
+        # before any retrieved chunk can enter the model context.
+        returned_ids = sorted(allowed_ids)
+        if scope.require_live_authorization:
+            if scope.live_authorizer is None:
+                raise RuntimeError("live knowledge authorization is unavailable")
+            live_ids = set(await scope.live_authorizer(
+                scope.user_id, scope.conversation_id, tuple(returned_ids)
+            ))
+        else:
+            live_ids = set(returned_ids)
+
         best: dict[str, RetrievalHit] = {}
-        for group in groups:
+        for base_id, group in zip(returned_ids, groups):
+            if base_id not in live_ids:
+                continue
             for hit in group:
                 key = hit.document.id
                 previous = best.get(key)

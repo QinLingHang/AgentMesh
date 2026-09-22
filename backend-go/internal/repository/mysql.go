@@ -1698,6 +1698,8 @@ const taskColumns = `
 	execution_mode,
 	synthesis_mode,
 	model_selection_json,
+	rag_policy_json,
+	effective_rag_policy_json,
 	delivery_mode,
 	constraints_json,
 	status,
@@ -1736,6 +1738,10 @@ func scanTask(
 
 	var modelSelectionJSON []byte
 
+	var ragPolicyJSON []byte
+
+	var effectiveRagPolicyJSON []byte
+
 	var selectedJSON []byte
 
 	var traceJSON []byte
@@ -1755,6 +1761,8 @@ func scanTask(
 		&task.ExecutionMode,
 		&task.SynthesisMode,
 		&modelSelectionJSON,
+		&ragPolicyJSON,
+		&effectiveRagPolicyJSON,
 		&task.DeliveryMode,
 		&constraintsJSON,
 		&task.Status,
@@ -1822,6 +1830,25 @@ func scanTask(
 	task.ModelSelection = model.ModelSelection{Mode: "auto"}
 	if len(modelSelectionJSON) > 0 {
 		_ = json.Unmarshal(modelSelectionJSON, &task.ModelSelection)
+	}
+
+	// =====================================================
+	// RAG Policy Snapshot
+	// =====================================================
+
+	task.RagPolicy = model.RagPolicy{Mode: model.RagModeAuto}
+	if len(ragPolicyJSON) > 0 {
+		_ = json.Unmarshal(ragPolicyJSON, &task.RagPolicy)
+	}
+	task.EffectiveRagPolicy = model.EffectiveRagPolicy{
+		Mode:                    model.RagModeAuto,
+		AllowedScopes:           []model.RagScope{},
+		AllowedKnowledgeBaseIDs: []int64{},
+		ExplicitlySelectedIDs:   []int64{},
+		PolicyVersion:           "rag-v1.1",
+	}
+	if len(effectiveRagPolicyJSON) > 0 {
+		_ = json.Unmarshal(effectiveRagPolicyJSON, &task.EffectiveRagPolicy)
 	}
 
 	// =====================================================
@@ -2022,6 +2049,14 @@ func (r *MySQL) CreateTask(
 	if err != nil {
 		return nil, err
 	}
+	ragPolicyJSON, err := json.Marshal(task.RagPolicy)
+	if err != nil {
+		return nil, err
+	}
+	effectiveRagPolicyJSON, err := json.Marshal(task.EffectiveRagPolicy)
+	if err != nil {
+		return nil, err
+	}
 
 	res, err := r.db.ExecContext(
 		ctx,
@@ -2036,11 +2071,15 @@ func (r *MySQL) CreateTask(
 			execution_mode,
 			synthesis_mode,
 			model_selection_json,
+			rag_policy_json,
+			effective_rag_policy_json,
 			delivery_mode,
 			constraints_json,
 			status
 		)
 		VALUES(
+			?,
+			?,
 			?,
 			?,
 			?,
@@ -2064,6 +2103,8 @@ func (r *MySQL) CreateTask(
 		task.ExecutionMode,
 		task.SynthesisMode,
 		string(modelSelectionJSON),
+		string(ragPolicyJSON),
+		string(effectiveRagPolicyJSON),
 		"direct",
 		string(
 			constraintsJSON,

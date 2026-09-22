@@ -20,6 +20,10 @@ var ErrInvalidRefreshToken = errors.New(
 	"invalid refresh token",
 )
 
+// ErrSubmissionConflict means a client reused its idempotency key for a
+// different request payload. Never enqueue another task in this case.
+var ErrSubmissionConflict = errors.New("client request id conflicts with a different payload")
+
 var ErrNotOwned = errors.New(
 	"not owned",
 )
@@ -573,6 +577,8 @@ type TaskRepository interface {
 // =========================================================
 
 type DurableRuntimeRepository interface {
+	LookupDurableSubmission(context.Context, int64, string) (*model.Task, string, error)
+
 	CreateQueuedTaskAndRuntimeJob(
 		context.Context,
 		model.Task,

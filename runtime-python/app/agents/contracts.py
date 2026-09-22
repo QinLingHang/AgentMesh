@@ -27,6 +27,9 @@ class AgentExecutionRequest:
     on_model_event: (
         ModelEventHandler | None
     ) = None
+    # Request-local live deltas; never stored on singleton Agent plugins.
+    on_delta: Callable[[str], None] | None = None
+
 
     tool_registry: (
         ToolRegistry | None

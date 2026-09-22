@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import asyncio
 
 from fastapi import (
     FastAPI,
@@ -23,7 +24,9 @@ from app.knowledge import (
     KnowledgeScope,
     KnowledgeScopeClient,
     install_scoped_retriever,
+    reset_candidate_knowledge_ids,
     reset_knowledge_scope,
+    set_candidate_knowledge_ids,
     set_knowledge_scope,
 )
 from app.knowledge.indexer import KnowledgeIndexInput
@@ -93,6 +96,7 @@ async def lifespan(app: FastAPI):
             shutdown_grace_seconds=settings.runtime_worker_shutdown_grace_seconds,
             dedupe_retention_seconds=settings.runtime_worker_dedupe_retention_seconds,
             runner=run_scoped_runtime,
+            event_runner=run_scoped_runtime,
             node_id=settings.runtime_node_id or settings.runtime_worker_id,
             node_zone=settings.runtime_node_zone,
             node_version=settings.runtime_node_version,
@@ -199,6 +203,31 @@ async def plugins(
 
 
 async def resolve_request_scope(req: RuntimeRequest) -> KnowledgeScope:
+    # RAG V1.1: Go Control Plane may send an already-authorized effective
+    # policy snapshot. Runtime must never widen that set. This also removes
+    # the historical behaviour where a non-project conversation implicitly
+    # gained access to every user-global knowledge base.
+    policy = req.effective_rag_policy
+    if policy is not None:
+        project_id = None
+        for item in req.knowledge_catalog:
+            if item.scope == "PROJECT" and item.project_id is not None:
+                project_id = item.project_id
+                break
+        return KnowledgeScope(
+            user_id=req.user_id,
+            conversation_id=req.conversation_id,
+            project_id=project_id,
+            mode="POLICY",
+            knowledge_base_ids=tuple(
+                int(value)
+                for value in policy.allowed_knowledge_base_ids
+                if int(value) > 0
+            ),
+            live_authorizer=(knowledge_scope_client.authorize if knowledge_scope_client is not None else None),
+            require_live_authorization=True,
+        )
+
     if knowledge_scope_client is None:
         raise HTTPException(status_code=503, detail="knowledge scope client not ready")
 
@@ -207,7 +236,7 @@ async def resolve_request_scope(req: RuntimeRequest) -> KnowledgeScope:
             user_id=req.user_id,
             conversation_id=req.conversation_id,
         )
-    except Exception as exc:
+    except Exception:
         # Security boundary: public Runtime execution must never silently fall
         # back to userId-only retrieval when the Control Plane scope cannot be
         # resolved. Fail closed with an empty explicit scope.
@@ -220,15 +249,17 @@ async def resolve_request_scope(req: RuntimeRequest) -> KnowledgeScope:
         )
 
 
-async def run_scoped_runtime(req: RuntimeRequest) -> RuntimeResponse:
+async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=None) -> RuntimeResponse:
     if engine is None:
         raise HTTPException(status_code=503, detail="runtime not ready")
 
     scope = await resolve_request_scope(req)
     token = set_knowledge_scope(scope)
+    candidate_token = set_candidate_knowledge_ids(None)
     try:
-        return await engine.run(req)
+        return await engine.run(req, event_sink=event_sink, delta_sink=delta_sink)
     finally:
+        reset_candidate_knowledge_ids(candidate_token)
         reset_knowledge_scope(token)
 
 
@@ -257,6 +288,79 @@ async def interactive_stream(
                 "type": "error",
                 "message": public_message,
             })
+
+    return StreamingResponse(
+        body(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/internal/v1/runtime/execute-stream")
+async def execute_stream(
+    req: RuntimeRequest,
+    x_internal_token: str = Header(default=""),
+):
+    verify_internal(x_internal_token)
+    if engine is None:
+        raise HTTPException(status_code=503, detail="runtime not ready")
+
+    async def body():
+        queue: asyncio.Queue[dict] = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        client_connected = {"value": True}
+
+        def publish_live(payload: dict):
+            if not client_connected["value"]:
+                return
+            def submit():
+                if not client_connected["value"]:
+                    return
+                queue.put_nowait(payload)
+            loop.call_soon_threadsafe(submit)
+
+        def on_trace(trace_event):
+            payload = trace_event.model_dump(mode="json", by_alias=True)
+            publish_live({"type": "trace", "trace": payload})
+
+        def on_delta(chunk: str):
+            if chunk:
+                publish_live({"type": "delta", "delta": chunk})
+
+        async def execute_task():
+            try:
+                response = await run_scoped_runtime(
+                    req, event_sink=on_trace, delta_sink=on_delta,
+                )
+                await queue.put({
+                    "type": "result",
+                    "result": response.model_dump(mode="json", by_alias=True),
+                })
+            except Exception as exc:
+                await queue.put({
+                    "type": "error",
+                    "message": str(exc)[:500] or "runtime execution failed",
+                })
+            finally:
+                await queue.put({"type": "_end"})
+
+        task = asyncio.create_task(execute_task())
+        try:
+            while True:
+                item = await queue.get()
+                if item.get("type") == "_end":
+                    break
+                yield encode_ndjson(item)
+        finally:
+            # Never accumulate an unconsumed event queue after the HTTP client
+            # disconnects. The execution task continues; Go still persists the
+            # authoritative result when its own connection remains available.
+            client_connected["value"] = False
+            if not task.done():
+                task.add_done_callback(lambda _: None)
 
     return StreamingResponse(
         body(),

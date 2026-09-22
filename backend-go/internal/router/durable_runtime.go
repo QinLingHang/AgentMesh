@@ -9,6 +9,7 @@ func registerDurableRuntimeRoutes(protected *gin.RouterGroup, deps Dependencies)
 	protected.GET("/runtime/reliability", deps.DurableRuntimeHandler.Reliability)
 	protected.GET("/runtime/topology", deps.DurableRuntimeHandler.Topology)
 	protected.POST("/tasks/:id/cancel", deps.DurableRuntimeHandler.Cancel)
+	protected.GET("/tasks/:id/events", deps.DurableRuntimeHandler.TaskEvents)
 }
 
 func registerRateLimitedDurableRuntimeRoutes(rateLimited *gin.RouterGroup, deps Dependencies) {
@@ -24,4 +25,5 @@ func registerInternalDurableRuntimeRoutes(internal *gin.RouterGroup, deps Depend
 	}
 	internal.POST("/runtime/workers/heartbeat", deps.DurableRuntimeHandler.Heartbeat)
 	internal.POST("/runtime/jobs/:jobId/result", deps.DurableRuntimeHandler.Callback)
+	internal.POST("/runtime/jobs/:jobId/phase", deps.DurableRuntimeHandler.WorkerPhase)
 }

@@ -367,7 +367,7 @@ func (h *GovernanceHandler) ProjectCostSummary(c *gin.Context) {
 }
 
 func (h *GovernanceHandler) RunCost(c *gin.Context) {
-	taskID, err := strconv.ParseInt(c.Param("taskId"), 10, 64)
+	taskID, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || taskID <= 0 {
 		fail(c, http.StatusBadRequest, 40104, "任务 ID 不合法")
 		return

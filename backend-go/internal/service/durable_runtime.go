@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +58,48 @@ type DurableExecutionCallback struct {
 	Status          string                         `json:"status"`
 	Response        *runtimeclient.ExecuteResponse `json:"response,omitempty"`
 	ErrorCategory   string                         `json:"errorCategory,omitempty"`
+}
+
+// DurableWorkerPhase is deliberately metadata-only. The handler ignores extra
+// JSON fields; only these enumerated fields are ever forwarded or persisted.
+type DurableWorkerPhase struct {
+	WorkerID    string `json:"workerId"`
+	ExecutionID string `json:"executionId"`
+	LeaseToken  string `json:"leaseToken"`
+	FenceEpoch  int64  `json:"fenceEpoch"`
+	Ordinal     int64  `json:"ordinal"`
+	Phase       string `json:"phase"`
+	Status      string `json:"status"`
+}
+
+var allowedWorkerPhases = map[string]bool{
+	"task": true, "planner": true, "scheduler": true,
+	"agent": true, "tool": true, "mcp": true, "rag": true,
+	"knowledge": true, "memory": true, "model": true,
+}
+
+// WorkerPhase is best-effort observability: failure to publish a phase never
+// changes the business result. An admitted phase is durable and SSE-replayable.
+func (s *DurableRuntimeService) WorkerPhase(ctx context.Context, jobID int64, phase DurableWorkerPhase) (bool, error) {
+	phase.WorkerID = strings.TrimSpace(phase.WorkerID)
+	phase.ExecutionID = strings.TrimSpace(phase.ExecutionID)
+	phase.LeaseToken = strings.TrimSpace(phase.LeaseToken)
+	phase.Phase = strings.ToLower(strings.TrimSpace(phase.Phase))
+	phase.Status = strings.ToLower(strings.TrimSpace(phase.Status))
+	if jobID <= 0 || phase.WorkerID == "" || phase.ExecutionID == "" || phase.LeaseToken == "" ||
+		phase.FenceEpoch <= 0 || phase.Ordinal <= 0 || phase.Ordinal > 256 ||
+		!allowedWorkerPhases[phase.Phase] ||
+		(phase.Status != "running" && phase.Status != "completed" && phase.Status != "error" && phase.Status != "skipped") {
+		return false, ErrInvalidInput
+	}
+	writer, ok := s.repo.(interface {
+		AppendDurableWorkerPhase(context.Context, int64, string, string, string, int64, int64, string, string) (bool, error)
+	})
+	if !ok {
+		return false, errors.New("durable phase storage unavailable")
+	}
+	return writer.AppendDurableWorkerPhase(ctx, jobID, phase.ExecutionID, phase.WorkerID,
+		phase.LeaseToken, phase.FenceEpoch, phase.Ordinal, phase.Phase, phase.Status)
 }
 
 func NewDurableRuntimeService(
@@ -195,6 +239,24 @@ func normalizeDurableRunInput(in RunTaskInput) (RunTaskInput, error) {
 	return in, nil
 }
 
+// validClientRequestID bounds the identifier used in the MySQL composite key.
+// It must never be used as a bearer secret or as an authorization substitute.
+func validClientRequestID(value string) bool {
+	if value == "" {
+		return true
+	} // backwards compatibility
+	if len(value) < 8 || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '-' || char == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskInput) (*RunTaskResult, error) {
 	if !s.cfg.Enabled {
 		return nil, errors.New("durable runtime is disabled")
@@ -203,6 +265,36 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	in, err = normalizeDurableRunInput(in)
 	if err != nil {
 		return nil, err
+	}
+	// Only a stable client-supplied identity participates in deduplication.
+	// Legacy clients without the field keep the original submission semantics.
+	in.ClientRequestID = strings.TrimSpace(in.ClientRequestID)
+	if !validClientRequestID(in.ClientRequestID) {
+		return nil, ErrInvalidInput
+	}
+	fingerprintInput := in
+	fingerprintInput.ClientRequestID = ""
+	fingerprintJSON, err := json.Marshal(fingerprintInput)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(fingerprintJSON)
+	requestFingerprint := hex.EncodeToString(digest[:])
+
+	if in.ClientRequestID != "" {
+		existing, existingFingerprint, lookupErr := s.repo.LookupDurableSubmission(ctx, uid, in.ClientRequestID)
+		if errors.Is(lookupErr, repository.ErrSubmissionConflict) {
+			return nil, ErrIdempotencyConflict
+		}
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existing != nil {
+			if existingFingerprint != requestFingerprint || existing.DeliveryMode != "durable" {
+				return nil, ErrIdempotencyConflict
+			}
+			return durableSubmissionResult(existing), nil
+		}
 	}
 
 	var projectRuntimeContext *model.ProjectRuntimeContext
@@ -226,6 +318,14 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		}
 		in.ModelSelection = normalizedSelection
 	}
+
+	normalizedRagPolicy, effectiveRagPolicy, knowledgeCatalog, err := s.taskService.resolveEffectiveRagPolicy(
+		ctx, uid, in.ConversationID, in.RagPolicy,
+	)
+	if err != nil {
+		return nil, err
+	}
+	in.RagPolicy = normalizedRagPolicy
 
 	snapshot, err := s.repo.RuntimeReliabilitySnapshot(ctx, time.Now().UTC().Add(-s.cfg.WorkerStaleAfter))
 	if err != nil {
@@ -252,20 +352,6 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		attachmentMeta = resolvedMeta
 	}
 
-	if in.ConversationID != nil {
-		_, err = s.taskService.messages.CreateMessage(ctx, uid, *in.ConversationID, "user", in.Task, "COMPLETED", requestID, map[string]any{
-			"runtimePhase": "durable_queued",
-			"deliveryMode": "durable",
-			"attachments":  attachmentMeta,
-		})
-		if errors.Is(err, repository.ErrNotOwned) {
-			return nil, ErrNotFound
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	// Store only the policy/task envelope. Agent/Tool/MCP pools are intentionally
 	// refreshed immediately before dispatch so revoked Project bindings cannot be
 	// resurrected by a queued payload.
@@ -273,8 +359,11 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
 		Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		ModelSelection: runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
-		Constraints:    in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
+		ModelSelection:     runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
+		RagPolicy:          in.RagPolicy,
+		EffectiveRagPolicy: effectiveRagPolicy,
+		KnowledgeCatalog:   knowledgeCatalog,
+		Constraints:        in.Constraints, AttachmentIDs: append([]int64(nil), in.AttachmentIDs...),
 	}
 	requestJSON, err := json.Marshal(req)
 	if err != nil {
@@ -282,32 +371,58 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	}
 
 	task, _, err := s.repo.CreateQueuedTaskAndRuntimeJob(ctx, model.Task{
+		ClientRequestID: in.ClientRequestID, RequestFingerprint: requestFingerprint,
+		PendingUserMessageMetadata: map[string]any{
+			"runtimePhase": "durable_queued", "deliveryMode": "durable", "attachments": attachmentMeta,
+		},
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID,
 		TaskText: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
-		ModelSelection: in.ModelSelection,
-		DeliveryMode:   "durable",
+		ModelSelection:     in.ModelSelection,
+		RagPolicy:          in.RagPolicy,
+		EffectiveRagPolicy: effectiveRagPolicy,
+		DeliveryMode:       "durable",
 	}, in.Constraints, requestJSON, uuid.NewString(), time.Now().UTC().Add(s.cfg.JobDeadline), s.cfg.MaxAttempts)
+	if errors.Is(err, repository.ErrSubmissionConflict) {
+		return nil, ErrIdempotencyConflict
+	}
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
+	}
+	return durableSubmissionResult(task), nil
+}
+
+// The replay response is a projection of the ORIGINAL authoritative task,
+// never the newly generated temporary request ID or a second execution.
+func durableSubmissionResult(task *model.Task) *RunTaskResult {
+	status := task.Status
+	answer := "任务已进入可靠队列，Runtime Worker 将异步执行。"
+	if task.ResultText != nil {
+		answer = *task.ResultText
+	}
+	if task.ErrorMessage != nil && status == "ERROR" {
+		answer = *task.ErrorMessage
 	}
 
 	return &RunTaskResult{
 		Task:           task,
-		Status:         "QUEUED",
-		Answer:         "任务已进入可靠队列，Runtime Worker 将异步执行。",
+		Status:         status,
+		Answer:         answer,
 		Citations:      []runtimeclient.RuntimeCitation{},
-		Scheduler:      in.Scheduler,
-		Planner:        in.Planner,
-		ExecutionMode:  in.ExecutionMode,
-		SynthesisMode:  in.SynthesisMode,
+		Scheduler:      task.Scheduler,
+		Planner:        task.Planner,
+		ExecutionMode:  task.ExecutionMode,
+		SynthesisMode:  task.SynthesisMode,
 		TaskProfile:    map[string]any{},
-		SelectedAgents: []string{},
-		Trace:          []map[string]any{},
-		DAG:            map[string]any{},
+		SelectedAgents: task.SelectedAgents,
+		Trace:          task.Trace,
+		DAG:            task.DAG,
 		AgentFeedback:  []model.AgentFeedback{},
 		Observability:  runtimeclient.ObservabilitySummary{},
-	}, nil
+	}
 }
 
 func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
@@ -465,6 +580,17 @@ func (s *DurableRuntimeService) dispatchOne(
 			return
 		}
 	}
+	_, liveEffectiveRagPolicy, liveKnowledgeCatalog, ragErr := s.taskService.resolveEffectiveRagPolicy(
+		ctx, job.UserID, req.ConversationID, req.RagPolicy,
+	)
+	if ragErr != nil {
+		_ = s.repo.FailRuntimeJob(ctx, job.ID, "knowledge authorization unavailable")
+		return
+	}
+	req.EffectiveRagPolicy, req.KnowledgeCatalog = constrainEffectiveRagPolicyToSnapshot(
+		req.EffectiveRagPolicy, liveEffectiveRagPolicy, liveKnowledgeCatalog,
+	)
+
 	agents, tools, mcps, err := s.taskService.loadRuntimeResources(ctx, projectRuntimeResourceUserID(job.UserID, projectContext))
 	if err != nil {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "runtime resources unavailable")
@@ -855,4 +981,20 @@ func (s *DurableRuntimeService) Topology(ctx context.Context) (*model.RuntimeTop
 		topology.Reliability.DispatcherLeader = lease.HolderID == s.cfg.DispatcherID && lease.LeaseUntil.After(time.Now().UTC())
 	}
 	return topology, nil
+}
+
+// TaskEvents reads an owner-scoped, metadata-only durable state journal. The
+// repository validates ownership on every poll, including after reconnect.
+func (s *DurableRuntimeService) TaskEvents(ctx context.Context, uid, taskID, after int64) ([]model.DurableTaskEvent, string, error) {
+	reader, ok := s.repo.(interface {
+		SyncAndListDurableTaskEvents(context.Context, int64, int64, int64, int) ([]model.DurableTaskEvent, string, error)
+	})
+	if !ok {
+		return nil, "", errors.New("durable event storage unavailable")
+	}
+	events, status, err := reader.SyncAndListDurableTaskEvents(ctx, uid, taskID, after, 100)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, "", ErrNotFound
+	}
+	return events, status, err
 }

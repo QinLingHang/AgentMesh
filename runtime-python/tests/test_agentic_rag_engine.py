@@ -144,6 +144,17 @@ def make_request(
 
         task=task,
 
+        ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+        effectiveRagPolicy={
+            "mode": "ON", "allowedScopes": ["PROJECT"],
+            "allowedKnowledgeBaseIds": [9],
+        },
+        knowledgeCatalog=[{
+            "knowledgeBaseId": 9,
+            "name": "AgentMesh P9 BYOK MCP A2A Tool Runtime Failure Backoff",
+            "scope": "PROJECT", "accessible": True,
+        }],
+
         scheduler="fixed",
 
         planner="heuristic",

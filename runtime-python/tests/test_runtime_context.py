@@ -122,7 +122,8 @@ async def test_runtime_injects_memory_and_rag_context():
                     ),
 
                     metadata={
-                        "userId": 1
+                        "userId": 1,
+                        "knowledgeBaseId": 9
                     },
                 )
             ]
@@ -169,6 +170,16 @@ async def test_runtime_injects_memory_and_rag_context():
                     request_id=(
                         "rag-memory-runtime"
                     ),
+
+                    ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+                    effectiveRagPolicy={
+                        "mode": "ON", "allowedScopes": ["PROJECT"],
+                        "allowedKnowledgeBaseIds": [9],
+                    },
+                    knowledgeCatalog=[{
+                        "knowledgeBaseId": 9, "name": "AgentMesh Runtime Architecture",
+                        "scope": "PROJECT", "accessible": True,
+                    }],
 
                     conversationId=99,
 
@@ -413,6 +424,16 @@ async def test_rag_failure_gracefully_degrades():
                     request_id=(
                         "rag-degrade"
                     ),
+
+                    ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+                    effectiveRagPolicy={
+                        "mode": "ON", "allowedScopes": ["PROJECT"],
+                        "allowedKnowledgeBaseIds": [9],
+                    },
+                    knowledgeCatalog=[{
+                        "knowledgeBaseId": 9, "name": "AgentMesh Runtime Architecture",
+                        "scope": "PROJECT", "accessible": True,
+                    }],
 
                     task=(
                         "Explain AgentMesh."

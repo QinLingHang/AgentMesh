@@ -177,7 +177,7 @@ function rewriteCitationTextNode(
 
       return {
         type: "link",
-        url: `citation:${citation.citationId}`,
+        url: `#agentmesh-citation-${citation.citationId}`,
         children: [
           {
             type: "text",
@@ -338,12 +338,10 @@ export function CitationAnswer({
           children,
         }) {
           if (
-            href?.startsWith(
-              "citation:",
-            )
+            href && /^#agentmesh-citation-\d+$/.test(href)
           ) {
             const rawId = href.slice(
-              "citation:".length,
+              "#agentmesh-citation-".length,
             );
 
             const citationId =

@@ -5,11 +5,12 @@ import base64
 import json
 import time
 from dataclasses import replace
-from typing import Any
+from typing import Any, Callable
 
 
 from app.rag.agentic_retrieval import (
     AgenticRetrievalExecutor,
+    HeuristicEvidenceGrader,
 )
 
 from app.rag.model_intelligence import (
@@ -78,6 +79,16 @@ from app.models.runtime import (
 )
 from app.models.contracts import ModelInputAttachment
 from app.knowledge.parser import parse_document_bytes
+from app.knowledge import (
+    KnowledgeDiscoveryResult,
+    discover_knowledge_bases,
+    set_candidate_knowledge_ids,
+)
+from app.semantics import (
+    KnowledgeDependency,
+    RagPreference,
+    analyze_task_semantics,
+)
 from app.multimodal.retrieval import (
     classify_retrieval_mode,
     diversify_multimodal_hits,
@@ -112,8 +123,13 @@ from app.services.collaboration_planner import (
     CollaborationPlanner,
     MultiObjectiveCollaborationPlanner,
 )
+from app.services.knowledge_step_gate import partition_knowledge_steps
 from app.services.context_builder import (
     build_agent_context,
+)
+from app.services.synthesis_context import (
+    build_synthesis_context,
+    select_synthesis_evidence,
 )
 from app.services.citation_validator import (
     guard_answer_citations,
@@ -2354,6 +2370,8 @@ class RuntimeEngine:
     async def run(
         self,
         req: RuntimeRequest,
+        event_sink: Callable[[TraceEvent], None] | None = None,
+        delta_sink: Callable[[str], None] | None = None,
     ) -> RuntimeResponse:
 
         started = (
@@ -2393,25 +2411,31 @@ class RuntimeEngine:
             detail: str = "",
         ) -> None:
 
-            trace.append(
-                TraceEvent(
-                    kind=(
-                        kind
-                    ),
-                    title=(
-                        title
-                    ),
-                    status=(
-                        status
-                    ),
-                    detail=(
-                        detail
-                    ),
-                    elapsedMs=(
-                        elapsed()
-                    ),
-                )
+            trace_event = TraceEvent(
+                kind=(
+                    kind
+                ),
+                title=(
+                    title
+                ),
+                status=(
+                    status
+                ),
+                detail=(
+                    detail
+                ),
+                elapsedMs=(
+                    elapsed()
+                ),
             )
+            trace.append(trace_event)
+            if event_sink is not None:
+                try:
+                    event_sink(trace_event)
+                except Exception:
+                    # Streaming observability is fail-open: a disconnected UI
+                    # must never change the authoritative task execution.
+                    pass
 
         # ====================================================
         # Model Event Adapter
@@ -2730,6 +2754,35 @@ class RuntimeEngine:
         pre_profile = profile_task(req.task)
 
         # ====================================================
+        # RAG V1.1 Shared Semantic Intent
+        #
+        # One request may require multiple capability families at the same
+        # time (for example Tool + Knowledge). This contract is descriptive
+        # only; it cannot grant access to any resource.
+        # ====================================================
+        semantic_intent = analyze_task_semantics(
+            req.task,
+            has_attachments=bool(req.attachments),
+            profiler_capabilities=pre_profile.required_capabilities,
+        )
+        merged_capabilities = list(
+            dict.fromkeys(
+                [*pre_profile.required_capabilities, *semantic_intent.required_capabilities]
+            )
+        )
+        if merged_capabilities != list(pre_profile.required_capabilities):
+            pre_profile = pre_profile.model_copy(
+                update={"required_capabilities": merged_capabilities}
+            )
+
+        event(
+            "semantic",
+            "Shared Task Semantics",
+            "completed",
+            semantic_intent.model_dump_json(by_alias=True),
+        )
+
+        # ====================================================
         # V4.1 Autonomous Capability Discovery
         #
         # Users express goals; Runtime discovers request-relevant Tool / MCP /
@@ -2749,11 +2802,78 @@ class RuntimeEngine:
             mcp_servers=req.mcp_servers,
             agents=req.agents,
             has_attachments=bool(req.attachments),
+            semantic_intent=semantic_intent,
         )
 
         knowledge_query = continuation_subject_task(
             req.task,
             req.history,
+        )
+
+        effective_rag_policy = req.effective_rag_policy
+        allowed_knowledge_ids = (
+            list(effective_rag_policy.allowed_knowledge_base_ids)
+            if effective_rag_policy is not None
+            else [item.knowledge_base_id for item in req.knowledge_catalog if item.accessible]
+        )
+        allowed_knowledge_set = {int(value) for value in allowed_knowledge_ids if int(value) > 0}
+        authorized_catalog = [
+            item
+            for item in req.knowledge_catalog
+            if item.accessible and item.knowledge_base_id in allowed_knowledge_set
+        ]
+        explicit_knowledge_ids = (
+            list(effective_rag_policy.explicitly_selected_ids)
+            if effective_rag_policy is not None
+            else list(req.rag_policy.selected_knowledge_base_ids)
+        )
+        knowledge_policy_mode = (
+            effective_rag_policy.mode
+            if effective_rag_policy is not None
+            else req.rag_policy.mode
+        )
+        if (
+            knowledge_policy_mode == "OFF"
+            or semantic_intent.rag_preference == RagPreference.DISABLE
+        ):
+            # OFF must skip discovery itself, not merely suppress its retrieval
+            # result later. A user prohibition also wins over AUTO/ON.
+            knowledge_discovery = KnowledgeDiscoveryResult(
+                needed=False, reason_code="DISABLED",
+            )
+        else:
+            knowledge_discovery = discover_knowledge_bases(
+                knowledge_query,
+                semantic=semantic_intent,
+                catalog=authorized_catalog,
+                explicitly_selected_ids=explicit_knowledge_ids,
+                force_needed=knowledge_policy_mode == "ON",
+            )
+        set_candidate_knowledge_ids(knowledge_discovery.selected_knowledge_base_ids)
+
+        event(
+            "knowledge_discovery",
+            "Knowledge Discovery",
+            "skipped" if knowledge_discovery.reason_code == "DISABLED" else "completed",
+            json.dumps(
+                {
+                    **knowledge_discovery.trace_dict(),
+                    "policyMode": (
+                        effective_rag_policy.mode
+                        if effective_rag_policy is not None
+                        else req.rag_policy.mode
+                    ),
+                    "allowedScopes": (
+                        list(effective_rag_policy.allowed_scopes)
+                        if effective_rag_policy is not None
+                        else list(req.rag_policy.scopes)
+                    ),
+                    "allowedKnowledgeBaseIds": sorted(allowed_knowledge_set),
+                    "knowledgeDependency": semantic_intent.knowledge_dependency.value,
+                    "ragPreference": semantic_intent.rag_preference.value,
+                },
+                ensure_ascii=False,
+            ),
         )
 
         capability_trace = capability_plan.trace_detail()
@@ -3096,6 +3216,7 @@ class RuntimeEngine:
             mcp_tool_plan = discover_mcp_tools(
                 capability_query,
                 discovered_tools,
+                semantic_intent=semantic_intent,
             )
             capability_plan.selected_mcp_tool_names = list(
                 mcp_tool_plan.selected_mcp_tool_names
@@ -3193,9 +3314,12 @@ class RuntimeEngine:
                     ),
                 )
 
-            memory_retrieval_enabled_for_request = should_retrieve_long_term_memory(
-                req.task,
-                memory_overview_query=memory_overview_query,
+            memory_retrieval_enabled_for_request = bool(
+                semantic_intent.requires_memory
+                or should_retrieve_long_term_memory(
+                    req.task,
+                    memory_overview_query=memory_overview_query,
+                )
             )
 
             if not memory_forget_requested and memory_retrieval_enabled_for_request:
@@ -3575,20 +3699,60 @@ class RuntimeEngine:
             retrieval_mode_decision = classify_retrieval_mode(req.task, rag_decision.analysis)
             retrieval_mode = retrieval_mode_decision.mode
 
-            # Project Knowledge is selected by the same request-scoped
-            # capability resolver as Tool/MCP/Skill. Ordinary world-knowledge
-            # questions keep the base model path, while project-specific tasks
-            # no longer require the user to say “use knowledge base”.
-            if capability_plan.use_project_knowledge:
+            policy_mode = (
+                effective_rag_policy.mode
+                if effective_rag_policy is not None
+                else req.rag_policy.mode
+            )
+            explicit_rag_off = semantic_intent.rag_preference == RagPreference.DISABLE
+            has_available_source = bool(knowledge_discovery.selected_knowledge_base_ids)
+            needs_knowledge = knowledge_discovery.needed
+
+            # RAG V1.1 has one authoritative gate. Policy controls whether
+            # retrieval is allowed; semantic/planner signals describe need;
+            # Knowledge Discovery only chooses authorized sources. No downstream
+            # component may silently widen scope or turn OFF back into ON.
+            if policy_mode == "OFF" or explicit_rag_off:
+                rag_decision = replace(
+                    rag_decision,
+                    mode=RAGMode.NO_RAG,
+                    reason=(
+                        "RAG disabled by effective policy"
+                        if policy_mode == "OFF"
+                        else "RAG disabled by explicit user instruction"
+                    ),
+                    confidence=1.0,
+                    retrieve=False,
+                    inject_context=False,
+                    top_k=0,
+                    max_retrieval_rounds=0,
+                    enable_query_rewrite=False,
+                    enable_multi_query=False,
+                    enable_decomposition=False,
+                    enable_reranker=False,
+                )
+            elif not has_available_source:
+                rag_decision = replace(
+                    rag_decision,
+                    mode=RAGMode.NO_RAG,
+                    reason="no authorized knowledge source available",
+                    confidence=max(rag_decision.confidence, 0.98),
+                    retrieve=False,
+                    inject_context=False,
+                    top_k=0,
+                    max_retrieval_rounds=0,
+                    enable_query_rewrite=False,
+                    enable_multi_query=False,
+                    enable_decomposition=False,
+                    enable_reranker=False,
+                )
+            elif policy_mode == "ON":
                 if not rag_decision.retrieve:
                     rag_decision = replace(
                         rag_decision,
                         mode=RAGMode.FAST_RAG,
-                        reason=(
-                            "autonomous capability discovery selected project "
-                            "knowledge for this task"
-                        ),
-                        confidence=max(rag_decision.confidence, 0.92),
+                        reason="RAG policy ON: attempt retrieval from authorized sources",
+                        confidence=max(rag_decision.confidence, 0.96),
                         retrieve=True,
                         inject_context=True,
                         top_k=max(settings.rag_top_k, 5),
@@ -3598,14 +3762,11 @@ class RuntimeEngine:
                         enable_decomposition=False,
                         enable_reranker=True,
                     )
-            else:
+            elif policy_mode == "AUTO" and not needs_knowledge:
                 rag_decision = replace(
                     rag_decision,
                     mode=RAGMode.NO_RAG,
-                    reason=(
-                        "autonomous capability discovery did not select project "
-                        "knowledge for this request"
-                    ),
+                    reason="AUTO policy: shared semantics determined knowledge is not needed",
                     confidence=max(rag_decision.confidence, 0.96),
                     retrieve=False,
                     inject_context=False,
@@ -3615,6 +3776,21 @@ class RuntimeEngine:
                     enable_multi_query=False,
                     enable_decomposition=False,
                     enable_reranker=False,
+                )
+            elif policy_mode == "AUTO" and needs_knowledge and not rag_decision.retrieve:
+                rag_decision = replace(
+                    rag_decision,
+                    mode=RAGMode.FAST_RAG,
+                    reason="AUTO policy: task requires governed knowledge",
+                    confidence=max(rag_decision.confidence, 0.92),
+                    retrieve=True,
+                    inject_context=True,
+                    top_k=max(settings.rag_top_k, 5),
+                    max_retrieval_rounds=1,
+                    enable_query_rewrite=False,
+                    enable_multi_query=False,
+                    enable_decomposition=False,
+                    enable_reranker=True,
                 )
 
             event(
@@ -4101,6 +4277,50 @@ class RuntimeEngine:
                         ),
                         top_k=rag_decision.top_k,
                     )
+
+                    # One bounded expansion inside the SAME Go-authorized
+                    # catalog when metadata selection yielded no evidence.
+                    # Never add a new scope or knowledge base from the model.
+                    if rag_decision.retrieve and not retrieval_hits:
+                        already_selected = set(knowledge_discovery.selected_knowledge_base_ids)
+                        remaining = [
+                            item.knowledge_base_id
+                            for item in authorized_catalog
+                            if item.knowledge_base_id not in already_selected
+                        ][:2]
+                        if remaining:
+                            expanded_ids = sorted(already_selected | set(remaining))
+                            set_candidate_knowledge_ids(expanded_ids)
+                            event(
+                                "knowledge_discovery", "Bounded Knowledge Expansion", "running",
+                                json.dumps({
+                                    "initialCount": len(already_selected),
+                                    "addedCount": len(remaining),
+                                    "maxAdditionalRounds": 1,
+                                }, ensure_ascii=False),
+                            )
+                            additional_hits = await self.retriever.retrieve(
+                                knowledge_query,
+                                top_k=max(rag_decision.top_k, rag_decision.top_k * 3),
+                                filters={"userId": req.user_id},
+                            )
+                            raw_retrieval_hits = list(additional_hits)
+                            retrieval_hits = diversify_multimodal_hits(
+                                filter_hits_for_mode(raw_retrieval_hits, retrieval_mode),
+                                top_k=rag_decision.top_k,
+                            )
+                            event(
+                                "knowledge_discovery", "Bounded Knowledge Expansion", "completed",
+                                json.dumps({
+                                    "candidateCount": len(expanded_ids),
+                                    "hitCount": len(retrieval_hits),
+                                }, ensure_ascii=False),
+                            )
+
+                    if rag_decision.retrieve and not retrieval_hits:
+                        rag_grounding_sufficient = False
+                        rag_grounding_reason = "no retrieval evidence matched the task"
+                        rag_grounding_stopped_reason = "no_evidence"
 
                     if (
                         rag_decision.mode.value == "agentic_rag"
@@ -4631,6 +4851,7 @@ class RuntimeEngine:
                     profile=profile,
                     agents=req.agents,
                     model=planning_model,
+                    semantic=semantic_intent,
                     on_model_event=model_event,
                 )
                 semantic_plan = planning_outcome.plan
@@ -4676,6 +4897,169 @@ class RuntimeEngine:
                         ensure_ascii=False,
                     ),
                 )
+
+            # P22/RAG V1.1: a semantic plan can introduce a knowledge
+            # obligation AFTER the initial low-cost RAG routing. Resolve it
+            # once, inside the immutable Go-authorized catalog, BEFORE the
+            # scheduler starts any potentially side-effecting Agent/Tool.
+            # A final-answer-only guard is too late: a refund Tool may have
+            # already executed based on an invented private policy.
+            required_steps = (
+                [step for step in semantic_plan.steps
+                 if step.knowledge_dependency == "REQUIRED"]
+                if semantic_plan is not None else []
+            )
+            required_knowledge = (
+                semantic_intent.knowledge_dependency == KnowledgeDependency.REQUIRED
+                or bool(required_steps)
+            )
+            blocked_step_reasons: dict[str, str] = {}
+            if required_knowledge:
+                evidence_query = (
+                    "\n".join(step.objective for step in required_steps[:3])
+                    if required_steps else knowledge_query
+                )
+                evidence_grader = HeuristicEvidenceGrader()
+                evidence_grade = await evidence_grader.grade(
+                    evidence_query, rag_context_hits,
+                )
+                async def unmet_required_ids(hits):
+                    # The joined query is not sufficient: one relevant passage
+                    # must not silently satisfy a different REQUIRED step.
+                    missing = set()
+                    for step in required_steps:
+                        grade = await evidence_grader.grade(step.objective, hits)
+                        if not hits or not grade.sufficient:
+                            missing.add(step.id)
+                    return missing
+
+                unmet_step_ids = await unmet_required_ids(rag_context_hits)
+                evidence_ok = (
+                    bool(rag_context_hits)
+                    and rag_grounding_sufficient is not False
+                    and evidence_grade.sufficient
+                    and not unmet_step_ids
+                )
+
+                # At most one additional lookup; OFF / a natural-language
+                # refusal can NEVER be overturned by a late Planner step.
+                if (
+                    not evidence_ok
+                    and policy_mode != "OFF"
+                    and not explicit_rag_off
+                    and authorized_catalog
+                ):
+                    late_semantic = semantic_intent.model_copy(update={
+                        "knowledge_dependency": KnowledgeDependency.REQUIRED,
+                    })
+                    late_discovery = discover_knowledge_bases(
+                        evidence_query,
+                        semantic=late_semantic,
+                        catalog=authorized_catalog,
+                        explicitly_selected_ids=explicit_knowledge_ids,
+                        max_candidates=2,
+                        force_needed=True,
+                    )
+                    late_ids = list(late_discovery.selected_knowledge_base_ids[:2])
+                    # An explicit selection is a hard upper bound; a discovery
+                    # score never grants permissions or widens a named source.
+                    if explicit_knowledge_ids:
+                        late_ids = [
+                            value for value in late_ids
+                            if value in set(explicit_knowledge_ids)
+                        ]
+                    late_ids = [
+                        value for value in late_ids
+                        if value in allowed_knowledge_set
+                    ]
+                    if late_ids:
+                        set_candidate_knowledge_ids(late_ids)
+                        event(
+                            "knowledge_discovery", "Planner Late Knowledge Discovery",
+                            "running", json.dumps({
+                                "round": 2, "candidateCount": len(late_ids),
+                                "reason": "planner_required_evidence",
+                            }),
+                        )
+                        try:
+                            late_hits = await self.retriever.retrieve(
+                                evidence_query,
+                                top_k=max(1, settings.rag_top_k),
+                                filters={"userId": req.user_id},
+                            )
+                        except Exception:
+                            # An authorization outage is fail-closed. Never
+                            # use stale evidence from the first retrieval.
+                            rag_context_hits = []
+                            rag_grounding_sufficient = False
+                            raise RuntimeError(
+                                "知识权限校验或检索不可用，无法依据指定资料完成此任务。"
+                            ) from None
+                        # The second retriever call performed a NEW live
+                        # authorization check. Never merge first-round hits:
+                        # their access may have been revoked during planning.
+                        # An empty authorized result must clear stale evidence.
+                        rag_context_hits = list(late_hits)
+                        retrieval_hits = list(late_hits)
+                        late_grade = await evidence_grader.grade(evidence_query, rag_context_hits)
+                        evidence_grade = late_grade
+                        unmet_step_ids = await unmet_required_ids(rag_context_hits)
+                        if rag_context_hits and late_grade.sufficient and not unmet_step_ids:
+                            rag_grounding_sufficient = True
+                            rag_grounding_policy = "grounded_only"
+                            evidence_ok = True
+                        event(
+                            "knowledge_discovery", "Planner Late Knowledge Discovery",
+                            "completed", json.dumps({
+                                "round": 2, "hitCount": len(late_hits),
+                                "sufficient": bool(late_grade.sufficient),
+                            }),
+                        )
+
+                if not evidence_ok:
+                    rag_grounding_sufficient = False
+                    rag_grounding_policy = "insufficiency_only"
+                    if semantic_plan is not None:
+                        # If a global obligation is unmet we cannot prove that
+                        # *any* REQUIRED step is grounded, even if a heuristic
+                        # gave that step a positive score. Never send uncertain
+                        # project evidence to an independent sibling either.
+                        missing_steps = (
+                            {step.id for step in required_steps}
+                            if not evidence_grade.sufficient or not rag_context_hits
+                            else unmet_step_ids
+                        )
+                        partition = partition_knowledge_steps(
+                            semantic_plan,
+                            insufficient_required=missing_steps,
+                            global_requirement_unresolved=(
+                                semantic_intent.knowledge_dependency
+                                == KnowledgeDependency.REQUIRED
+                            ),
+                        )
+                        blocked_step_reasons = partition.blocked
+                        if blocked_step_reasons:
+                            # With partial execution only unrelated model-only
+                            # work may proceed. Evidence on a blocked policy
+                            # must never leak into its context or citations.
+                            rag_context_hits = []
+                            retrieval_hits = []
+                    event(
+                        "rag", "Required Knowledge Pre-execution Gate", "error",
+                        json.dumps({
+                            "status": "INSUFFICIENT_EVIDENCE",
+                            "reason": "required_evidence_unavailable_before_execution",
+                            "blockedSteps": sorted(blocked_step_reasons),
+                        }),
+                    )
+                    if not blocked_step_reasons or (
+                        semantic_plan is not None and
+                        len(blocked_step_reasons) == len(semantic_plan.steps)
+                    ):
+                        raise RuntimeError(
+                            "本次任务需要指定知识资料，但缺少足够的已授权证据。"
+                            "已停止依赖该资料的 Agent 与工具；请提供资料后重试。"
+                        )
 
             scheduler_id = (
                 f"scheduler."
@@ -4884,6 +5268,50 @@ class RuntimeEngine:
                 for agent
                 in req.agents
             }
+            if blocked_step_reasons:
+                # We cannot infer read-only guarantees from names, risk labels
+                # or arbitrary third-party Tool/MCP descriptions. Do not pass a
+                # shared registry (or delegate to an opaque remote Agent) while
+                # REQUIRED knowledge is missing. Stop if there is no safe
+                # independent model-only work, rather than fabricate a lookup.
+                independent = [a for a in assignments
+                               if a.step_id not in blocked_step_reasons]
+                if tool_execution_enabled or any(
+                    agents_by_id[a.agent_id].protocol.strip().lower() != "internal"
+                    for a in independent
+                ):
+                    event("rag", "Partial Knowledge Side Effect Gate", "error",
+                          json.dumps({"status": "INSUFFICIENT_EVIDENCE",
+                                      "reason": "unverified_independent_executor",
+                                      "blockedSteps": sorted(blocked_step_reasons)}))
+                    raise RuntimeError(
+                        "知识不足时无法验证剩余外部 Agent/工具为只读操作；"
+                        "为防止未经依据的写入，已暂停本次混合任务。"
+                    )
+
+            # For a single internal Agent with no Tools / external evidence,
+            # its tool-free model output is the eventual answer (when synthesis
+            # is bypassed). Never stream Planner/model intermediate tokens,
+            # multi-agent outputs, personal Memory or unvalidated RAG evidence.
+            # Claims from the stream are provisional until Go persists result.
+            stream_single_agent = bool(
+                delta_sink is not None
+                and len(assignments) == 1
+                and not rag_context_hits
+                and not rag_decision.retrieve
+                and not required_knowledge
+                and not memory_overview_query
+                and not memory_forget_requested
+                and not long_term_memories
+                and not conversation_memories
+                and not memory_messages
+                and memory_write_outcome is None
+                and not model_attachments
+                and req.synthesis_mode != "always"
+                and not collaboration_plan.requires_synthesis
+                and "agentmesh" not in req.task.casefold()
+            )
+            stream_single_agent_claimed = False
 
             # =================================================
             # Capability Feedback Helper
@@ -5094,10 +5522,10 @@ class RuntimeEngine:
                             task_input
                         ),
                         memory_messages=(
-                            memory_messages
+                            [] if blocked_step_reasons else memory_messages
                         ),
                         conversation_memories=(
-                            conversation_memories
+                            [] if blocked_step_reasons else conversation_memories
                         ),
                         retrieval_hits=(
                             []
@@ -5105,7 +5533,7 @@ class RuntimeEngine:
                             else rag_context_hits
                         ),
                         long_term_memories=(
-                            long_term_memories
+                            [] if blocked_step_reasons else long_term_memories
                         ),
                         memory_overview_query=(
                             memory_overview_query
@@ -5115,7 +5543,13 @@ class RuntimeEngine:
                         ),
                         grounding_sufficient=(
                             None
-                            if memory_overview_query
+                            if (
+                                memory_overview_query
+                                or (
+                                    semantic_intent.knowledge_dependency == KnowledgeDependency.OPTIONAL
+                                    and rag_grounding_sufficient is False
+                                )
+                            )
                             else rag_grounding_sufficient
                         ),
                         grounding_reason=(
@@ -5131,8 +5565,9 @@ class RuntimeEngine:
                     agent.protocol.strip().lower()
                     in {"internal", "langgraph"}
                 ):
-                    capability_context = discovery_context(
-                        capability_plan
+                    capability_context = (
+                        "" if blocked_step_reasons
+                        else discovery_context(capability_plan)
                     )
                     if capability_context:
                         execution_context = (
@@ -5142,6 +5577,7 @@ class RuntimeEngine:
                         )
 
                     platform_capability_context = (
+                        "" if blocked_step_reasons else
                         build_platform_capability_context(
                             task=req.task,
                             history=req.history,
@@ -5202,6 +5638,17 @@ class RuntimeEngine:
                     ),
                 )
 
+                nonlocal stream_single_agent_claimed
+                stream_this_agent = (
+                    stream_single_agent
+                    and not stream_single_agent_claimed
+                    and agent.protocol.strip().lower() == "internal"
+                    and agent.id == assignments[0].agent_id
+                )
+                if stream_this_agent:
+                    # Even a later reschedule may not emit a second stream.
+                    stream_single_agent_claimed = True
+
                 execution_request = (
                     AgentExecutionRequest(
                         agent=(
@@ -5221,6 +5668,7 @@ class RuntimeEngine:
                         on_model_event=(
                             model_event
                         ),
+                        on_delta=(delta_sink if stream_this_agent else None),
 
                         tool_registry=(
                             tool_registry
@@ -6140,14 +6588,16 @@ class RuntimeEngine:
 
                 if node.objective:
                     base_task_input = (
-                        "Overall user goal:\n"
-                        f"{req.task}\n\n"
-                        "Assigned execution-plan step"
+                        ("" if blocked_step_reasons else "Overall user goal:\n" + req.task + "\n\n")
+                        + "Assigned execution-plan step"
                         + (f" [{node.step_id}]" if node.step_id else "")
                         + ":\n"
                         + node.objective
                         + "\n\nComplete only this assigned step. "
                         "Use upstream results when present and do not redo completed steps."
+                        + ("\nOther steps requiring unavailable knowledge are blocked. "
+                           "Do not infer or perform their actions."
+                           if blocked_step_reasons else "")
                     )
                 else:
                     base_task_input = req.task
@@ -6251,6 +6701,10 @@ class RuntimeEngine:
                             runtime_event,
                             evaluate_dag_condition,
                             initial_outputs=carried_outputs,
+                            blocked_node_reasons={
+                                self.plan_compiler.node_id(step_id): reason
+                                for step_id, reason in blocked_step_reasons.items()
+                            },
                         )
                     except DAGExecutionError as dag_exc:
                         # Suspension is control flow, not a replanning trigger.
@@ -6262,6 +6716,7 @@ class RuntimeEngine:
                             or replan_count >= max(0, settings.max_replan_attempts)
                             or profile.risk_level == "high"
                             or tool_execution_enabled
+                            or blocked_step_reasons
                         ):
                             raise
 
@@ -7230,6 +7685,9 @@ class RuntimeEngine:
             # Synthesis
             # =================================================
 
+            if blocked_step_reasons:
+                should_synthesize = False
+
             if should_synthesize:
 
                 synthesis_node.status = (
@@ -7275,20 +7733,79 @@ class RuntimeEngine:
                         )
                     )
 
-                    answer = (
-                        await synthesis_model
-                        .generate(
-                            (
-                                "请综合以下 Agent 结果，"
-                                "形成清晰、准确的最终答案："
-                                "\n\n"
-                                + "\n\n".join(
-                                    parts
-                                )
-                            ),
-                            model_event,
-                        )
+                    # Agent outputs are untrusted intermediate prose. The
+                    # synthesis model must receive the SAME request-local,
+                    # authorization-checked evidence and citation namespace
+                    # as the earlier Agent calls; citing an earlier Agent
+                    # answer is not equivalent to citing retrieved evidence.
+                    synthesis_hits = select_synthesis_evidence(
+                        rag_context_hits,
+                        policy_mode=policy_mode,
+                        explicit_rag_off=explicit_rag_off,
+                        memory_overview_query=memory_overview_query,
+                        has_blocked_steps=bool(blocked_step_reasons),
+                        initial_retrieval_enabled=rag_decision.retrieve,
+                        initial_injection_enabled=rag_decision.inject_context,
+                        grounding_policy=rag_grounding_policy,
                     )
+                    if rag_decision.retrieve or rag_context_hits or rag_grounding_policy:
+                        synthesis_prompt = build_synthesis_context(
+                            task=req.task,
+                            agent_results=parts,
+                            retrieval_hits=synthesis_hits,
+                            grounding_sufficient=(
+                                None
+                                if (
+                                    semantic_intent.knowledge_dependency
+                                    == KnowledgeDependency.OPTIONAL
+                                    and rag_grounding_sufficient is False
+                                )
+                                else rag_grounding_sufficient
+                            ),
+                            grounding_reason=rag_grounding_reason,
+                            grounding_stopped_reason=rag_grounding_stopped_reason,
+                        )
+                    else:
+                        synthesis_prompt = (
+                            "请综合以下 Agent 结果，形成清晰、准确的最终答案：\n\n"
+                            + "\n\n".join(parts)
+                        )
+                    event(
+                        "synthesis", "Synthesis Evidence Context", "completed",
+                        json.dumps({
+                            "evidenceCount": len(synthesis_hits),
+                            "hasCitationPolicy": bool(
+                                build_evidence_provenance(synthesis_hits)
+                            ),
+                            "groundingPolicy": rag_grounding_policy,
+                        }, ensure_ascii=False),
+                    )
+                    # Stream only where later private-memory / knowledge guards
+                    # cannot invalidate or replace a potentially sensitive draft.
+                    # Completion is still authoritative; a disconnect never
+                    # changes the underlying execution or persisted final answer.
+                    allow_delta = (
+                        delta_sink is not None
+                        and not rag_context_hits
+                        and not rag_decision.retrieve
+                        and not blocked_step_reasons
+                        and not memory_overview_query
+                        and not memory_forget_requested
+                        and memory_write_outcome is None
+                        and not long_term_memories
+                        and not conversation_memories
+                        and not memory_messages
+                        and not required_knowledge
+                        and "agentmesh" not in req.task.casefold()
+                    )
+                    if allow_delta and callable(getattr(synthesis_model, "generate_stream", None)):
+                        answer = await synthesis_model.generate_stream(
+                            synthesis_prompt, model_event, delta_sink,
+                        )
+                    else:
+                        answer = await synthesis_model.generate(
+                            synthesis_prompt, model_event,
+                        )
 
                 except Exception as exc:
 
@@ -7402,7 +7919,29 @@ class RuntimeEngine:
                         ensure_ascii=False,
                     ),
                 )
-                        # =================================================
+            if blocked_step_reasons:
+                # Never claim the whole request completed. This output only
+                # contains independently executed model-only steps; the
+                # missing-policy steps and their dependants have no outputs.
+                blocked_labels = [
+                    f"- {step.id}: {step.objective}（{blocked_step_reasons[step.id]}）"
+                    for step in semantic_plan.steps
+                    if step.id in blocked_step_reasons
+                ]
+                answer = (
+                    "仅完成了不依赖缺失知识的独立步骤；整项任务尚未完成。\n\n"
+                    + answer + "\n\n以下步骤未执行（缺少已授权证据）：\n"
+                    + "\n".join(blocked_labels)
+                    + "\n请提供所需资料或调整知识范围后重新发起未完成的步骤。"
+                )
+                event("rag", "Partial Knowledge Result", "completed",
+                      json.dumps({"status": "INSUFFICIENT_EVIDENCE",
+                                  "completedSteps": [s.id for s in semantic_plan.steps
+                                                     if self.plan_compiler.node_id(s.id)
+                                                     in dag_result.outputs],
+                                  "blockedSteps": sorted(blocked_step_reasons)}))
+
+            # =================================================
             # 8.03 Conversational Forget Guard
             #
             # Forget is a control command, not a normal content question.
@@ -7701,6 +8240,38 @@ class RuntimeEngine:
                         },
                         ensure_ascii=False,
                     ),
+                )
+
+            # A REQUIRED evidence obligation is a runtime output contract,
+            # not merely a prompt. This guard also covers late knowledge
+            # requirements added by the semantic planner. A missing source,
+            # an OFF policy, or insufficient evidence cannot be replaced with
+            # the model's knowledge of the user's private/project documents.
+            required_knowledge = (
+                semantic_intent.knowledge_dependency == KnowledgeDependency.REQUIRED
+                or (
+                    semantic_plan is not None
+                    and any(step.knowledge_dependency == "REQUIRED" for step in semantic_plan.steps)
+                )
+            )
+            if required_knowledge and not blocked_step_reasons and (
+                not rag_context_hits or rag_grounding_sufficient is False
+            ):
+                answer = (
+                    "本次任务要求依据指定的知识资料，但当前没有足够的已授权证据。"
+                    "我无法据此确认相关规则、结论或执行条件；请提供资料，"
+                    "或开启并授权对应知识库后重试。"
+                )
+                runtime_citations = []
+                rag_grounding_policy = "insufficiency_only"
+                event(
+                    "rag", "Required Knowledge Evidence Gate", "completed",
+                    json.dumps({
+                        "status": "INSUFFICIENT_EVIDENCE",
+                        "reason": "required_knowledge_unavailable",
+                        "retrievalAttempted": rag_decision.retrieve,
+                        "evidenceCount": len(rag_context_hits),
+                    }, ensure_ascii=False),
                 )
 
                         # =================================================

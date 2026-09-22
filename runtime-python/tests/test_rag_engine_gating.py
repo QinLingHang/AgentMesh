@@ -281,6 +281,17 @@ async def test_engine_fast_rag_calls_retriever():
                 "rag-gating-knowledge"
             ),
 
+            ragPolicy={"mode": "ON", "scopes": ["PROJECT"]},
+            effectiveRagPolicy={
+                "mode": "ON", "allowedScopes": ["PROJECT"],
+                "allowedKnowledgeBaseIds": [9],
+            },
+            knowledgeCatalog=[{
+                "knowledgeBaseId": 9,
+                "name": "AgentMesh P9 BYOK MCP A2A Tool Runtime Failure Backoff",
+                "scope": "PROJECT", "accessible": True,
+            }],
+
             task=(
                 "AgentMesh 的 MCP "
                 "Failure Backoff 是什么？"

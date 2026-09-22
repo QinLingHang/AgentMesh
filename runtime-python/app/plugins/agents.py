@@ -136,6 +136,7 @@ class InternalAgentPlugin(
                     request
                     .on_tool_event,
                     attachments=request.attachments,
+                    on_delta=request.on_delta,
                 )
             )
 
@@ -157,6 +158,10 @@ class InternalAgentPlugin(
                 prompt,
                 request.on_model_event,
                 attachments=request.attachments,
+            )
+        elif request.on_delta is not None and callable(getattr(model, "generate_stream", None)):
+            content = await model.generate_stream(
+                prompt, request.on_model_event, request.on_delta,
             )
         else:
             content = await model.generate(

@@ -11,6 +11,12 @@ PlanCondition = Literal[
     "has_upstream_output",
 ]
 
+KnowledgeDependency = Literal[
+    "NONE",
+    "OPTIONAL",
+    "REQUIRED",
+]
+
 
 class PlanStep(BaseModel):
     """One semantic unit of work in an execution plan.
@@ -28,6 +34,8 @@ class PlanStep(BaseModel):
     depends_on: list[str] = Field(default_factory=list, alias="dependsOn")
     optional: bool = False
     condition: PlanCondition | None = None
+    knowledge_dependency: KnowledgeDependency = Field(default="NONE", alias="knowledgeDependency")
+    forbidden_actions: list[str] = Field(default_factory=list, alias="forbiddenActions")
 
 
 class ExecutionPlan(BaseModel):

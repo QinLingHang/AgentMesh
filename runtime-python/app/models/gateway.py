@@ -38,6 +38,67 @@ class ModelGateway:
             await asyncio.sleep(min(0.25 * (2**attempt), 1.0))
         raise AssertionError("unreachable")
 
+    async def generate_stream(
+        self,
+        request: ModelRequest,
+        on_event: ModelEventHandler | None = None,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
+        """Stream *real* provider deltas, never slice a completed answer.
+
+        Mock providers or adapters without a native stream use ordinary
+        generation and emit no artificial token events. After any real delta,
+        failures propagate without replaying the request.
+        """
+        stream_method = getattr(self.provider, "stream", None)
+        if not callable(stream_method) or getattr(self.provider, "name", "") == "mock":
+            return await self.generate(request, on_event)
+        self._emit(on_event, "model_call_started", provider=self.provider.name, model=request.model)
+        parts: list[str] = []
+        done: dict[str, Any] | None = None
+        try:
+            async with asyncio.timeout(request.timeout or self.timeout):
+                async for item in stream_method(request):
+                    if item.get("type") == "delta":
+                        chunk = item.get("delta", "")
+                        if not isinstance(chunk, str):
+                            raise ValueError("model stream delta must be text")
+                        parts.append(chunk)
+                        if on_delta is not None and chunk:
+                            try:
+                                on_delta(chunk)
+                            except Exception:
+                                # A broken/disconnected UI is never a reason to
+                                # cancel the authoritative Agent execution.
+                                pass
+                    elif item.get("type") == "done":
+                        done = item
+        except Exception:
+            self._emit(on_event, "model_call_failed", provider=self.provider.name,
+                       model=request.model, streaming=True, retrying=False)
+            raise
+        if done is None:
+            raise RuntimeError("model stream ended without an authoritative done event")
+        text = "".join(parts)
+        if text != str(done.get("content", "")):
+            raise RuntimeError("model stream content did not match emitted deltas")
+        result = ModelResponse(
+            content=text, provider=str(done.get("provider") or self.provider.name),
+            model=str(done.get("model") or request.model),
+            input_tokens=int(done.get("input_tokens") or 0),
+            output_tokens=int(done.get("output_tokens") or 0),
+            total_tokens=int(done.get("total_tokens") or 0),
+            latency_ms=int(done.get("latency_ms") or 0),
+            finish_reason=done.get("finish_reason"),
+            estimated_cost=done.get("estimated_cost"),
+        )
+        self._emit(on_event, "model_call_completed", provider=result.provider,
+                   model=result.model, latency_ms=result.latency_ms,
+                   input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+                   total_tokens=result.total_tokens, estimated_cost=result.estimated_cost or 0.0,
+                   cost_known=result.estimated_cost is not None, attempts=1, streaming=True)
+        return result
+
     @staticmethod
     def _emit(handler: ModelEventHandler | None, kind: str, **detail: Any) -> None:
         if handler is not None: handler({"kind": kind, **detail})

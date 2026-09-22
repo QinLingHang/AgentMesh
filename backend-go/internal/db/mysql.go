@@ -269,6 +269,44 @@ func ensureRuntimeSchema(
 	}
 
 	// =====================================================
+	// 4.2 RAG policy snapshots
+	//
+	// rag_policy_json records the user/request intent.
+	// effective_rag_policy_json records the authorized upper bound resolved
+	// when the task was created. Runtime access still revalidates live auth.
+	// =====================================================
+
+	if err := ensureColumn(
+		ctx,
+		db,
+		"tasks",
+		"rag_policy_json",
+		`
+		ALTER TABLE tasks
+		ADD COLUMN rag_policy_json
+			JSON NULL
+			AFTER model_selection_json
+		`,
+	); err != nil {
+		return err
+	}
+
+	if err := ensureColumn(
+		ctx,
+		db,
+		"tasks",
+		"effective_rag_policy_json",
+		`
+		ALTER TABLE tasks
+		ADD COLUMN effective_rag_policy_json
+			JSON NULL
+			AFTER rag_policy_json
+		`,
+	); err != nil {
+		return err
+	}
+
+	// =====================================================
 	// 5. Runtime Continuation
 	//
 	// 只存在于：

@@ -993,88 +993,45 @@ Adaptive Workflow 的 Planner、Quality Gate、Repair 和 Replan 参数可通过
 
 ---
 
-# ✅ 测试与验收
+# ✅ 测试
 
-AgentMesh 针对 Runtime、Adaptive Workflow、记忆、分布式执行、治理和可靠性进行了持续自动化测试。
+仓库包含 Control Plane、Agent Runtime、Web、SDK 和端到端场景的自动化测试。提交代码前，建议至少执行受影响模块的测试；发布前再执行完整回归与独立环境故障注入。
 
-当前主分支关键回归结果：
+### Go Control Plane
 
-| 验收范围 | 结果 |
-|:---|:---|
-| Adaptive Workflow Targeted | 61/61 PASS |
-| Semantic Planner | PASS |
-| Complex Chinese Planning | PASS |
-| Plan Validation | PASS |
-| Hybrid Dynamic DAG | PASS |
-| Fan-out / Fan-in | PASS |
-| Quality Gate | PASS |
-| Bounded Repair | PASS |
-| Reschedule | PASS |
-| Replan | PASS |
-| Completed Step Carry-forward | PASS |
-| Side-effect Replay Protection | PASS |
-| Mixed Internal / LangGraph / HTTP / A2A | PASS |
-| Python Runtime Full Regression | 417/417 PASS |
-| Go Control Plane Regression | PASS |
-| React Contract Tests | 110/110 PASS |
-| React Production Build | PASS |
-| Python SDK | 3/3 PASS |
-| TypeScript SDK | 3/3 PASS |
-| Multimodal RAG | PASS |
-| Tool / MCP | PASS |
-| Distributed Runtime | PASS |
-| Lease / Fencing | PASS |
-| Conversation History Recovery | PASS |
-| Memory Capsule / Redis-loss Recovery | PASS |
-| Multi-Tenant Governance | PASS |
-| Kafka Result Delivery | PASS |
-| Duplicate Event Idempotency | PASS |
-| Higher-Fence Recovery | PASS |
-| COMPLETING Crash Replay | PASS |
-
-### Adaptive Workflow Safety
-
-已验证：
-
-```text
-Repair bounded: YES
-Replan bounded: YES
-Completed step replay prevented: YES
-Completed side-effect replay prevented: YES
-HTTP/A2A automatic quality replay prevented: YES
-Tool automatic side-effect replay prevented: YES
+```powershell
+cd backend-go
+go test ./...
 ```
 
-### 架构边界验证
+需要 MySQL、Redis 或 Kafka 的集成测试应使用独立数据库、topic 和 consumer group，避免影响开发数据。
 
-```text
-Semantic Planner
-→ ExecutionPlan
-→ Scheduler
-→ Plan Compiler
-→ DAGExecutor
+### Python Agent Runtime
+
+```powershell
+cd runtime-python
+python -m pytest -q
 ```
 
-已验证成立。
+### React Web
 
-同时：
-
-```text
-Planner = What to do
-Scheduler = Who executes
-
-LangGraph = Agent Executor
-Durable Runtime = Infrastructure Reliability
-Kafka = Result Delivery
+```powershell
+cd web-react
+npm install
+npm test
+npm run build
 ```
 
-职责保持独立。
+浏览器端到端测试需要本地 Go、Python 和 Web 服务，以及 Compose 中的基础设施：
 
-### 验收范围说明
+```powershell
+cd web-react
+npm run test:e2e:v4-1
+```
 
-当前代码已通过 Windows 本地 Go / Python / React 与 Docker 基础设施环境下的自动化回归与可靠性验证。
+### 可靠性与安全边界
 
-真实生产 Kafka 集群、大规模并发性能、跨主机生产 HA 和完整云生产部署仍需要独立环境验收。
+相关自动化覆盖任务幂等、SSE 恢复、会话历史、Memory/Knowledge 隔离、RAG 授权与引用、Tool/MCP 治理、Durable Worker Lease/Fencing、Kafka Outbox/Consumer/DLQ 和重复事件处理。真实 Broker 中断等破坏性测试必须使用隔离 QA 资源；不得停止共享基础设施或清空开发数据库。
 
 ---
 

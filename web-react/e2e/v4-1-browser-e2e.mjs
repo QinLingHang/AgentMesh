@@ -5,6 +5,9 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import process from "node:process";
+import { groundedFixtureKnowledgeReply, probeFixtureKnowledgeEvidence } from "./knowledge-fixture-evidence.mjs";
+import { cdpElementExists, reportFailurePreservingPrimary } from "./qa-cdp-diagnostics.mjs";
+import { projectCitationReadyExpression, projectCitationDiagnosticExpression } from "./project-citation-dom.mjs";
 
 const loopback = "127.0.0.1";
 const webRoot = path.resolve(import.meta.dirname, "..");
@@ -341,9 +344,10 @@ async function waitFor(cdp, expression, label, timeoutMs = 15000) {
     }
     await sleep(120);
   }
-  let body = "";
-  try { body = await cdp.evaluate("document.body?.innerText ?? ''"); } catch {}
-  throw new Error(`Timed out waiting for ${label}. ${lastError?.message ?? ""}\nBody:\n${body}`);
+  // Never dump the entire page on failure: the Workspace can contain private
+  // Knowledge, tokens, prompts and results. Each critical gate emits a bounded,
+  // purpose-built metadata diagnostic instead.
+  throw new Error(`Timed out waiting for ${label}. ${lastError?.message ?? ""}`);
 }
 
 function q(value) {
@@ -564,6 +568,77 @@ async function ensureV41AgentBaseline(apiBase, accessToken, email) {
   );
 }
 
+// A rendered authenticated shell is not the same as a hydrated Workspace.
+// The project rail is mounted by Workspace and may appear a moment after
+// auth/model-service restoration. Wait for the actual visible, enabled control;
+// never substitute an API project creation or a fixed sleep for this UI gate.
+async function openCreateProjectWhenReady(cdp) {
+  await waitFor(
+    cdp,
+    `(() => {
+      const shell = document.querySelector('.app-shell.tab-workspace');
+      const rail = shell?.querySelector('.session-rail');
+      const button = rail?.querySelector('[data-testid="project-create-open"]');
+      return Boolean(button && button.isConnected && !button.disabled && button.getClientRects().length > 0
+        && getComputedStyle(rail).pointerEvents !== 'none'
+        && getComputedStyle(rail).visibility !== 'hidden');
+    })()`,
+    "visible project-create button in hydrated workspace after model-service reload",
+    20000,
+  );
+  await clickSelector(cdp, '[data-testid="project-create-open"]', "open create-project dialog");
+}
+
+// RAG V1.1 intentionally requires per-request user consent for personal Global
+// Knowledge. Merely uploading a file does NOT turn USER_GLOBAL on. Configure
+// the same real UI users see; never forge an API payload or widen Go policy.
+async function setUserGlobalKnowledgeScope(cdp, enabled) {
+  await waitFor(
+    cdp,
+    `(() => { const button=document.querySelector('[data-testid="run-settings-open"]');
+      return Boolean(button && button.isConnected && !button.disabled && button.getClientRects().length > 0); })()`,
+    "run settings button ready",
+    20000,
+  );
+  await clickSelector(cdp, '[data-testid="run-settings-open"]', "open real run settings");
+  await waitFor(
+    cdp,
+    `document.querySelector('.run-settings-drawer [data-testid="rag-scope-user-global"]')`,
+    "global knowledge consent control ready",
+    10000,
+  );
+  const scopeSelector = '.run-settings-drawer [data-testid="rag-scope-user-global"]';
+  const previous = await cdp.evaluate(`document.querySelector(${q(scopeSelector)})?.checked`);
+  assert.equal(typeof previous, "boolean", "global knowledge scope checkbox missing");
+  if (previous !== enabled) await clickSelector(cdp, scopeSelector, "explicit global knowledge consent");
+  await waitFor(cdp, `document.querySelector(${q(scopeSelector)})?.checked === ${enabled}`, "global knowledge consent state", 10000);
+  await clickSelector(cdp, '[data-testid="run-settings-done"]', "save run settings through UI");
+  await waitFor(cdp, `!document.querySelector('.run-settings-drawer')`, "run settings closed", 10000);
+}
+
+// Store only the policy fields required for the QA assertion, never tokens,
+// full prompts, model credentials, attachment contents or raw response bodies.
+function summarizeGlobalKnowledgeSubmission(request, targetPrompt) {
+  if (!request?.url?.includes('/api/tasks/submit-stream') || !request.postData) return null;
+  let payload;
+  try { payload = JSON.parse(request.postData); } catch { return null; }
+  if (payload?.task !== targetPrompt) return null;
+  return {
+    mode: payload.ragPolicy?.mode ?? null,
+    scopes: payload.ragPolicy?.scopes ?? null,
+    selectedKnowledgeBaseIds: payload.ragPolicy?.selectedKnowledgeBaseIds ?? null,
+  };
+}
+
+function assertObservedGlobalKnowledgeSubmission(submissions, expectedEnabled, label) {
+  const policy = submissions.at(-1);
+  assert.ok(policy, `${label}: no browser submission policy captured; cannot claim effective authorization`);
+  assert.equal(policy.mode, 'AUTO', `${label}: fixture must test natural AUTO knowledge discovery`);
+  assert.ok(Array.isArray(policy.scopes), `${label}: request did not provide an explicit knowledge scope array`);
+  assert.equal(policy.scopes.includes('USER_GLOBAL'), expectedEnabled, `${label}: browser request had unexpected Global Knowledge consent`);
+  assert.deepEqual(policy.selectedKnowledgeBaseIds, [], `${label}: fixture must not force-select a knowledge base to fake discovery`);
+}
+
 async function verifyAndReloadV41ModelService(cdp, fixture, apiBase, accessToken, email, displayName, modelPort) {
   await seedV41ModelService(fixture, email, modelPort);
   const services = await apiRequest(apiBase, accessToken, "GET", "/api/me/model-services");
@@ -606,8 +681,10 @@ async function createKnowledgeFixture(baseUrl, accessToken, { name, scope, proje
   const form = new FormData();
   form.append("file", new Blob([content], { type: "text/plain;charset=utf-8" }), filename);
   const file = await apiRequest(baseUrl, accessToken, "POST", `/api/knowledge/bases/${base.id}/files`, form);
-  await waitForKnowledgeReady(baseUrl, accessToken, base.id, file.id);
-  return { base, file };
+  const ready = await waitForKnowledgeReady(baseUrl, accessToken, base.id, file.id);
+  assert.ok(Number(ready.textChunkCount) > 0,
+    `knowledge file READY without indexed text: base=${base.id} file=${file.id} textChunks=${ready.textChunkCount}`);
+  return { base, file, ready };
 }
 
 async function waitForAccessToken(getToken, timeoutMs = 10000) {
@@ -864,6 +941,15 @@ async function sendPrompt(cdp, prompt, expectedText = "", timeoutMs = 90000) {
   }))()`);
 
   await setValue(cdp, '[data-testid="workspace-composer"]', prompt);
+  // A prior request can have persisted its assistant answer while Workspace is
+  // still clearing its busy state. Only click when the real submit button is
+  // enabled; never silently drop the next QA prompt or repeat the submission.
+  await waitFor(
+    cdp,
+    `document.querySelector('[data-testid="workspace-submit"]')?.disabled === false`,
+    "workspace submit ready for the next prompt",
+    30000,
+  );
   await clickSelector(cdp, '[data-testid="workspace-submit"]', "workspace submit");
   await waitFor(
     cdp,
@@ -993,10 +1079,12 @@ function modelFixtureReply(body, desktopRoot) {
     return { content: JSON.stringify({ relevance: 0.99, coverage: 0.99, confidence: 0.99, sufficient: true, reason: "fixture evidence is sufficient" }) };
   }
 
-  const globalMarker = all.match(/AGENTMESH_V41_GLOBAL_[A-Z0-9_\-]+/i)?.[0];
-  const projectMarker = all.match(/AGENTMESH_V41_PROJECT_[A-Z0-9_\-]+/i)?.[0];
-  if (projectMarker) return { content: `根据当前项目资料，项目测试标记是 ${projectMarker}。` };
-  if (globalMarker) return { content: `根据当前可用资料，测试标记是 ${globalMarker}。` };
+  // The fixture must obey the SAME citation policy as a real model. Read a
+  // marker only from an actual Retrieved Knowledge evidence item and use that
+  // item's declared/available request-local citation. Never force [1] or
+  // bypass Citation Guard when the model lacks usable evidence.
+  const knowledgeReply = groundedFixtureKnowledgeReply(messages);
+  if (knowledgeReply) return knowledgeReply;
 
   const tools = Array.isArray(body.tools) ? body.tools : [];
   const hasDesktopList = tools.some((item) => item?.function?.name === "local.fs.list");
@@ -1036,6 +1124,9 @@ async function startModelFixture(port, desktopRoot) {
   let requestCount = 0;
   let lastUser = "";
   let lastMessageText = "";
+  // QA-local, bounded structural diagnostics: no prompts, evidence text,
+  // source paths, marker values, credentials or document identities.
+  const knowledgeProbes = [];
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${loopback}:${port}`);
@@ -1044,7 +1135,7 @@ async function startModelFixture(port, desktopRoot) {
     }
     if (req.method === "GET" && url.pathname === "/control/state") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ waiting, holdMarker, requestCount, lastUser, lastMessageText }));
+      res.end(JSON.stringify({ waiting, holdMarker, requestCount, lastUser, lastMessageText, knowledgeProbes }));
       return;
     }
     if (req.method === "POST" && url.pathname === "/control/hold") {
@@ -1083,6 +1174,20 @@ async function startModelFixture(port, desktopRoot) {
       await waitPromise;
     }
     const reply = modelFixtureReply(body, desktopRoot);
+    const globalProbe = probeFixtureKnowledgeEvidence(messages, "GLOBAL");
+    const projectProbe = probeFixtureKnowledgeEvidence(messages, "PROJECT");
+    knowledgeProbes.push({
+      requestIndex: requestCount,
+      global: globalProbe.diagnostic,
+      project: projectProbe.diagnostic,
+      replyKind: globalProbe.evidence && reply.content?.includes(globalProbe.evidence.marker)
+        ? "global_grounded"
+        : projectProbe.evidence && reply.content?.includes(projectProbe.evidence.marker)
+          ? "project_grounded" : reply.tool_calls ? "tool_call"
+            : reply.content === "AgentMesh V4.1 deterministic browser fixture response."
+              ? "generic" : "other",
+    });
+    if (knowledgeProbes.length > 32) knowledgeProbes.shift();
     const id = `chatcmpl-v41-${Date.now()}`;
     if (body.stream === true) {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -1142,6 +1247,7 @@ async function runV41() {
   const desktopMarker = `AGENTMESH_V41_DESKTOP_${stamp}.txt`;
   fs.writeFileSync(path.join(desktopFixtureRoot, desktopMarker), "desktop read-only fixture", "utf8");
   const globalMarker = `AGENTMESH_V41_GLOBAL_${stamp}`;
+  const globalKnowledgePrompt = "请根据我已经上传的个人资料，告诉我用户 A 的测试标记是什么？";
   const globalSecret = `PRIVATE_SECRET_SHOULD_NOT_TRACE_${stamp}`;
   const projectMarker = `AGENTMESH_V41_PROJECT_${stamp}`;
   const ownerA = { email: `v41-owner-a-${stamp}@example.test`, password: "V41OwnerAPass!123", displayName: "V41 Browser A", logs: () => serverLog };
@@ -1171,6 +1277,7 @@ async function runV41() {
   let goServer; let runtime; let desktop; let vite; let browserChild; let cdp; let modelServer;
   let runtimePython = "";
   let latestAccessToken = "";
+  const globalKnowledgeSubmissions = [];
   let tokenA = "";
   let apiBase = "";
   let globalFixture = null;
@@ -1278,11 +1385,16 @@ async function runV41() {
     browserChild = spawn(browser, ["--headless=new", "--window-size=1440,1000", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--remote-allow-origins=*", `--remote-debugging-port=${debugPort}`, `--user-data-dir=${profile}`, "about:blank"], { stdio: "ignore" });
     const page = await waitForPageTarget(debugPort);
     cdp = new CDP(page.webSocketDebuggerUrl); await cdp.connect();
-    await cdp.send("Runtime.enable"); await cdp.send("Page.enable"); await cdp.send("Network.enable");
+    await cdp.send("Runtime.enable"); await cdp.send("Page.enable");
+    // Keep POST bodies available to the event only for the strict, redacted
+    // per-request policy assertion; never persist or print the raw body.
+    await cdp.send("Network.enable", { maxPostDataSize: 65536 });
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false });
     cdp.on("Network.requestWillBeSent", ({ request }) => {
       const auth = request?.headers?.Authorization ?? request?.headers?.authorization;
       if (typeof auth === "string" && /^Bearer\s+/.test(auth)) latestAccessToken = auth.replace(/^Bearer\s+/i, "");
+      const policy = summarizeGlobalKnowledgeSubmission(request, globalKnowledgePrompt);
+      if (policy) globalKnowledgeSubmissions.push(policy);
     });
 
     const frontUrl = `http://${loopback}:${frontPort}`;
@@ -1294,7 +1406,7 @@ async function runV41() {
 
     // P20 light-theme regression: project management controls must stay on the
     // light surface even if legacy/global form rules still exist elsewhere.
-    await clickSelector(cdp, '[data-testid="project-create-open"]', "open create-project dialog");
+    await openCreateProjectWhenReady(cdp);
     await waitFor(cdp, `document.querySelector('[data-testid="project-name-input"]')`, "create-project name input");
     const projectControlTheme = await cdp.evaluate(`(() => {
       const input=document.querySelector('[data-testid="project-name-input"]');
@@ -1582,8 +1694,50 @@ async function runV41() {
       content: `用户 A 的测试标记是 ${globalMarker}。\n这行是私密追踪哨兵：${globalSecret}。`,
     });
     assert.ok(globalFixture.base.id > 0);
+
+    // Negative boundary first: upload/index success is NOT authorization.
+    // A fresh non-project Workspace starts with PROJECT only. Verify both the
+    // actual browser payload and the response cannot access the Global marker.
     await createConversationThroughBrowser(cdp);
-    await sendPrompt(cdp, "请根据我已经上传的个人资料，告诉我用户 A 的测试标记是什么？", globalMarker, 120000);
+    await sendPrompt(cdp, globalKnowledgePrompt);
+    assertObservedGlobalKnowledgeSubmission(globalKnowledgeSubmissions, false, "A before global opt-in");
+    assert.ok(!(await workspaceText(cdp)).includes(globalMarker), "GLOBAL Knowledge leaked without explicit user consent");
+
+    // Positive boundary: explicitly enable the Global scope through the real
+    // Run Settings UI. Do not select a KB: this must exercise AUTO discovery.
+    await createConversationThroughBrowser(cdp);
+    await setUserGlobalKnowledgeScope(cdp, true);
+    const modelRequestsBeforeGlobal = (await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json()).requestCount;
+    try {
+      await sendPrompt(cdp, globalKnowledgePrompt, globalMarker, 120000);
+    } catch (error) {
+      // Preserve the real failure. Output only boolean/count/policy metadata so
+      // a future no-recall failure can be localized without dumping private
+      // knowledge, prompt bodies, tokens or the fixture's secret sentinel.
+      await reportFailurePreservingPrimary(error, "[P22 GLOBAL]", async () => {
+        const state = await fetch(`http://${loopback}:${modelPort}/control/state`)
+          .then((response) => response.json()).catch(() => null);
+        return {
+          requestPolicy: globalKnowledgeSubmissions.at(-1) ?? null,
+          modelRequestsSinceSubmit: state ? state.requestCount - modelRequestsBeforeGlobal : null,
+          lastModelContextHadGlobalMarker: Boolean(state?.lastMessageText?.includes(globalMarker)),
+          // The old boolean only searched the whole request. This captures
+          // the ACTUAL citation parser decision for every model call after
+          // submission, so a memory marker cannot masquerade as evidence.
+          knowledgeProbeChain: state?.knowledgeProbes?.filter(
+            item => item.requestIndex > modelRequestsBeforeGlobal,
+          ) ?? [],
+          runDetailsOpenerPresent: await cdpElementExists(cdp, '[data-testid="run-details-open"]'),
+        };
+      });
+    }
+    assertObservedGlobalKnowledgeSubmission(globalKnowledgeSubmissions, true, "A after global opt-in");
+    const globalProofs = (await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json())
+      .knowledgeProbes.filter(item => item.requestIndex > modelRequestsBeforeGlobal);
+    assert.ok(
+      globalProofs.some(item => item.global.reason === "valid_evidence" && item.replyKind === "global_grounded"),
+      "GLOBAL marker in model request is not proof of a citation-grounded fixture response",
+    );
     await openLatestRunDetails(cdp);
     await clickSelector(cdp, '[data-testid="run-details-tab-capability"]', "capability tab");
     await waitFor(cdp, `document.querySelector('[data-testid="capability-discovery-event"][data-knowledge-selected="true"]')`, "GLOBAL knowledge capability selection");
@@ -1592,7 +1746,10 @@ async function runV41() {
     await clickSelector(cdp, '[data-testid="run-details-tab-rag"]', "RAG tab");
     const ragText = await cdp.evaluate(`document.querySelector('[data-testid="run-details-drawer"]')?.innerText ?? ''`);
     assert.ok(/Retrieval|检索|RAG/i.test(ragText), "RAG execution evidence missing from Run Details");
+    const retrievalHits = await cdp.evaluate(`Number(document.querySelectorAll('[data-testid="run-details-drawer"] .rag-summary-grid > div strong')[2]?.textContent?.trim() ?? 0)`);
+    assert.ok(retrievalHits > 0, `Global Knowledge had no actual retrieval hits (Run Details hits=${retrievalHits})`);
     await closeRunDetails(cdp);
+    console.log("[P22 E2E] GLOBAL positive retrieval gate PASS");
 
     // Negative routing: generic résumé writing must not force private retrieval.
     await createConversationThroughBrowser(cdp);
@@ -1604,15 +1761,99 @@ async function runV41() {
     await closeRunDetails(cdp);
 
     // Project mode may use PROJECT KBs and explicitly bound GLOBAL KBs only.
+    // Clear the previous user-consented Global scope before asserting the
+    // unbound-Global isolation case. Keeping it enabled tests a different
+    // contract and would be a false privacy regression.
+    await setUserGlobalKnowledgeScope(cdp, false);
     project = await apiRequest(apiBase, tokenA, "POST", "/api/projects", JSON.stringify({ name: `V41 Project ${stamp}`, description: "browser isolation fixture" }), { "Content-Type": "application/json" });
     projectKnowledgeFixture = await createKnowledgeFixture(apiBase, tokenA, {
       name: `V41 Project KB ${stamp}`, scope: "PROJECT", projectId: project.id, filename: `project-${stamp}.txt`,
       content: `当前项目的测试标记是 ${projectMarker}。`,
     });
+    console.log("[P22 E2E] PROJECT knowledge fixture indexed");
     const projectConv = await createConversationThroughBrowser(cdp);
     await apiRequest(apiBase, tokenA, "PUT", `/api/projects/${project.id}/conversations/${projectConv}`);
     await openConversation(cdp, projectConv);
-    await sendPrompt(cdp, "请根据当前项目资料告诉我项目测试标记是什么？", projectMarker, 120000);
+    const modelRequestsBeforeProject = (await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json()).requestCount;
+    try {
+      await sendPrompt(cdp, "请根据当前项目资料告诉我项目测试标记是什么？", projectMarker, 120000);
+      const projectProofs = (await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json())
+        .knowledgeProbes.filter(item => item.requestIndex > modelRequestsBeforeProject);
+      assert.ok(
+        projectProofs.some(item => item.project.reason === "valid_evidence" && item.replyKind === "project_grounded"),
+        "PROJECT marker in model request is not proof of a citation-grounded fixture response",
+      );
+      console.log("[P22 E2E] PROJECT grounded answer marker received");
+    } catch (error) {
+      // Preserve the original failure and emit only metadata. A future real
+      // retrieval/projection defect must not be misclassified as this fixture
+      // regression, and private knowledge must never be printed to QA logs.
+      await reportFailurePreservingPrimary(error, "[P22 PROJECT]", async () => {
+        const state = await fetch(`http://${loopback}:${modelPort}/control/state`)
+          .then(response => response.json()).catch(() => null);
+        let citation = null;
+        try {
+          await openLatestRunDetails(cdp);
+          await clickSelector(cdp, '[data-testid="run-details-tab-rag"]', "failed project RAG details tab");
+          citation = await cdp.evaluate(`(() => {
+            const drawer=document.querySelector('[data-testid="run-details-drawer"]');
+            const row=[...drawer.querySelectorAll('.timeline-item')].find(item=>item.querySelector('.timeline-header strong')?.textContent?.trim()==='Citation Guard');
+            let guard=null;
+            try { guard=JSON.parse(row?.querySelector('.timeline-body pre')?.textContent ?? 'null'); } catch {}
+            return guard ? { passed:guard.passed===true, action:guard.action ?? null,
+              violationTypes:Array.isArray(guard.violations) ? guard.violations.map(value=>String(value).split(':')[0]) : [],
+              availableCount:Array.isArray(guard.availableCitations) ? guard.availableCitations.length : 0,
+              usedCount:Array.isArray(guard.citations) ? guard.citations.length : 0 } : null;
+          })()`);
+          await closeRunDetails(cdp);
+        } catch { /* Preserve original failure if optional Run Details inspection fails. */ }
+        return {
+          modelContextHadProjectMarker: Boolean(state?.lastMessageText?.includes(projectMarker)),
+          modelContextHadKnowledge: Boolean(state?.lastMessageText?.includes('[Retrieved Knowledge]')),
+          knowledgeProbeChain: state?.knowledgeProbes?.filter(
+            item => item.requestIndex > modelRequestsBeforeProject,
+          ) ?? [],
+          browserShowsSafeRejection: (await workspaceText(cdp)).includes('证据引用未能通过校验'),
+          citation,
+        };
+      });
+    }
+    // A bare marker is not success: a valid grounded answer must carry a
+    // projected citation and the real Run Details must show guard=allow.
+    // sendPrompt may observe the marker in a transient streaming answer before
+    // the durable message and its citation metadata have been hydrated. Check
+    // EVERY durable assistant row (not the first textContent match); require an
+    // actual interactive marker and a matching source filename/label in that
+    // SAME row. Visible text "[1]" plus a separate SOURCES card is not proof.
+    try {
+      await waitFor(
+        cdp,
+        projectCitationReadyExpression(projectMarker, `project-${stamp}.txt`),
+        "PROJECT durable answer with clickable citation and matching source provenance",
+        30000,
+      );
+    } catch (error) {
+      await reportFailurePreservingPrimary(error, "[P22 PROJECT CITATION DOM]", async () =>
+        cdp.evaluate(projectCitationDiagnosticExpression(projectMarker, `project-${stamp}.txt`)),
+      );
+    }
+    await openLatestRunDetails(cdp);
+    await clickSelector(cdp, '[data-testid="run-details-tab-rag"]', "project RAG details tab");
+    const projectCitationEvidence = await cdp.evaluate(`(() => {
+      const panel=document.querySelector('[data-testid="run-details-drawer"]');
+      const cards=[...panel.querySelectorAll('.rag-summary-grid > div')];
+      const count=(label)=>Number(cards.find(card=>card.querySelector('span')?.textContent?.trim()===label)?.querySelector('strong')?.textContent?.trim() ?? 0);
+      const guard=[...panel.querySelectorAll('.timeline-item')].find(item=>item.querySelector('.timeline-header strong')?.textContent?.trim()==='Citation Guard');
+      let decision=null;
+      try { decision=JSON.parse(guard?.querySelector('.timeline-body pre')?.textContent ?? 'null'); } catch {}
+      return { hits:count('Retrieval Hits'), used:count('Used Citations'), guardPassed:decision?.passed===true, guardAction:decision?.action ?? null };
+    })()`);
+    assert.ok(projectCitationEvidence.hits > 0, `PROJECT Knowledge had no actual retrieval hits: ${JSON.stringify(projectCitationEvidence)}`);
+    assert.ok(projectCitationEvidence.used > 0, `PROJECT Knowledge had no projected used citations: ${JSON.stringify(projectCitationEvidence)}`);
+    assert.equal(projectCitationEvidence.guardPassed, true, `PROJECT citation guard must pass: ${JSON.stringify(projectCitationEvidence)}`);
+    assert.equal(projectCitationEvidence.guardAction, 'allow', `PROJECT citation guard must allow: ${JSON.stringify(projectCitationEvidence)}`);
+    console.log("[P22 E2E] PROJECT citation and provenance gate PASS");
+    await closeRunDetails(cdp);
     const projectText = await workspaceText(cdp);
     assert.ok(!projectText.includes(globalMarker), "unbound GLOBAL Knowledge leaked into PROJECT conversation");
 
@@ -1632,9 +1873,14 @@ async function runV41() {
     const tokenB = await waitForAccessToken(() => latestAccessToken);
     await verifyAndReloadV41ModelService(cdp, fixture, apiBase, tokenB, ownerB.email, ownerB.displayName, modelPort);
     await createConversationThroughBrowser(cdp);
-    await sendPrompt(cdp, "请根据我已经上传的个人资料，告诉我用户 A 的测试标记是什么？");
+    // Stronger cross-user test: B opts in to B's own Global scope and still
+    // cannot access A's globally indexed private data.
+    await setUserGlobalKnowledgeScope(cdp, true);
+    await sendPrompt(cdp, globalKnowledgePrompt);
+    assertObservedGlobalKnowledgeSubmission(globalKnowledgeSubmissions, true, "B own global opt-in");
     const bText = await workspaceText(cdp);
     assert.ok(!bText.includes(globalMarker), "User B retrieved User A GLOBAL Knowledge marker");
+    console.log("[P22 E2E] cross-user Global Knowledge isolation gate PASS");
 
     // Now that cross-user isolation has been proven with A's data present,
     // clean up A's GLOBAL fixture using the still-valid owner-A access token.

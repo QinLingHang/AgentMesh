@@ -112,3 +112,41 @@ type RuntimeKnowledgeScope struct {
 
 	KnowledgeBaseIDs []int64 `json:"knowledgeBaseIds"`
 }
+
+type RagMode string
+
+const (
+	RagModeOff  RagMode = "OFF"
+	RagModeAuto RagMode = "AUTO"
+	RagModeOn   RagMode = "ON"
+)
+
+type RagScope string
+
+const (
+	RagScopeProject    RagScope = "PROJECT"
+	RagScopeUserGlobal RagScope = "USER_GLOBAL"
+)
+
+type RagPolicy struct {
+	Mode                     RagMode    `json:"mode"`
+	Scopes                   []RagScope `json:"scopes"`
+	SelectedKnowledgeBaseIDs []int64    `json:"selectedKnowledgeBaseIds"`
+}
+
+type EffectiveRagPolicy struct {
+	Mode                    RagMode    `json:"mode"`
+	AllowedScopes           []RagScope `json:"allowedScopes"`
+	AllowedKnowledgeBaseIDs []int64    `json:"allowedKnowledgeBaseIds"`
+	ExplicitlySelectedIDs   []int64    `json:"explicitlySelectedIds"`
+	PolicyVersion           string     `json:"policyVersion"`
+}
+
+type KnowledgeCatalogItem struct {
+	KnowledgeBaseID int64    `json:"knowledgeBaseId"`
+	Name            string   `json:"name"`
+	Description     string   `json:"description"`
+	Scope           RagScope `json:"scope"`
+	ProjectID       *int64   `json:"projectId,omitempty"`
+	Accessible      bool     `json:"accessible"`
+}
