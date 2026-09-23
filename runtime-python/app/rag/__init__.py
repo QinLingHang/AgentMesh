@@ -42,6 +42,7 @@ from app.rag.model_intelligence import (
 from app.rag.provenance import (
     EvidenceProvenance,
     build_evidence_provenance,
+    select_unique_evidence_hits,
 )
 
 from app.rag.query_intelligence import (
@@ -89,6 +90,7 @@ __all__ = [
     # Evidence Provenance
     "EvidenceProvenance",
     "build_evidence_provenance",
+    "select_unique_evidence_hits",
 
     # Query Intelligence
     "QueryAnalysis",

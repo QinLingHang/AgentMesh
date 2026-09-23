@@ -373,3 +373,85 @@ def test_openai_compatible_pricing_formula_when_configured():
     result = run(provider.generate(req))
     assert result.estimated_cost == pytest.approx(4.0)
     assert result.total_tokens == 1_500_000
+
+
+def test_openai_desktop_delete_tool_call_enters_governance_and_suspends_before_execution():
+    """Exact Case 82 contract: Go-shaped metadata + OpenAI tool_call -> approval.
+
+    This intentionally crosses the provider mapping and ToolLoop governance
+    boundary in one test so a fixture/tool-call parsing regression cannot be
+    mistaken for an Approval UI or Desktop Bridge failure.
+    """
+
+    executed: list[dict] = []
+
+    tool = ToolDefinition.model_validate(
+        {
+            "id": 82,
+            "name": "local.fs.delete",
+            "description": "Delete an authorized local file.",
+            "protocol": "internal",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "recursive": {"type": "boolean"},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            "riskLevel": "high",
+            "requiresConfirmation": True,
+            "enabled": True,
+        }
+    )
+
+    call = SimpleNamespace(
+        id="call_case82_delete",
+        function=SimpleNamespace(
+            name="local.fs.delete",
+            arguments='{"path":"C:/AgentMesh/case82.txt","recursive":false}',
+        ),
+    )
+    message = SimpleNamespace(content=None, tool_calls=[call])
+    choice = SimpleNamespace(message=message, finish_reason="tool_calls")
+    response = SimpleNamespace(usage=None, choices=[choice], model="case82-fixture")
+
+    class Create:
+        async def create(self, **kwargs):
+            names = [item["function"]["name"] for item in kwargs.get("tools", [])]
+            assert names == ["local.fs.delete"]
+            return response
+
+    provider = OpenAICompatibleModelProvider.__new__(OpenAICompatibleModelProvider)
+    provider.client = SimpleNamespace(chat=SimpleNamespace(completions=Create()))
+
+    registry = ToolRegistry()
+    registry.register(tool, lambda arguments: executed.append(arguments))
+
+    events = []
+    with pytest.raises(ToolApprovalRequired) as raised:
+        run(
+            ToolLoopRunner(
+                ModelGateway(provider, timeout=1, max_retries=0),
+                "case82-fixture",
+                registry,
+            ).run(
+                "delete the authorized test file",
+                on_tool_event=events.append,
+            )
+        )
+
+    approval = raised.value.request
+    assert approval.tool_name == "local.fs.delete"
+    assert approval.risk_level == "high"
+    assert approval.requires_confirmation is True
+    assert approval.arguments == {
+        "path": "C:/AgentMesh/case82.txt",
+        "recursive": False,
+    }
+    assert [event["title"] for event in events] == [
+        "Tool Selected",
+        "Tool Approval Required",
+    ]
+    assert executed == []

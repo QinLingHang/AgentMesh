@@ -272,3 +272,15 @@ test("V4.1 FIX17 removes stale history contracts and waits for lazy Run Details 
   assert.match(detailsBlock, /Run Details lazy tab surface/);
   assert.doesNotMatch(detailsBlock, /await sleep\(/);
 });
+
+test("Desktop-only outage acceptance proves the owned Windows listener is down", () => {
+  const harness = source("e2e", "v4-1-browser-e2e.mjs");
+
+  assert.match(harness, /V4_1_E2E_DESKTOP_ONLY/);
+  assert.match(harness, /async function stopOwnedLoopbackListener/);
+  assert.match(harness, /Get-NetTCPConnection/);
+  assert.match(harness, /Stop-Process -Id \$_\.OwningProcess -Force/);
+  assert.match(harness, /Desktop Bridge still listening on its owned QA port/);
+  assert.match(harness, /safeMessageVisible/);
+  assert.match(harness, /requestDiagnostics/);
+});

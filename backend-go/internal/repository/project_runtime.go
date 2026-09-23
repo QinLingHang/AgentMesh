@@ -455,39 +455,45 @@ func (r *MySQL) UpdateProjectRuntimeConfig(
 	)
 }
 
+// ProjectIDByConversation distinguishes an owned, unbound conversation from a
+// missing/foreign conversation. A restricted project binding must never be
+// interpreted as an ordinary (unbound) conversation.
 func (r *MySQL) ProjectIDByConversation(
 	ctx context.Context,
 	uid int64,
 	conversationID int64,
 ) (*int64, error) {
-	var projectID int64
+	var projectID sql.NullInt64
+	var projectAllowed bool
 
-	err := r.db.QueryRowContext(
-		ctx,
-		`
-		SELECT pc.project_id
-		FROM project_conversations pc
-		INNER JOIN projects p
-			ON p.id = pc.project_id
-		INNER JOIN conversations c
-			ON c.id = pc.conversation_id
-		WHERE pc.conversation_id = ?
-		  AND (p.user_id = ? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p.id AND pm.user_id=?))
-		  AND c.user_id = ?
-		LIMIT 1
-		`,
-		conversationID,
-		uid,
-		uid,
-		uid,
-	).Scan(&projectID)
-
+	// Start from the owned conversation: an absent row means the caller has
+	// no access, while a NULL project_id means this *owned* conversation has
+	// no project. One statement keeps the ownership and binding read within
+	// the same DB snapshot.
+	err := r.db.QueryRowContext(ctx, `
+        SELECT pc.project_id,
+               CASE WHEN p.id IS NOT NULL AND
+                   (p.user_id = ? OR EXISTS (
+                       SELECT 1 FROM project_members pm
+                       WHERE pm.project_id = p.id AND pm.user_id = ?
+                   )) THEN 1 ELSE 0 END
+        FROM conversations c
+        LEFT JOIN project_conversations pc ON pc.conversation_id = c.id
+        LEFT JOIN projects p ON p.id = pc.project_id
+        WHERE c.id = ? AND c.user_id = ?
+        LIMIT 1
+    `, uid, uid, conversationID, uid).Scan(&projectID, &projectAllowed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, ErrNotOwned
 	}
 	if err != nil {
 		return nil, err
 	}
-
-	return &projectID, nil
+	if !projectID.Valid {
+		return nil, nil
+	}
+	if !projectAllowed {
+		return nil, ErrNotOwned
+	}
+	return &projectID.Int64, nil
 }

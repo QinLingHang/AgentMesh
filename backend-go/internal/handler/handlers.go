@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -967,13 +969,15 @@ func (h *TaskHandler) RunStream(c *gin.Context) {
 		fail(c, http.StatusBadRequest, 40040, "Task 参数不合法")
 		return
 	}
-	h.runStreamRequest(c, req, nil)
+	h.runStreamRequest(c, req, nil, nil)
 }
 
 // RunAutoStream is the single-submit endpoint. The server makes its routing
 // decision from the SAME validated request that it executes: the browser must
 // never issue a second POST after asking a preflight endpoint for a route.
 // The legacy direct/durable endpoints remain available for older clients.
+// RunAutoStream preserves one POST for every decision and business execution.
+// P23 is OFF by default; Shadow never changes the authoritative P22 route.
 func (h *TaskHandler) RunAutoStream(c *gin.Context, durable *DurableRuntimeHandler) {
 	var req runReq
 	if c.ShouldBindJSON(&req) != nil {
@@ -987,7 +991,149 @@ func (h *TaskHandler) RunAutoStream(c *gin.Context, durable *DurableRuntimeHandl
 		ModelSelection: req.ModelSelection, AttachmentIDs: req.AttachmentIDs,
 		RagPolicy: req.RagPolicy, Constraints: req.Constraints,
 	}
+	mode := service.P23Mode()
+	var p23 *service.P23ExecutionDecision
+	if mode == "OFF" || mode == "SHADOW" || mode == "ENABLED" {
+		// First resolve the original submission. A configuration rollback or
+		// concurrent retry may not cause a second model/tool execution.
+		prior, err := h.s.P23ExistingSubmission(c.Request.Context(), uid(c), input)
+		if err != nil {
+			domain(c, err)
+			return
+		}
+		if prior != nil {
+			replay := service.P23ReplayResult(prior)
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": prior.DeliveryMode, "reason": "idempotent_replay"})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": replay})
+			return
+		}
+	}
+	if mode == "ENABLED" {
+		// Exact task-control utterances are operations on an existing owned Task,
+		// not new LLM/Runtime submissions. Never guess among two candidates.
+		operation := service.P23TaskOperation(input.Task)
+		switch operation {
+		case "GET_TASK_STATUS":
+			task, err := h.s.P23StatusTask(c.Request.Context(), uid(c), input)
+			if err != nil {
+				domain(c, err)
+				return
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "authorized_task_status"})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": service.P23ReplayResult(task)})
+			return
+		case "RESUME_TASK":
+			result, err := h.s.P23ResumeCurrentTask(c.Request.Context(), uid(c), input)
+			if err != nil {
+				domain(c, err)
+				return
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "authorized_task_resume"})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": result})
+			return
+		case "APPROVAL_REJECT":
+			result, err := h.s.P23RejectCurrentApproval(c.Request.Context(), uid(c), input)
+			if err != nil {
+				domain(c, err)
+				return
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "approval_rejected", "handling": "APPROVAL_REJECT"})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": result})
+			return
+		case "CANCEL_TASK":
+			if durable == nil {
+				fail(c, http.StatusServiceUnavailable, 50340, "Durable Runtime 不可用，无法安全取消任务")
+				return
+			}
+			task, err := h.s.P23PendingTask(c.Request.Context(), uid(c), input)
+			if err != nil {
+				domain(c, err)
+				return
+			}
+			if task.DeliveryMode != "durable" {
+				domain(c, service.ErrConflict)
+				return
+			}
+			cancelled, err := durable.s.Cancel(c.Request.Context(), uid(c), task.ID)
+			if err != nil {
+				domain(c, err)
+				return
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "authorized_task_cancel"})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": service.P23ReplayResult(cancelled)})
+			return
+		}
+	}
+	if mode == "SHADOW" {
+		// Shadow is read-only and bounded. Never block the original response,
+		// create a task, disclose raw request/catalog or run a capability.
+		snapshot := input
+		actor := uid(c)
+		go func() {
+			context, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			proposal, err := h.s.P23DecideShadow(context, actor, snapshot)
+			if err != nil {
+				log.Print("p23_shadow status=unavailable")
+				return
+			}
+			log.Printf("p23_shadow status=completed strategy=%s reasonCount=%d", proposal.Strategy, len(proposal.ReasonCodes))
+		}()
+	} else if mode == "ENABLED" {
+		var err error
+		p23, err = h.s.P23Decide(c.Request.Context(), uid(c), input)
+		if err != nil {
+			// No unsafe fallback to a fabricated Direct answer or new task.
+			fail(c, http.StatusServiceUnavailable, 50323, "无法安全确定执行方式，请稍后重试；本次未启动执行")
+			return
+		}
+		if p23.RuntimePath == "NONE" && p23.Disposition == "REJECT" {
+			message := "该请求违反当前授权或安全策略，未执行操作"
+			if len(p23.UnresolvedRequirements) > 0 {
+				message = p23.UnresolvedRequirements[0]
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "policy_rejected", "handling": "REJECT"})
+			_ = writeNDJSON(c, gin.H{"type": "error", "message": message})
+			return
+		}
+		if p23.RuntimePath == "NONE" {
+			message := "缺少完成请求所需的信息，请补充具体目标或授权"
+			if len(p23.UnresolvedRequirements) > 0 {
+				message = p23.UnresolvedRequirements[0]
+			}
+			// Persist the clarification as a suspended Task, not a Runtime job;
+			// retries return the same task and cannot duplicate assistant messages.
+			result, persistErr := h.s.PersistP23Clarification(c.Request.Context(), uid(c), input, p23)
+			if persistErr != nil {
+				domain(c, persistErr)
+				return
+			}
+			c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
+			_ = writeNDJSON(c, gin.H{"type": "route", "mode": "none", "reason": "needs_clarification", "decisionVersion": p23.SchemaVersion})
+			_ = writeNDJSON(c, gin.H{"type": "clarification", "message": message, "taskId": result.Task.ID})
+			_ = writeNDJSON(c, gin.H{"type": "result", "result": result})
+			return
+		}
+		input.P23Strategy = p23.Strategy
+		input.P23ReasonCodes = append([]string(nil), p23.ReasonCodes...)
+		input.P23AnalysisSource = p23.AnalysisSource
+		input.P23AnalysisLatencyMS = p23.AnalysisLatencyMS
+		input.P23PreflightModelCalls = p23.PreflightModelCalls
+		input.P23PreflightModelTokens = p23.PreflightModelTokens
+		input.P23PreflightModelEstimatedCost = p23.PreflightModelEstimatedCost
+		input.P23PreflightModelCostKnown = p23.PreflightModelCostKnown
+	}
 	decision := h.s.DecideDeliveryMode(input)
+	if p23 != nil {
+		decision.Mode = p23.DeliveryMode
+		decision.Reason = "validated_p23_decision"
+	}
 	if decision.Mode == "durable" {
 		if durable == nil {
 			fail(c, http.StatusServiceUnavailable, 50340, "Durable Runtime 不可用，不能降级执行需要可靠性的任务")
@@ -998,17 +1144,28 @@ func (h *TaskHandler) RunAutoStream(c *gin.Context, durable *DurableRuntimeHandl
 			domain(c, err)
 			return
 		}
+		if p23 != nil && result != nil {
+			if cleanupErr := h.s.SupersedeP23Clarifications(c.Request.Context(), uid(c), result.Task); cleanupErr != nil {
+				log.Print("p23 clarification cleanup=deferred")
+			}
+		}
 		c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
 		c.Header("Cache-Control", "no-cache, no-transform")
 		c.Header("X-Accel-Buffering", "no")
-		_ = writeNDJSON(c, gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason})
+		route := gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason}
+		if p23 != nil {
+			route["strategy"] = p23.Strategy
+			route["decisionVersion"] = p23.SchemaVersion
+			route["reasonCodes"] = p23.ReasonCodes
+		}
+		_ = writeNDJSON(c, route)
 		_ = writeNDJSON(c, gin.H{"type": "result", "result": result})
 		return
 	}
-	h.runStreamRequest(c, req, &decision)
+	h.runStreamRequest(c, req, &decision, p23)
 }
 
-func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *service.DeliveryDecision) {
+func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *service.DeliveryDecision, p23 *service.P23ExecutionDecision) {
 
 	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
 	c.Header("Cache-Control", "no-cache, no-transform")
@@ -1016,7 +1173,13 @@ func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *ser
 	c.Status(http.StatusOK)
 	c.Writer.Flush()
 	if decision != nil {
-		_ = writeNDJSON(c, gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason})
+		route := gin.H{"type": "route", "mode": decision.Mode, "reason": decision.Reason}
+		if p23 != nil {
+			route["strategy"] = p23.Strategy
+			route["decisionVersion"] = p23.SchemaVersion
+			route["reasonCodes"] = p23.ReasonCodes
+		}
+		_ = writeNDJSON(c, route)
 	}
 
 	input := service.RunTaskInput{
@@ -1031,11 +1194,21 @@ func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *ser
 		RagPolicy:      req.RagPolicy,
 		Constraints:    req.Constraints,
 	}
+	if p23 != nil {
+		input.P23Strategy = p23.Strategy
+		input.P23ReasonCodes = append([]string(nil), p23.ReasonCodes...)
+		input.P23AnalysisSource = p23.AnalysisSource
+		input.P23AnalysisLatencyMS = p23.AnalysisLatencyMS
+		input.P23PreflightModelCalls = p23.PreflightModelCalls
+		input.P23PreflightModelTokens = p23.PreflightModelTokens
+		input.P23PreflightModelEstimatedCost = p23.PreflightModelEstimatedCost
+		input.P23PreflightModelCostKnown = p23.PreflightModelCostKnown
+	}
 
 	var result *service.RunTaskResult
 	var err error
 	forceFullRuntimeForKnowledge := req.RagPolicy.Mode == model.RagModeOn || len(req.RagPolicy.SelectedKnowledgeBaseIDs) > 0
-	if !forceFullRuntimeForKnowledge && service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs) {
+	if (p23 == nil && !forceFullRuntimeForKnowledge && service.ShouldUseInteractiveFastPath(req.Task, req.AttachmentIDs)) || (p23 != nil && p23.Strategy == "FAST_PATH") {
 		result, err = h.s.RunInteractiveStream(c, uid(c), input, func(event runtimeclient.InteractiveStreamEvent) error {
 			return writeNDJSON(c, event)
 		})
@@ -1043,7 +1216,7 @@ func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *ser
 		_ = writeNDJSON(c, gin.H{
 			"type":    "status",
 			"phase":   "agent_runtime",
-			"message": "正在进行 Agent 协作执行…",
+			"message": "正在通过 Runtime 处理请求…",
 		})
 
 		streamCtx := runtimeclient.WithStreamEventSink(c, func(event map[string]any) {
@@ -1070,6 +1243,11 @@ func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *ser
 		return
 	}
 
+	if p23 != nil && result != nil {
+		if cleanupErr := h.s.SupersedeP23Clarifications(c.Request.Context(), uid(c), result.Task); cleanupErr != nil {
+			log.Print("p23 clarification cleanup=deferred")
+		}
+	}
 	_ = writeNDJSON(c, gin.H{
 		"type":   "result",
 		"result": result,

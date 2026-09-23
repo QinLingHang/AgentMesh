@@ -309,6 +309,9 @@ func publicRequestHash(input PublicRunInput) string {
 
 func (s *EcosystemService) checkPublicConversation(ctx context.Context, principal *model.APIPrincipal, conversationID int64) error {
 	pid, err := s.repo.ProjectIDByConversation(ctx, principal.ActorUserID, conversationID)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}

@@ -86,6 +86,9 @@ class Settings(
     # Medium/high-complexity requests can be decomposed into a bounded semantic
     # ExecutionPlan. Invalid/unavailable model output fails safely to the
     # existing deterministic profiler/scheduler path.
+    p23_semantic_model_enabled: bool = True
+    p23_semantic_model_timeout_seconds: float = 1.2
+
     semantic_planner_enabled: bool = True
     semantic_planner_timeout_seconds: float = 12.0
     semantic_planner_max_steps: int = 8

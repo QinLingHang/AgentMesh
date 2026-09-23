@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 import asyncio
+import json
 
 from fastapi import (
     FastAPI,
@@ -34,9 +35,10 @@ from app.mcp import MCPDiscoverRequest, MCPManager
 from app.multimodal.ingestion import safe_knowledge_error
 from app.multimodal.vision import DeterministicVisionAnalyzer, ModelVisionAnalyzer
 from app.models.runtime import resolve_project_model_runtime
-from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse
+from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse, TraceEvent
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
+from app.semantics.intent_understanding import TaskUnderstandingRequest, TaskUnderstandingResult, understand
 
 registry = None
 engine = None
@@ -257,10 +259,47 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
     token = set_knowledge_scope(scope)
     candidate_token = set_candidate_knowledge_ids(None)
     try:
-        return await engine.run(req, event_sink=event_sink, delta_sink=delta_sink)
+        response = await engine.run(req, event_sink=event_sink, delta_sink=delta_sink)
+        # P23 metadata comes only from the internal Go-signed execution request.
+        # Persist the same privacy-safe decision trace for direct and durable
+        # runs, including the no-DAG Knowledge executor, without re-routing.
+        if req.p23_strategy in {"SINGLE_CAPABILITY", "WORKFLOW", "RUNTIME"}:
+            response.trace.insert(0, TraceEvent(**{
+                "kind": "routing", "title": "P23 Execution Decision",
+                "status": "completed", "elapsedMs": 0,
+                "detail": json.dumps({
+                    "decisionVersion": "p23.v2" if req.p23_strategy == "RUNTIME" else "p23.v1", "strategy": req.p23_strategy,
+                    "capabilityKind": req.p23_capability_kind,
+                }, ensure_ascii=False),
+            }))
+        return response
     finally:
         reset_candidate_knowledge_ids(candidate_token)
         reset_knowledge_scope(token)
+
+
+@app.post("/internal/v1/p23/understand", response_model=TaskUnderstandingResult)
+async def p23_understand(
+    req: TaskUnderstandingRequest,
+    x_internal_token: str = Header(default=""),
+):
+    """Trusted, read-only preflight. A suggestion is never execution permission."""
+    verify_internal(x_internal_token)
+    baseline = understand(req)
+    from app.semantics.semantic_intent_model import should_use_semantic_model, describe_with_model
+    if not should_use_semantic_model(req, baseline):
+        return baseline
+    described = await describe_with_model(engine, req)
+    if described is None:
+        return baseline  # conservative RUNTIME; never silently downgrade to chat
+    descriptor, usage = described
+    refined = understand(req, descriptor=descriptor)
+    return refined.model_copy(update={
+        "model_calls": int(usage["model_calls"]),
+        "model_tokens": int(usage["model_tokens"]),
+        "model_estimated_cost": float(usage["model_estimated_cost"]),
+        "model_cost_known": bool(usage["model_cost_known"]),
+    })
 
 
 @app.post("/internal/v1/runtime/interactive-stream")

@@ -239,6 +239,11 @@ export function friendlyApiError(
     }
 
     if (error.status === 409) {
+      // P23 clarification is a safe non-execution result, not an
+      // idempotency conflict. Preserve its targeted question for the user.
+      if (error.code === 40923) {
+        return error.message.trim() || "请补充完成当前请求所需的信息。";
+      }
       if (error.code === 40920) {
         return "请先在模型设置中启用至少一个可用模型服务。";
       }

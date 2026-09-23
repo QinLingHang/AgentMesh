@@ -223,7 +223,9 @@ type RuntimeAttachment struct {
 // ============================================================
 
 type ExecuteRequest struct {
-	UserID int64 `json:"user_id"`
+	P23Strategy       string `json:"p23Strategy,omitempty"`
+	P23CapabilityKind string `json:"p23CapabilityKind,omitempty"`
+	UserID            int64  `json:"user_id"`
 
 	RequestID string `json:"request_id"`
 

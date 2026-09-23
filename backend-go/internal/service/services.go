@@ -1804,8 +1804,19 @@ func (s *TaskService) resolveRequestModelRuntimePool(
 //
 
 type RunTaskInput struct {
-	ClientRequestID string
-	ConversationID  *int64
+	// Non-authoritative to the transport; never include routing results in the original idempotency fingerprint.
+	P23Strategy                    string   `json:"-"`
+	P23CapabilityKind              string   `json:"-"`
+	P23CatalogVersion              string   `json:"-"`
+	P23ReasonCodes                 []string `json:"-"`
+	P23AnalysisSource              string   `json:"-"`
+	P23AnalysisLatencyMS           int64    `json:"-"`
+	P23PreflightModelCalls         int      `json:"-"`
+	P23PreflightModelTokens        int      `json:"-"`
+	P23PreflightModelEstimatedCost float64  `json:"-"`
+	P23PreflightModelCostKnown     bool     `json:"-"`
+	ClientRequestID                string
+	ConversationID                 *int64
 
 	Task string
 
@@ -2163,7 +2174,7 @@ func (s *TaskService) RunInteractiveStream(
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy,
 		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: map[string]any{"runtimePhase": "interactive_stream", "attachments": attachmentMeta},
+		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{"runtimePhase": "interactive_stream", "attachments": attachmentMeta}),
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
@@ -2251,6 +2262,7 @@ func (s *TaskService) RunInteractiveStream(
 			"detail": "direct token streaming", "elapsedMs": elapsed,
 		},
 	}
+	trace = append(p23DecisionTrace(in, "direct"), trace...)
 	dag := map[string]any{
 		"nodes": []map[string]any{{"id": "interactive-model", "label": "Interactive Model", "kind": "model", "status": "completed"}},
 		"edges": []map[string]any{},
@@ -2556,14 +2568,6 @@ func (s *TaskService) loadRuntimeResources(
 		return nil, nil, nil, err
 	}
 
-	if len(
-		agentPool,
-	) == 0 {
-		return nil, nil, nil, errors.New(
-			"当前还没有注册 Agent",
-		)
-	}
-
 	toolPool := []model.Tool{}
 
 	if s.tools != nil {
@@ -2847,7 +2851,7 @@ func (s *TaskService) Run(
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy, EffectiveRagPolicy: effectiveRagPolicy,
 		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: map[string]any{"runtimePhase": "initial", "attachments": attachmentMeta},
+		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{"runtimePhase": "initial", "attachments": attachmentMeta}),
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
@@ -2891,7 +2895,7 @@ func (s *TaskService) Run(
 			mcpPool,
 		)
 
-	if len(agentPool) == 0 {
+	if len(agentPool) == 0 && !(in.P23Strategy == "RUNTIME" && effectiveRagPolicy.Mode != model.RagModeOff && len(effectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
 		message := "project runtime has no enabled agents"
 
 		_ = s.tasks.FailTask(
@@ -2916,7 +2920,8 @@ func (s *TaskService) Run(
 		runtimeclient.ExecuteRequest{
 			UserID: uid,
 
-			RequestID: requestID,
+			RequestID:   requestID,
+			P23Strategy: in.P23Strategy, P23CapabilityKind: in.P23CapabilityKind,
 
 			ConversationID: in.ConversationID,
 
