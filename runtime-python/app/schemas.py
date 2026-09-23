@@ -322,6 +322,8 @@ class RuntimeRequest(
 
     user_id: int
     request_id: str
+    p23_strategy: Literal["DIRECT_ANSWER", "SINGLE_CAPABILITY", "WORKFLOW", "RUNTIME"] | None = Field(default=None, alias="p23Strategy")
+    p23_capability_kind: Literal["KNOWLEDGE", "TOOL", "MCP", "AGENT"] | None = Field(default=None, alias="p23CapabilityKind")
 
     conversation_id: int | None = Field(
         default=None,

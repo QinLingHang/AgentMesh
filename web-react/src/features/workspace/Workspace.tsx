@@ -113,9 +113,9 @@ const MESSAGE_ANCHOR_SELECTOR =
 
 const MESSAGE_ANCHOR_TOLERANCE_PX = 1;
 const MESSAGE_ANCHOR_STABLE_FRAMES = 3;
-const MESSAGE_ANCHOR_MAX_SETTLE_FRAMES = 30;
+const MESSAGE_ANCHOR_MAX_SETTLE_FRAMES = 120;
 const MESSAGE_ANCHOR_QUIET_MS = 120;
-const MESSAGE_ANCHOR_MAX_SETTLE_MS = 500;
+const MESSAGE_ANCHOR_MAX_SETTLE_MS = 2000;
 
 function latestTaskForConversation(
   tasks: Task[],
@@ -221,8 +221,14 @@ export function Workspace({
   const messageScrollRef = useRef<HTMLDivElement | null>(null);
   const messageScrollInnerRef = useRef<HTMLDivElement | null>(null);
   const messageScrollFrameRef = useRef<number | null>(null);
+  const messageScrollGenerationRef = useRef(0);
   const messageScrollProgrammaticRef = useRef(false);
   const messageHistoryAnchorRef = useRef<MessageHistoryAnchor | null>(null);
+  // Prepending history transfers viewport ownership to the reader. A delayed
+  // scroll event or ResizeObserver must not silently re-enable auto-follow;
+  // only an actual reader gesture that reaches the bottom can do so.
+  const messageHistoryReaderOwnedRef = useRef(false);
+  const messageReaderScrollIntentRef = useRef(false);
   const shouldAutoFollowMessagesRef = useRef(true);
   const lastScrollConversationIdRef = useRef<number | null>(null);
 
@@ -449,19 +455,27 @@ export function Workspace({
   const latestWaitingTask =
     latestRun &&
     isWaitingStatus(latestRun.status) &&
+    // Task refresh is asynchronous. A freshly returned AUTH_REQUIRED result
+    // can legitimately be newer than the last persisted Task snapshot still in
+    // React state. Allow that newer result to render immediately, while a
+    // genuinely newer persisted task still suppresses a stale local approval.
     (latestConversationTask == null ||
-      latestConversationTask.id === latestRun.task.id) &&
+      latestConversationTask.id <= latestRun.task.id) &&
     (persistedLatestRunTask == null ||
       isWaitingStatus(persistedLatestRunTask.status))
       ? persistedLatestRunTask ?? latestRun.task
       : null;
 
-  // The persisted server projection is authoritative. A local RunResult can
-  // remain AUTH_REQUIRED after another tab/retry already changed the task, and
-  // showing that stale approval card causes a guaranteed 409 on confirmation.
+  // For the same task id the persisted server projection remains
+  // authoritative (latestWaitingTask already prefers persistedLatestRunTask).
+  // Across different ids, however, choose the newest waiting task so an older
+  // Task-list snapshot cannot hide a freshly suspended AUTH_REQUIRED run.
   const waitingTask =
-    persistedWaitingTask ??
-    latestWaitingTask;
+    persistedWaitingTask && latestWaitingTask
+      ? persistedWaitingTask.id >= latestWaitingTask.id
+        ? persistedWaitingTask
+        : latestWaitingTask
+      : persistedWaitingTask ?? latestWaitingTask;
 
   useEffect(() => {
     let active = true;
@@ -578,7 +592,11 @@ export function Workspace({
     // Loading an older page temporarily owns the viewport. Any late
     // auto-follow callback from conversation restoration/ResizeObserver must
     // yield until the prepend anchor transaction has completed.
-    if (messageHistoryAnchorRef.current != null) {
+    if (
+      messageHistoryAnchorRef.current != null ||
+      messageHistoryReaderOwnedRef.current ||
+      !shouldAutoFollowMessagesRef.current
+    ) {
       return;
     }
 
@@ -592,6 +610,9 @@ export function Workspace({
       messageScrollFrameRef.current = null;
     }
 
+    // cancelAnimationFrame cannot stop a callback that already entered its
+    // body. The generation also invalidates its next/final scheduled frame.
+    const generation = ++messageScrollGenerationRef.current;
     messageScrollProgrammaticRef.current = true;
     forceMessageScrollBottom(scrollNode);
 
@@ -603,8 +624,27 @@ export function Workspace({
     // Repositioning only once (FIX10) covered the first synchronous commit but
     // could still finish above the real bottom after either late layout change.
     let remainingFrames = 3;
+    const canContinueFollowing = () =>
+      generation === messageScrollGenerationRef.current &&
+      messageHistoryAnchorRef.current == null &&
+      !messageHistoryReaderOwnedRef.current &&
+      shouldAutoFollowMessagesRef.current;
+
+    const releaseCancelledFollow = () => {
+      // Never clear a newer owner's state or a live prepend transaction.
+      if (generation === messageScrollGenerationRef.current &&
+          messageHistoryAnchorRef.current == null) {
+        messageScrollProgrammaticRef.current = false;
+        messageScrollFrameRef.current = null;
+      }
+    };
 
     const settle = () => {
+      if (!canContinueFollowing()) {
+        releaseCancelledFollow();
+        return;
+      }
+
       const settledNode = messageScrollRef.current;
       if (!settledNode) {
         messageScrollProgrammaticRef.current = false;
@@ -623,6 +663,10 @@ export function Workspace({
 
       messageScrollFrameRef.current =
         window.requestAnimationFrame(() => {
+          if (!canContinueFollowing()) {
+            releaseCancelledFollow();
+            return;
+          }
           const finalNode = messageScrollRef.current;
           if (finalNode) {
             forceMessageScrollBottom(finalNode);
@@ -637,7 +681,11 @@ export function Workspace({
   }, [forceMessageScrollBottom]);
 
   const handleMessageScroll = useCallback(() => {
-    if (messageScrollProgrammaticRef.current) {
+    if (messageScrollProgrammaticRef.current || messageHistoryAnchorRef.current != null) {
+      return;
+    }
+
+    if (messageHistoryReaderOwnedRef.current && !messageReaderScrollIntentRef.current) {
       return;
     }
 
@@ -649,9 +697,14 @@ export function Workspace({
     const distanceFromBottom =
       scrollNode.scrollHeight - scrollNode.scrollTop - scrollNode.clientHeight;
     shouldAutoFollowMessagesRef.current = distanceFromBottom <= 96;
+    if (shouldAutoFollowMessagesRef.current) {
+      messageHistoryReaderOwnedRef.current = false;
+      messageReaderScrollIntentRef.current = false;
+    }
   }, []);
 
   const cancelScheduledMessageScroll = useCallback(() => {
+    messageScrollGenerationRef.current += 1;
     if (messageScrollFrameRef.current != null) {
       window.cancelAnimationFrame(messageScrollFrameRef.current);
       messageScrollFrameRef.current = null;
@@ -780,6 +833,7 @@ export function Workspace({
   }, []);
 
   const releaseOlderHistoryAnchor = useCallback(() => {
+    messageScrollGenerationRef.current += 1;
     if (messageScrollFrameRef.current != null) {
       window.cancelAnimationFrame(
         messageScrollFrameRef.current,
@@ -861,11 +915,19 @@ export function Workspace({
         quietFor >=
           MESSAGE_ANCHOR_QUIET_MS;
 
+      // A wall-clock-only timeout is unsafe under CPU pressure because a
+      // throttled event loop can spend 500ms without producing the three
+      // layout frames required to prove stability. Keep the normal fast exit
+      // above, but on the fallback path allow a bounded ~2s/120-frame window
+      // and never release solely on elapsed time before the minimum stable
+      // frame budget has even been observable.
       const timedOut =
         anchor.settleFrames >=
           MESSAGE_ANCHOR_MAX_SETTLE_FRAMES ||
-        elapsed >=
-          MESSAGE_ANCHOR_MAX_SETTLE_MS;
+        (elapsed >=
+          MESSAGE_ANCHOR_MAX_SETTLE_MS &&
+          anchor.settleFrames >=
+            MESSAGE_ANCHOR_STABLE_FRAMES);
 
       if (stable || timedOut) {
         // One final same-element measurement closes any residual introduced in
@@ -914,6 +976,9 @@ export function Workspace({
     // the viewport. Abort any in-flight automatic anchor transaction rather
     // than fighting the reader. The normal scroll handler will re-enable
     // follow if the reader actually returns close to the bottom.
+    if (messageHistoryReaderOwnedRef.current) {
+      messageReaderScrollIntentRef.current = true;
+    }
     releaseOlderHistoryAnchor();
   }, [releaseOlderHistoryAnchor]);
 
@@ -930,6 +995,8 @@ export function Workspace({
     // all settling/release decisions.
     cancelScheduledMessageScroll();
     shouldAutoFollowMessagesRef.current = false;
+    messageHistoryReaderOwnedRef.current = true;
+    messageReaderScrollIntentRef.current = false;
     messageScrollProgrammaticRef.current = true;
     messageHistoryAnchorRef.current =
       captureVisibleMessageAnchor(
@@ -960,6 +1027,8 @@ export function Workspace({
     if (conversationChanged) {
       lastScrollConversationIdRef.current = conversationId;
       releaseOlderHistoryAnchor();
+      messageHistoryReaderOwnedRef.current = false;
+      messageReaderScrollIntentRef.current = false;
       shouldAutoFollowMessagesRef.current = true;
     }
 
@@ -1033,11 +1102,14 @@ export function Workspace({
 
 
   useEffect(() => () => {
+    messageScrollGenerationRef.current += 1;
     if (messageScrollFrameRef.current != null) {
       window.cancelAnimationFrame(messageScrollFrameRef.current);
       messageScrollFrameRef.current = null;
     }
     messageHistoryAnchorRef.current = null;
+    messageHistoryReaderOwnedRef.current = false;
+    messageReaderScrollIntentRef.current = false;
     messageScrollProgrammaticRef.current = false;
   }, []);
 

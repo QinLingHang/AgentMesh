@@ -158,6 +158,29 @@ class EvidenceProvenance:
         )
 
 
+# A shared evidence selection contract: provenance and the prompt must consume
+# identical, deduplicated documents in the same order.  Otherwise duplicate
+# retrieval hits can silently associate a valid citation ID with wrong text.
+def select_unique_evidence_hits(
+    retrieval_hits: Sequence[RetrievalHit], *, limit: int | None = None,
+) -> list[RetrievalHit]:
+    if limit is not None and limit < 1:
+        raise ValueError("evidence limit must be positive")
+    selected: list[RetrievalHit] = []
+    seen: set[str] = set()
+    for hit in retrieval_hits:
+        document_id = str(hit.document.id or "").strip()
+        if not document_id:
+            raise ValueError("evidence provenance requires non-empty document id")
+        if document_id in seen:
+            continue
+        seen.add(document_id)
+        selected.append(hit)
+        if limit is not None and len(selected) >= limit:
+            break
+    return selected
+
+
 # ============================================================
 # Builder
 # ============================================================
@@ -203,41 +226,9 @@ def build_evidence_provenance(
         EvidenceProvenance
     ] = []
 
-    seen_document_ids: set[
-        str
-    ] = set()
-
-    for hit in retrieval_hits:
-
-        document = (
-            hit.document
-        )
-
-        document_id = (
-            str(
-                document.id
-            )
-            .strip()
-        )
-
-        if not document_id:
-            raise ValueError(
-                (
-                    "evidence provenance "
-                    "requires non-empty "
-                    "document id"
-                )
-            )
-
-        if (
-            document_id
-            in seen_document_ids
-        ):
-            continue
-
-        seen_document_ids.add(
-            document_id
-        )
+    for hit in select_unique_evidence_hits(retrieval_hits):
+        document = hit.document
+        document_id = str(document.id).strip()
 
         raw_metadata = dict(
             document.metadata

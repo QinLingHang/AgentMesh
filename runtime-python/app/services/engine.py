@@ -2725,6 +2725,30 @@ class RuntimeEngine:
                 )
             )
 
+        # P23 knowledge-only bypass: no Agent is necessary, no DAG is built.
+        # Legacy P22 calls have no p23_strategy and retain their exact path.
+        # Python, not Go, determines whether this is a knowledge-only task.
+        # The existing knowledge executor is retained for agent-less projects;
+        # it reuses ScopedRetriever, CitationGuard and the normal model resolver.
+        # If agents exist, the ordinary Runtime Discovery/Planner/ToolLoop owns
+        # the request, regardless of whether one or many capabilities are used.
+        if req.p23_strategy == "SINGLE_CAPABILITY" and req.p23_capability_kind == "KNOWLEDGE":
+            from app.services.single_knowledge_executor import execute_single_knowledge
+            return await execute_single_knowledge(self, req, event_sink=event_sink)
+        if req.p23_strategy == "RUNTIME" and not req.agents:
+            semantic = analyze_task_semantics(
+                req.task, has_attachments=bool(req.attachments), enable_implicit_business=True,
+            )
+            if (semantic.knowledge_dependency is KnowledgeDependency.REQUIRED
+                and not semantic.requires_tool and req.effective_rag_policy is not None
+                and req.effective_rag_policy.mode != "OFF"
+                and req.effective_rag_policy.allowed_knowledge_base_ids):
+                from app.services.single_knowledge_executor import execute_single_knowledge
+                return await execute_single_knowledge(self, req, event_sink=event_sink)
+            # No synthetic Agent or guessed Tool may be invented to compensate
+            # for a missing authorized executor.
+            raise RuntimeError("no authorized agent available for this runtime task")
+
                 # ====================================================
                 # Request pre-profile
                 #
@@ -2764,6 +2788,7 @@ class RuntimeEngine:
             req.task,
             has_attachments=bool(req.attachments),
             profiler_capabilities=pre_profile.required_capabilities,
+            enable_implicit_business=req.p23_strategy is not None,
         )
         merged_capabilities = list(
             dict.fromkeys(

@@ -14,7 +14,12 @@ const python = process.env.V4_1_E2E_RUNTIME_PYTHON || process.env.P3_TEST_PYTHON
   (process.platform === 'win32' ? 'python' : 'python3');
 
 function productionContext(kind) {
-  const result = spawnSync(python, [generator, kind], { encoding: 'utf8', timeout: 15000 });
+  // Windows Python otherwise writes its locale encoding while Node decodes UTF-8.
+  // Force the child's output encoding instead of relying on shell environment.
+  const result = spawnSync(python, [generator, kind], {
+    encoding: 'utf8', timeout: 15000,
+    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+  });
   assert.equal(result.status, 0, `production Context Builder fixture failed (${result.error?.code ?? result.stderr})`);
   return JSON.parse(result.stdout);
 }

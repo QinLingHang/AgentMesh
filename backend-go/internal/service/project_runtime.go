@@ -283,6 +283,9 @@ func (s *ProjectRuntimeService) ResolveForConversation(
 		uid,
 		conversationID,
 	)
+	if errors.Is(err, repository.ErrNotOwned) {
+		return nil, ErrNotFound
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -412,7 +415,11 @@ func applyProjectRuntimePolicy(
 	in.Planner = projectContext.Policy.Planner
 	in.ExecutionMode = projectContext.Policy.ExecutionMode
 	in.SynthesisMode = projectContext.Policy.SynthesisMode
+	// A project default may add constraints but must never erase an explicit
+	// request to survive worker loss after the delivery decision was made.
+	retryOnWorkerLoss := in.Constraints.RetryOnWorkerLoss
 	in.Constraints = projectContext.Policy.Constraints
+	in.Constraints.RetryOnWorkerLoss = in.Constraints.RetryOnWorkerLoss || retryOnWorkerLoss
 }
 
 func filterProjectRuntimeResources(

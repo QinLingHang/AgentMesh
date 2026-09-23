@@ -1,0 +1,26 @@
+{
+  "request": {
+    "schemaVersion": "p23.v2",
+    "task": "你们的商品支持七天无理由退货吗？",
+    "ragMode": "AUTO",
+    "hasAttachments": false,
+    "continuationState": "NONE",
+    "allowModel": false,
+    "modelSelection": {"mode": "auto"},
+    "constraints": {"maxLatencyMs": 8000, "maxCost": 0.15, "minQuality": 0.8}
+  },
+  "response": {
+    "schemaVersion": "p23.v2",
+    "executionRoute": "RUNTIME",
+    "disposition": "EXECUTE",
+    "knowledgeDependency": "REQUIRED",
+    "capabilityRequired": true,
+    "reasonCodes": ["RUNTIME_DEPENDENCY_OR_UNCERTAINTY"],
+    "unresolvedRequirements": [],
+    "analysisSource": "RULE",
+    "modelCalls": 0,
+    "modelTokens": 0,
+    "modelEstimatedCost": 0,
+    "modelCostKnown": false
+  }
+}

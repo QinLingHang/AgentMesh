@@ -23,20 +23,33 @@ export function ResumePanel({
   onApprovalDecision: (decision: "approve" | "reject") => Promise<void>;
   openDetails: () => void;
 }) {
-  const status = latestRun?.status ?? task.status;
+  // Never let a RunResult from another task override the persisted waiting
+  // task. During submit -> task-list refresh there is a short window where the
+  // newest AUTH_REQUIRED task exists only in latestRun; after refresh, Task is
+  // authoritative for lifecycle state. Matching latestRun is only a safe
+  // fallback for answer/approval projection of that exact same task id.
+  const matchingLatestRun =
+    latestRun?.task.id === task.id
+      ? latestRun
+      : null;
+
+  const status = task.status;
 
   const prompt =
-    latestRun?.answer ||
+    matchingLatestRun?.answer ||
     task.resultText ||
     "Agent 正在等待补充信息。";
 
   const authRequired = status === "AUTH_REQUIRED";
-  const approval = task.approval;
+  const approval =
+    task.approval ??
+    matchingLatestRun?.task.approval ??
+    null;
 
   if (authRequired && approval) {
     return (
       <div className="composer approval-composer">
-        <section className="approval-card">
+        <section className="approval-card" data-testid="approval-card">
           <div className="approval-card-head">
             <div>
               <span className="approval-kicker">
@@ -115,6 +128,7 @@ export function ResumePanel({
           <div className="approval-action-group">
             <button
               className="secondary-button"
+              data-testid="approval-reject"
               disabled={busy}
               onClick={() => void onApprovalDecision("reject")}
             >
@@ -123,6 +137,7 @@ export function ResumePanel({
 
             <button
               className="primary-button run-button"
+              data-testid="approval-approve"
               disabled={busy}
               onClick={() => void onApprovalDecision("approve")}
             >

@@ -70,9 +70,14 @@ export function RoutingTracePanel({
               detail.selectedRuntimeId ??
               detail.to ??
               detail.model ??
+              detail.strategy ??
               "—";
             const reason =
-              typeof detail.reason === "string" ? detail.reason : "";
+              typeof detail.reason === "string"
+                ? detail.reason
+                : Array.isArray(detail.reasonCodes)
+                  ? detail.reasonCodes.filter((item): item is string => typeof item === "string").join(", ")
+                  : "";
 
             return (
               <article className="routing-event-card" key={`${event.elapsedMs}-${index}`}>

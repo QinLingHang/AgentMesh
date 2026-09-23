@@ -206,6 +206,54 @@ func TestP2DatabaseRuntimeAcceptance(t *testing.T) {
 		}
 	}
 
+	t.Run("ConversationOwnershipFailClosed", func(t *testing.T) {
+		// NULL project is legitimate ONLY after verifying conversation ownership.
+		pid, err := repo.ProjectIDByConversation(ctx, uid, normal)
+		if err != nil || pid != nil {
+			t.Fatalf("owned unbound conversation: project=%v err=%v", pid, err)
+		}
+		if resolved, err := profiles.ResolveForConversation(ctx, uid, normal); err != nil || resolved != nil {
+			t.Fatalf("owned unbound conversation resolution: %v %v", resolved, err)
+		}
+		pid, err = repo.ProjectIDByConversation(ctx, uid, convA)
+		if err != nil || pid == nil || *pid != projectA {
+			t.Fatalf("owned project conversation: project=%v err=%v", pid, err)
+		}
+		for _, id := range []int64{foreignConv, 999999999} {
+			if _, err := repo.ProjectIDByConversation(ctx, uid, id); !errors.Is(err, repository.ErrNotOwned) {
+				t.Errorf("foreign or missing repository conversation %d: %v", id, err)
+			}
+			if _, err := profiles.ResolveForConversation(ctx, uid, id); !errors.Is(err, ErrNotFound) {
+				t.Errorf("foreign or missing service conversation %d: %v", id, err)
+			}
+		}
+		// Deliberately create an unauthorized binding inside the isolated QA DB:
+		// an owned conversation must not fall back to account-wide resources.
+		if _, err := database.ExecContext(ctx,
+			"INSERT INTO project_conversations(project_id,conversation_id) VALUES(?,?)",
+			foreignProject, normal); err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if _, err := database.ExecContext(ctx,
+				"DELETE FROM project_conversations WHERE conversation_id=? AND project_id=?",
+				normal, foreignProject); err != nil {
+				t.Errorf("restore isolated test binding: %v", err)
+			}
+		}()
+		if _, err := repo.ProjectIDByConversation(ctx, uid, normal); !errors.Is(err, repository.ErrNotOwned) {
+			t.Fatalf("inaccessible project must not become unbound: %v", err)
+		}
+		if _, err := tasks.Run(ctx, uid, input(normal)); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("inaccessible project reached task service: %v", err)
+		}
+		select {
+		case <-requests:
+			t.Fatal("inaccessible project reached runtime")
+		default:
+		}
+	})
+
 	t.Run("DefaultAllAndPersistence", func(t *testing.T) {
 		cfg, err := profiles.Get(ctx, uid, projectA)
 		if err != nil {

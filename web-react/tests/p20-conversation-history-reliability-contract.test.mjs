@@ -46,9 +46,9 @@ test("loading older history preserves the concrete visible message anchor with o
   assert.match(workspace, /fallbackApplied/);
   assert.match(workspace, /MESSAGE_ANCHOR_TOLERANCE_PX = 1/);
   assert.match(workspace, /MESSAGE_ANCHOR_STABLE_FRAMES = 3/);
-  assert.match(workspace, /MESSAGE_ANCHOR_MAX_SETTLE_FRAMES = 30/);
+  assert.match(workspace, /MESSAGE_ANCHOR_MAX_SETTLE_FRAMES = 120/);
   assert.match(workspace, /MESSAGE_ANCHOR_QUIET_MS = 120/);
-  assert.match(workspace, /MESSAGE_ANCHOR_MAX_SETTLE_MS = 500/);
+  assert.match(workspace, /MESSAGE_ANCHOR_MAX_SETTLE_MS = 2000/);
   assert.match(workspace, /scheduleOlderHistoryAnchorSettlement/);
   assert.match(workspace, /markOlderHistoryAnchorDirty/);
   assert.match(workspace, /anchor\.stableFrames/);
@@ -159,4 +159,18 @@ test("P20 canonical real-stack closes browser, capsule, Redis-loss and internal-
   assert.match(v41Browser, /same capsule range must upsert idempotently/);
   assert.match(v41Browser, /Runtime Redis working list exceeded 20 messages/);
   assert.match(v41Browser, /MySQL capsule disappeared after Redis clear/);
+});
+
+test("P20 browser waits for the concrete anchor invariant instead of a fixed sleep", () => {
+  const helperStart = v41Browser.indexOf("async function loadOneOlderPagePreservingViewport");
+  assert.ok(helperStart >= 0, "older-history helper must exist");
+  const helperEnd = v41Browser.indexOf("async function composerValue", helperStart);
+  assert.ok(helperEnd > helperStart, "older-history helper block must exist");
+  const helper = v41Browser.slice(helperStart, helperEnd);
+  assert.match(helper, /P20 concrete older-history anchor settlement/);
+  assert.match(helper, /Math\.abs\(top - .*\) <= 16/);
+  assert.match(helper, /5000/);
+  assert.doesNotMatch(helper, /await sleep\(120\)/);
+
+  assert.match(workspace, /anchor\.settleFrames >=\s*MESSAGE_ANCHOR_STABLE_FRAMES/);
 });

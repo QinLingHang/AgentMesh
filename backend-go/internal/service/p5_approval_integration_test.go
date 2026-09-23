@@ -115,11 +115,18 @@ func TestP5ApprovalLifecycleIntegration(t *testing.T) {
 	tasks := NewTaskService(repo, repo, repo, runtimeclient.NewClient(server.URL, "fixture", 5*time.Second), repo, repo, profiles)
 
 	constraints := model.TaskConstraints{MaxLatencyMS: 8000, MaxCost: .15, MinQuality: .8}
-	newApprovalTask := func(t *testing.T, requestID, protocol string, arguments map[string]any) *model.Task {
+	newApprovalTask := func(t *testing.T, requestID, protocol string, arguments map[string]any, conversationOverride ...int64) *model.Task {
 		t.Helper()
+		// Existing P5 subtests intentionally share their original conversation.
+		// A P23 natural-language approval test can supply an isolated conversation
+		// so unrelated pending approvals cannot produce a false ambiguity.
+		targetConversationID := conversationID
+		if len(conversationOverride) > 0 {
+			targetConversationID = conversationOverride[0]
+		}
 		created, err := repo.CreateTask(ctx, model.Task{
 			UserID:         uid,
-			ConversationID: &conversationID,
+			ConversationID: &targetConversationID,
 			RequestID:      requestID,
 			TaskText:       "fixture action",
 			Scheduler:      "greedy",
@@ -133,7 +140,7 @@ func TestP5ApprovalLifecycleIntegration(t *testing.T) {
 		if _, err := repo.CreateMessage(
 			ctx,
 			uid,
-			conversationID,
+			targetConversationID,
 			"user",
 			"fixture action",
 			"COMPLETED",
@@ -237,6 +244,60 @@ func TestP5ApprovalLifecycleIntegration(t *testing.T) {
 		req = lastRequest()
 		if req.Task != "approve" || req.Continuation == nil || req.Continuation.Arguments["order_id"] != "ORDER-A" {
 			t.Fatalf("approve resume did not use exact persisted action: %+v", req)
+		}
+	})
+
+	t.Run("P23RejectApprovalReusesAuthoritativeP5Resume", func(t *testing.T) {
+		// The privacy subtest deliberately leaves an AUTH_REQUIRED task behind.
+		// Create and project-bind a separate conversation for this test rather
+		// than weakening production's fail-closed multiple-approval behavior.
+		approvalConversationID := insert("INSERT INTO conversations(user_id,title) VALUES(?,'P23 approval fixture')", uid)
+		insert("INSERT INTO project_conversations(project_id,conversation_id) VALUES(?,?)", projectID, approvalConversationID)
+		created := newApprovalTask(t, "p23-reject", "http", map[string]any{"order_id": "ORDER-P23"}, approvalConversationID)
+		result, err := tasks.P23RejectCurrentApproval(ctx, uid, RunTaskInput{
+			ConversationID: &approvalConversationID, Task: "上一轮审批我不同意，别继续写入",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != "COMPLETED" || result.Task.ID != created.ID {
+			t.Fatalf("rejection must complete existing task only: %+v", result)
+		}
+		req := lastRequest()
+		if req.Task != "reject" || req.Continuation == nil || req.Continuation.ToolName != "cancel_order" {
+			t.Fatal("P23 rejection did not use original persisted approval")
+		}
+		mu.Lock()
+		requestCountBeforeReplay := len(requests)
+		mu.Unlock()
+		if _, err := tasks.P23RejectCurrentApproval(ctx, uid, RunTaskInput{ConversationID: &approvalConversationID}); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("replaying approval must not execute twice: %v", err)
+		}
+		mu.Lock()
+		requestCountAfterReplay := len(requests)
+		mu.Unlock()
+		if requestCountAfterReplay != requestCountBeforeReplay {
+			t.Fatal("repeated rejection reached runtime")
+		}
+	})
+
+	t.Run("P23RejectApprovalRefusesAmbiguousPendingActions", func(t *testing.T) {
+		ambiguousConversationID := insert("INSERT INTO conversations(user_id,title) VALUES(?,'P23 ambiguous approvals')", uid)
+		insert("INSERT INTO project_conversations(project_id,conversation_id) VALUES(?,?)", projectID, ambiguousConversationID)
+		newApprovalTask(t, "p23-ambiguous-one", "http", map[string]any{"order_id": "ORDER-1"}, ambiguousConversationID)
+		newApprovalTask(t, "p23-ambiguous-two", "http", map[string]any{"order_id": "ORDER-2"}, ambiguousConversationID)
+		mu.Lock()
+		before := len(requests)
+		mu.Unlock()
+		_, err := tasks.P23RejectCurrentApproval(ctx, uid, RunTaskInput{ConversationID: &ambiguousConversationID})
+		if !errors.Is(err, ErrConflict) {
+			t.Fatalf("multiple approvals must require explicit selection: %v", err)
+		}
+		mu.Lock()
+		after := len(requests)
+		mu.Unlock()
+		if before != after {
+			t.Fatal("ambiguous rejection reached runtime")
 		}
 	})
 

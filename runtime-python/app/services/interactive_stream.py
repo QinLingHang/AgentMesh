@@ -209,6 +209,12 @@ async def stream_interactive_answer(
     if req.attachments and not document_context and not image_attachments:
         failed = ", ".join(item.get("name", "附件") for item in notices if item.get("status") == "error")
         raise ValueError(f"附件解析失败：{failed or '请重新上传文件'}")
+    # Comparing multiple documents requires every document, not only those
+    # which happened to parse. Never let a partial/truncated source produce a
+    # confident conflict report about an absent document.
+    compare_request = any(token in req.task for token in ("比较", "对比", "两份文档", "找出差异", "识别冲突"))
+    if compare_request and any(item.get("status") != "ready" for item in notices):
+        raise ValueError("附件解析失败：存在无法读取或被截断的文档，请重新上传后再比较")
     resolved, provider, model = _resolve_provider_and_model(context, req, bool(image_attachments))
 
     user_content = req.task.strip()

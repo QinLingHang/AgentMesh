@@ -363,3 +363,32 @@ def test_provenance_rejects_missing_document_identity():
                 hit
             ]
         )
+
+def test_unique_evidence_selection_keeps_prompt_and_provenance_aligned():
+    """Regression: [A, A, B] must never render [2] with A's body."""
+    from app.rag.provenance import select_unique_evidence_hits
+
+    first = _make_hit(document_id="doc-a", source="a", score=0.95)
+    duplicated = _make_hit(document_id="doc-a", source="a-again", score=0.70)
+    second = _make_hit(document_id="doc-b", source="b", score=0.80)
+    selected = select_unique_evidence_hits([first, duplicated, second], limit=4)
+    provenance = build_evidence_provenance(selected)
+    assert [hit.document.id for hit in selected] == ["doc-a", "doc-b"]
+    assert [(ref.citation_id, ref.document_id) for ref in provenance] == [
+        (1, "doc-a"), (2, "doc-b"),
+    ]
+    assert all(ref.document_id == hit.document.id for ref, hit in zip(provenance, selected))
+
+
+def test_unique_evidence_selection_rejects_missing_identity_even_after_limit():
+    from app.rag.provenance import select_unique_evidence_hits
+
+    with pytest.raises(ValueError, match="document id"):
+        select_unique_evidence_hits([_make_hit(document_id="", source="no-id", score=0.9)])
+
+
+def test_unique_evidence_selection_rejects_nonpositive_limit():
+    from app.rag.provenance import select_unique_evidence_hits
+
+    with pytest.raises(ValueError, match="limit must be positive"):
+        select_unique_evidence_hits([], limit=0)

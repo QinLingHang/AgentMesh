@@ -22,6 +22,56 @@ _REQUIRED_KNOWLEDGE = (
     "严格根据", "必须根据", "仅根据", "只能根据", "依据当前项目", "根据当前项目", "根据项目", "按照项目", "按照公司", "根据公司",
     "strictly based on", "only based on", "according to the project", "according to company",
 )
+# Enterprise facts can be requested without the customer knowing that a knowledge
+# base exists. These are dependency cues, NEVER authorization to read a source.
+# Conceptual questions ("what is a warranty") remain generic unless the user
+# explicitly asks about this business's actual rules.
+_BUSINESS_FACTS = (
+    "本店", "这家店", "我们公司", "我们店", "我们平台", "本公司", "我们的产品", "本产品", "这个产品", "这个商品", "这款商品", "这款产品", "你们的产品", "你们的商品", "本店的", "本平台",
+    "这个套餐", "这款套餐", "这个服务", "这款服务", "保修多久", "保修期", "售后政策", "退货政策", "退款政策", "退换货", "七天无理由",
+    "会员权益", "会员有什么", "运费规则", "运费多少", "收费标准", "营业时间", "服务范围",
+    "官方政策", "服务条款", "发货规则", "保固", "资费套餐", "服务价格",
+    "your product", "your policy", "your warranty",
+    "our company", "our refund policy", "your membership", "return policy", "shipping policy",
+)
+_BUSINESS_ENTITY = (
+    "退货", "退款", "保修", "售后", "会员", "运费", "发货", "配送", "订单规则", "资费",
+    "营业", "服务条款", "产品政策", "价格", "收费", "包邮", "保险", "办理", "开通", "套餐", "资格", "手续", "流程",
+    "return", "refund", "warranty", "membership", "shipping", "delivery", "policy", "price", "charge",
+)
+_BUSINESS_OWNER = ("你们", "你家", "贵司", "贵公司", "your company", "your store", "our company")
+_GENERIC_DEFINITION = (
+    "什么是", "是什么意思", "概念", "原理", "科普", "一般来说", "通常来说", "一般情况下",
+    "what is", "what does", "define ", "in general", "generally speaking",
+)
+_LIVE_PERSONAL_DATA = (
+    "我的订单", "这个订单", "订单状态", "订单号", "物流到哪", "快递到哪", "我的物流",
+    "我的余额", "账户余额", "账单金额", "查询订单", "订单什么时候发货", "我的包裹",
+    "my order", "order status", "track my", "my balance", "my account balance",
+)
+_WORKFLOW_CUES = (
+    "然后", "之后", "接着", "最后", "修复并", "发现问题就", "如果发现", "如果有问题",
+    "分析并", "排查并", "检查并", "测试并", "先检查", "先分析", "再测试",
+    "then ", "after that", "if there", "followed by", "and test", "fix and",
+)
+
+
+def has_implicit_business_knowledge_need(text: str) -> bool:
+    """Business-specific questions need evidence even when RAG is never named."""
+    lower = str(text or "").casefold()
+    if _contains(lower, _GENERIC_DEFINITION) and not _contains(
+        lower, ("你们", "你家", "贵司", "贵公司", "本店", "本公司", "我们公司", "我们平台", "your ", "our ")
+    ):
+        return False
+    return _contains(lower, _BUSINESS_FACTS) or (
+        _contains(lower, _BUSINESS_OWNER) and _contains(lower, _BUSINESS_ENTITY)
+    )
+
+
+def has_live_personal_data_need(text: str) -> bool:
+    return _contains(text, _LIVE_PERSONAL_DATA)
+
+
 _RAG_DISABLE = (
     "不要检索知识库", "不想检索知识库", "不要查知识库", "不检索知识库", "关闭知识库", "不用知识库", "不要使用知识库", "不使用知识库", "不要rag", "关闭rag",
     "do not use rag", "don't use rag", "do not search the knowledge base", "without rag",
@@ -68,6 +118,7 @@ def analyze_task_semantics(
     *,
     has_attachments: bool = False,
     profiler_capabilities: Iterable[str] = (),
+    enable_implicit_business: bool = False,
 ) -> TaskSemanticIntent:
     text = " ".join(str(task or "").split())
     lower = text.casefold()
@@ -85,7 +136,9 @@ def analyze_task_semantics(
         rag_preference = RagPreference.UNSPECIFIED
 
     knowledge_reference = _contains(text, _KNOWLEDGE_REFERENCE)
-    required_knowledge = _contains(text, _REQUIRED_KNOWLEDGE)
+    business_knowledge = enable_implicit_business and has_implicit_business_knowledge_need(text)
+    live_personal_data = enable_implicit_business and has_live_personal_data_need(text)
+    required_knowledge = _contains(text, _REQUIRED_KNOWLEDGE) or (business_knowledge and not live_personal_data)
     if explicit_disable:
         # Dependency describes the task, not the permission. A task may still
         # require evidence even when the user has disabled retrieval; the gate
@@ -95,7 +148,7 @@ def analyze_task_semantics(
         )
     elif required_knowledge:
         dependency = KnowledgeDependency.REQUIRED
-        reasons.append("request explicitly requires internal/project evidence")
+        reasons.append("business_specific_evidence_required" if business_knowledge else "request explicitly requires internal/project evidence")
     elif knowledge_reference or explicit_enable:
         dependency = KnowledgeDependency.OPTIONAL
         reasons.append("request references governed knowledge")
@@ -103,8 +156,8 @@ def analyze_task_semantics(
         dependency = KnowledgeDependency.NONE
 
     action = _contains(text, _ACTION)
-    toolish = action and _contains(text, _TOOLISH)
-    external = action and _contains(text, _EXTERNAL)
+    toolish = (action and _contains(text, _TOOLISH)) or live_personal_data
+    external = (action and _contains(text, _EXTERNAL)) or live_personal_data
     requires_memory = _contains(text, _MEMORY)
     explanation = _contains(text, _EXPLANATION)
     explanation_only = explanation and not action
@@ -130,6 +183,10 @@ def analyze_task_semantics(
         intents.append("knowledge_grounding")
     if has_attachments:
         intents.append("attachment_analysis")
+    if business_knowledge:
+        intents.append("business_fact_request")
+    if live_personal_data:
+        intents.append("live_data_request")
     if requires_memory:
         intents.append("memory_recall")
 

@@ -47,7 +47,8 @@ test("Workspace binds approval UI to the newest task and newest turn in the conv
   const workspace = read("src/features/workspace/Workspace.tsx");
 
   assert.match(workspace, /function latestTaskForConversation/);
-  assert.match(workspace, /latestConversationTask\.id === latestRun\.task\.id/);
+  assert.match(workspace, /latestConversationTask\.id <= latestRun\.task\.id/);
+  assert.match(workspace, /persistedWaitingTask\.id >= latestWaitingTask\.id/);
   assert.match(workspace, /submissionEpochByConversationRef/);
   assert.match(workspace, /isLatestSubmissionOwner/);
   assert.match(workspace, /approvalTask\.conversationId !== approvalConversationId/);
@@ -64,4 +65,14 @@ test("Older waiting approvals are not rendered after a newer conversation task e
     workspace,
     /tasks\.find\(\s*\(task\) =>\s*task\.conversationId ===\s*current\.id &&\s*isWaitingStatus/s,
   );
+});
+
+test("ResumePanel never lets a stale RunResult hide the authoritative waiting task", () => {
+  const panel = read("src/features/workspace/ResumePanel.tsx");
+  assert.match(panel, /latestRun\?\.task\.id === task\.id/);
+  assert.match(panel, /const status = task\.status/);
+  assert.match(panel, /task\.approval \?\?\s*matchingLatestRun\?\.task\.approval/s);
+  assert.match(panel, /data-testid="approval-card"/);
+  assert.match(panel, /data-testid="approval-reject"/);
+  assert.match(panel, /data-testid="approval-approve"/);
 });

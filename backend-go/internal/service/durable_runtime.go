@@ -357,7 +357,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	// resurrected by a queued payload.
 	req := runtimeclient.ExecuteRequest{
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
-		Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
+		P23Strategy: in.P23Strategy, P23CapabilityKind: in.P23CapabilityKind, Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection:     runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
 		RagPolicy:          in.RagPolicy,
@@ -372,9 +372,9 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 
 	task, _, err := s.repo.CreateQueuedTaskAndRuntimeJob(ctx, model.Task{
 		ClientRequestID: in.ClientRequestID, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: map[string]any{
+		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{
 			"runtimePhase": "durable_queued", "deliveryMode": "durable", "attachments": attachmentMeta,
-		},
+		}),
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID,
 		TaskText: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
@@ -608,7 +608,7 @@ func (s *DurableRuntimeService) dispatchOne(
 		req.ModelPool = modelPool
 		req.ModelSelection = runtimeclient.ModelSelection{Mode: normalizedSelection.Mode, ServiceID: normalizedSelection.ServiceID}
 	}
-	if len(agents) == 0 {
+	if len(agents) == 0 && !(req.P23Strategy == "RUNTIME" && req.EffectiveRagPolicy.Mode != model.RagModeOff && len(req.EffectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "project runtime has no enabled agents")
 		return
 	}
