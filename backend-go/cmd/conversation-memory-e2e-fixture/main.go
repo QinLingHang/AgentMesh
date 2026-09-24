@@ -25,7 +25,7 @@ type seedResult struct {
 func main() {
 	flag.Parse()
 	if flag.NArg() < 1 {
-		log.Fatal("usage: conversation-reliability-memory-e2e-fixture seed-history [flags]")
+		log.Fatal("usage: conversation-memory-e2e-fixture seed-history [flags]")
 	}
 	switch flag.Arg(0) {
 	case "seed-history":

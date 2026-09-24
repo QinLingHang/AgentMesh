@@ -14,6 +14,22 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def resolve_cli_path(value: str | os.PathLike[str], *, base: Path = ROOT) -> Path:
+    """Resolve acceptance paths deterministically, independent of subprocess cwd."""
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = base / path
+    return path.resolve()
+
+
+def browser_env(*, mode: str, real_stack_only: bool, qa_mysql_dsn: str) -> dict[str, str]:
+    return {
+        "V4_1_E2E_ROUTING_MODE": mode,
+        "V4_1_E2E_ROUTING_REAL_STACK_ONLY": "true" if real_stack_only else "false",
+        "QA_TEST_MYSQL_DSN": qa_mysql_dsn,
+    }
+
+
 def sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -116,14 +132,20 @@ def validate_performance_report(path: Path) -> tuple[bool, str]:
                 and row["estimatedCost"] >= 0
             )
 
+        ttfb_delta = float(enabled["ttfbMs"]["p95"]) - float(off["ttfbMs"]["p95"])
+        total_delta = float(enabled["totalMs"]["p95"]) - float(off["totalMs"]["p95"])
+        frozen_latency_gate = ttfb_delta <= 1500.0 and total_delta <= 2000.0
         comparable = (off["samples"] >= 20 and off["samples"] == enabled["samples"]
                       and len(off_rows) == off["samples"] and len(enabled_rows) == enabled["samples"]
                       and all(complete_sample(row) for row in off_rows + enabled_rows)
                       and data.get("matchedEnvironmentConfirmed") is True
                       and bool(str(data.get("modelIdentity", "")).strip())
                       and data.get("qaAdmission") == "PASS"
-                      and bool(str(data.get("qaAdmissionReason", "")).strip()))
-        return comparable, "complete matched 20+20 HTTP performance report (TTFT optional when no content delta; token/cost observed; independent QA admitted)" if comparable else "unverified/incomplete/mismatched performance report or independent QA admission missing; existence alone is not PASS"
+                      and bool(str(data.get("qaAdmissionReason", "")).strip())
+                      and frozen_latency_gate)
+        if comparable:
+            return True, f"matched 20+20 HTTP performance report; p95 TTFB delta={ttfb_delta:.3f}ms <=1500ms; p95 total delta={total_delta:.3f}ms <=2000ms; token/cost observed; independent QA admitted"
+        return False, f"unverified/incomplete/mismatched performance evidence or frozen latency gate failed (p95 TTFB delta={ttfb_delta:.3f}ms, p95 total delta={total_delta:.3f}ms)"
     except (OSError, ValueError, KeyError, TypeError) as exc:
         return False, f"unreadable or malformed performance evidence: {type(exc).__name__}"
 
@@ -171,14 +193,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--full-browser", action="store_true", help="Also run the existing full V4.1 browser regression with Execution Routing OFF.")
     parser.add_argument("--fault-injection", action="store_true", help="Run existing Event Delivery outage/fault script when the Windows environment is prepared.")
     parser.add_argument("--knowledge-runtime-predictions", help="Frozen Knowledge Runtime predictions JSONL used for the 120-case Knowledge Runtime vs Execution Routing route comparison.")
+    parser.add_argument("--performance-report", help="Matched OFF/ENABLED real-model performance JSON. Relative paths are resolved from the repository root.")
     return parser
 
 
 def main() -> int:
     args = build_arg_parser().parse_args()
 
-    out = Path(args.output_dir)
+    out = resolve_cli_path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    qa_mysql_dsn = os.environ.get("QA_TEST_MYSQL_DSN", "").strip()
+    predictions_path = resolve_cli_path(args.knowledge_runtime_predictions) if args.knowledge_runtime_predictions else None
+    performance_path = resolve_cli_path(args.performance_report) if args.performance_report else (out / "performance.json")
     gates: list[dict] = []
     run_stamp = uuid.uuid4().hex[:12]
     targeted_temp = out / f"pytest-targeted-{run_stamp}"
@@ -217,9 +243,9 @@ def main() -> int:
     dataset = ROOT / "runtime-python" / "tests" / "fixtures" / "execution_routing_human_eval_v1.jsonl"
     fixtures = ROOT / "runtime-python" / "tests" / "fixtures" / "execution_routing_eval_fixtures_v1.json"
     gates.append(run_gate("G03_frozen_assets_validate", [sys.executable, str(ROOT / "scripts" / "qa" / "validate_execution_routing_human_eval.py"), str(dataset), str(fixtures)], cwd=ROOT))
-    if args.knowledge_runtime_predictions:
+    if predictions_path:
         route_out = out / "router-eval"
-        gates.append(run_gate("G03_frozen_route_120", [sys.executable, str(ROOT / "scripts" / "qa" / "run_execution_routing_frozen_eval.py"), str(dataset), str(fixtures), str(Path(args.knowledge_runtime_predictions).resolve()), str(route_out)], cwd=ROOT))
+        gates.append(run_gate("G03_frozen_route_120", [sys.executable, str(ROOT / "scripts" / "qa" / "run_execution_routing_frozen_eval.py"), str(dataset), str(fixtures), str(predictions_path), str(route_out)], cwd=ROOT))
         apply_report_validation(gates[-1], route_out / "router_eval_report.json", validate_route_report)
     else:
         gates.append({"name": "G03_frozen_route_120", "status": "NOT_RUN", "required": True, "reason": "provide --knowledge-runtime-predictions so the frozen Knowledge Runtime/Execution Routing comparison is reproducible"})
@@ -236,7 +262,7 @@ def main() -> int:
     gates.append(run_gate("G11_react_full", [npm_command(), "test"], cwd=ROOT / "web-react"))
     gates.append(run_gate("G11_react_build", [npm_command(), "run", "build"], cwd=ROOT / "web-react"))
 
-    if args.knowledge_runtime_predictions and authoritative_report.exists():
+    if predictions_path and authoritative_report.exists():
         execution_routing_predictions = out / "router-eval" / "execution_routing_predictions.jsonl"
         combined = out / "combined_handling_report.json"
         if execution_routing_predictions.exists():
@@ -249,11 +275,17 @@ def main() -> int:
 
     # G08 focused real Chrome is opt-in because it needs MySQL/Redis/Milvus,
     # Desktop Bridge and Chrome. It starts isolated Go/Python/React processes.
-    if args.browser:
+    if args.browser and not qa_mysql_dsn:
+        focused = {
+            "name": "G05_G08_case56_72_82_real_chrome", "status": "BLOCKED", "required": True,
+            "reason": "QA_TEST_MYSQL_DSN must be set before --browser; acceptance will not guess or reuse a shared database",
+        }
+        gates.append(focused)
+    elif args.browser:
         focused = run_gate(
             "G05_G08_case56_72_82_real_chrome",
             ["node", "e2e/v4-1-browser-e2e.mjs"], cwd=ROOT / "web-react",
-            env={"V4_1_E2E_ROUTING_REAL_STACK_ONLY": "true", "V4_1_E2E_ROUTING_MODE": "ENABLED"}, timeout=3000,
+            env=browser_env(mode="ENABLED", real_stack_only=True, qa_mysql_dsn=qa_mysql_dsn), timeout=3000,
         )
         gates.append(focused)
         # The focused harness contains an embedded real Go process restart on
@@ -273,11 +305,16 @@ def main() -> int:
         gates.append({"name": "G05_G08_case56_72_82_real_chrome", "status": "NOT_RUN", "required": True, "reason": "pass --browser on prepared Windows QA environment"})
         gates.append({"name": "G12_restart_rollback_real_chrome", "status": "NOT_RUN", "required": True, "reason": "pass --browser to prove restart/rollback against one persisted Durable task"})
 
-    if args.full_browser:
+    if args.full_browser and not qa_mysql_dsn:
+        gates.append({
+            "name": "full_browser_regression_off", "status": "BLOCKED", "required": True,
+            "reason": "QA_TEST_MYSQL_DSN must be set before --full-browser; acceptance will not guess or reuse a shared database",
+        })
+    elif args.full_browser:
         gates.append(run_gate(
             "full_browser_regression_off",
             ["node", "e2e/v4-1-browser-e2e.mjs"], cwd=ROOT / "web-react",
-            env={"V4_1_E2E_ROUTING_MODE": "OFF", "V4_1_E2E_ROUTING_REAL_STACK_ONLY": "false"}, timeout=3600,
+            env=browser_env(mode="OFF", real_stack_only=False, qa_mysql_dsn=qa_mysql_dsn), timeout=3600,
         ))
     else:
         gates.append({"name": "full_browser_regression_off", "status": "NOT_RUN", "required": True, "reason": "pass --full-browser for final closure"})
@@ -294,7 +331,7 @@ def main() -> int:
 
     # G10 remains evidence-driven. Development supplies benchmark_execution_routing_http.py;
     # acceptance must provide the resulting report rather than inventing data.
-    performance = out / "performance.json"
+    performance = performance_path
     if performance.exists():
         valid, detail = validate_performance_report(performance)
         admission = ""
@@ -307,7 +344,7 @@ def main() -> int:
                       "required": True, "evidence": str(performance), "validation": detail})
     else:
         gates.append({"name": "G10_performance_cost", "status": "NOT_RUN", "required": True,
-                      "reason": "run benchmark_execution_routing_http.py against matched OFF and ENABLED isolated stacks"})
+                      "reason": "provide --performance-report or create <output-dir>/performance.json using benchmark_execution_routing_http.py against matched OFF and ENABLED isolated stacks"})
 
     # G12 static mode default. Runtime rollback behavior is also exercised by
     # existing Execution Routing idempotency/mode tests in Go full regression.
@@ -319,6 +356,15 @@ def main() -> int:
     report = {
         "schemaVersion": "execution-routing.acceptance.v1",
         "root": str(ROOT),
+        "inputs": {
+            "outputDir": str(out),
+            "knowledgeRuntimePredictions": str(predictions_path) if predictions_path else None,
+            "performanceReport": str(performance) if performance.exists() else None,
+            "browserRequested": bool(args.browser),
+            "fullBrowserRequested": bool(args.full_browser),
+            "faultInjectionRequested": bool(args.fault_injection),
+            "qaMySQLConfigured": bool(qa_mysql_dsn),
+        },
         "sourceFiles": {
             "envExampleSha256": sha256(env_example) if env_example.exists() else None,
             "qaCodeSha256": {
@@ -327,7 +373,7 @@ def main() -> int:
                     "web-react/e2e/v4-1-browser-e2e.mjs",
                     "scripts/qa/run_execution_routing_acceptance.py",
                     "scripts/qa/benchmark_execution_routing_http.py",
-                    "backend-go/internal/service/routing_real_stack_gates_integration_test.go",
+                    "backend-go/internal/service/execution_routing_real_stack_integration_test.go",
                     "runtime-python/tests/test_execution_routing_real_stack.py",
                 )
             },

@@ -38,6 +38,29 @@ class ExecutionRoutingAcceptanceDriverTests(unittest.TestCase):
         )
         self.assertFalse(hasattr(args, "baseline_predictions"))
 
+
+    def test_relative_acceptance_paths_resolve_from_repository_root(self):
+        resolved = self.driver.resolve_cli_path("qa-results/execution-routing-acceptance")
+        self.assertTrue(resolved.is_absolute())
+        self.assertEqual(
+            resolved,
+            (self.driver.ROOT / "qa-results" / "execution-routing-acceptance").resolve(),
+        )
+
+    def test_browser_env_always_propagates_isolated_mysql_dsn(self):
+        env = self.driver.browser_env(
+            mode="ENABLED", real_stack_only=True, qa_mysql_dsn="qa-dsn-sentinel"
+        )
+        self.assertEqual(env["QA_TEST_MYSQL_DSN"], "qa-dsn-sentinel")
+        self.assertEqual(env["V4_1_E2E_ROUTING_MODE"], "ENABLED")
+        self.assertEqual(env["V4_1_E2E_ROUTING_REAL_STACK_ONLY"], "true")
+
+    def test_performance_report_argument_is_explicit_and_backward_compatible(self):
+        args = self.driver.build_arg_parser().parse_args([
+            "--performance-report", "qa-results/performance-current.json"
+        ])
+        self.assertEqual(args.performance_report, "qa-results/performance-current.json")
+
     def test_windows_utf8_and_missing_stderr_never_mask_a_failure(self):
         self.assertEqual(self.driver.safe_tail(None), "")
         self.assertEqual(self.driver.safe_tail("中文错误".encode("utf-8")), "中文错误")
@@ -87,7 +110,7 @@ class ExecutionRoutingAcceptanceDriverTests(unittest.TestCase):
         rows = [dict(row) for _ in range(20)]
         data = {
             "matchedEnvironmentConfirmed": True, "modelIdentity": "same-model-v1",
-            "OFF": {"samples": 20}, "ENABLED": {"samples": 20},
+            "OFF": {"samples": 20, "ttfbMs": {"p95": 100}, "totalMs": {"p95": 1000}}, "ENABLED": {"samples": 20, "ttfbMs": {"p95": 200}, "totalMs": {"p95": 1200}},
             "raw": {"OFF": rows, "ENABLED": [dict(row) for _ in range(20)]},
             "qaAdmission": "NOT_REVIEWED", "qaAdmissionReason": "",
         }
@@ -109,7 +132,7 @@ class ExecutionRoutingAcceptanceDriverTests(unittest.TestCase):
         enabled_rows = [dict(no_delta if i % 4 == 0 else with_delta) for i in range(20)]
         data = {
             "matchedEnvironmentConfirmed": True, "modelIdentity": "dashscope:qwen-plus:openai-compatible",
-            "OFF": {"samples": 20}, "ENABLED": {"samples": 20},
+            "OFF": {"samples": 20, "ttfbMs": {"p95": 100}, "totalMs": {"p95": 1000}}, "ENABLED": {"samples": 20, "ttfbMs": {"p95": 200}, "totalMs": {"p95": 1200}},
             "raw": {"OFF": off_rows, "ENABLED": enabled_rows},
             "qaAdmission": "PASS",
             "qaAdmissionReason": "Independent comparison against previously frozen criteria",
@@ -124,6 +147,26 @@ class ExecutionRoutingAcceptanceDriverTests(unittest.TestCase):
             data["raw"]["ENABLED"][0] = dict(with_delta, ttftMs=5)
             path.write_text(json.dumps(data), encoding="utf-8")
             self.assertFalse(self.driver.validate_performance_report(path)[0])
+
+
+    def test_performance_evidence_rejects_frozen_latency_regression(self):
+        row = {"route": {"mode": "direct"}, "resultReceived": True,
+               "ttfbMs": 10, "ttftMs": 15, "totalMs": 20,
+               "modelTotalTokens": 48, "modelTokenFieldObserved": True,
+               "estimatedCost": 0.01, "estimatedCostFieldObserved": True}
+        rows = [dict(row) for _ in range(20)]
+        data = {
+            "matchedEnvironmentConfirmed": True, "modelIdentity": "same-model-v1",
+            "OFF": {"samples": 20, "ttfbMs": {"p95": 100}, "totalMs": {"p95": 1000}},
+            "ENABLED": {"samples": 20, "ttfbMs": {"p95": 1701}, "totalMs": {"p95": 3101}},
+            "raw": {"OFF": rows, "ENABLED": [dict(row) for _ in range(20)]},
+            "qaAdmission": "PASS", "qaAdmissionReason": "Matched environment and independently reviewed",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "performance.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            valid, detail = self.driver.validate_performance_report(path)
+            self.assertFalse(valid, detail)
 
     def test_missing_real_browser_never_becomes_a_gate_pass(self):
         rows = [{"name": "G03_frozen_route_120", "status": "PASS"},

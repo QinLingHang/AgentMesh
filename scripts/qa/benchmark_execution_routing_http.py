@@ -168,6 +168,9 @@ def main() -> int:
         "comparison": {
             "ttfbP95DeltaMs": round(enabled["ttfbMs"]["p95"] - off_p95, 3),
             "ttfbP95DeltaPct": round((enabled["ttfbMs"]["p95"] / off_p95 - 1) * 100, 3) if off_p95 > 0 else None,
+            "totalP95DeltaMs": round(enabled["totalMs"]["p95"] - off["totalMs"]["p95"], 3),
+            "modelTotalTokensRatio": round(enabled["modelTotalTokensKnown"] / off["modelTotalTokensKnown"], 6) if off["modelTotalTokensKnown"] > 0 else None,
+            "estimatedCostRatio": round(enabled["estimatedCostTotalKnown"] / off["estimatedCostTotalKnown"], 6) if off["estimatedCostTotalKnown"] > 0 else None,
         },
         "raw": rows,
     }

@@ -262,7 +262,7 @@ async function runFixture(action, args = [], extraEnv = {}) {
 }
 
 async function runConversationMemoryFixture(action, args = []) {
-  const { stdout } = await spawnCollected("go", ["run", "./cmd/conversation-reliability-memory-e2e-fixture", action, ...args], {
+  const { stdout } = await spawnCollected("go", ["run", "./cmd/conversation-memory-e2e-fixture", action, ...args], {
     cwd: backendRoot,
     env: process.env,
   }, 45000);
@@ -821,6 +821,36 @@ async function waitForConversationHistoryReady(cdp, id, timeoutMs = 20000) {
     historyState.state,
     "ready",
     `conversation ${id} history failed to load: ${historyState.error || historyState.state}`,
+  );
+}
+
+async function waitForPersistedConversationMessage(cdp, accessToken, conversationId, role, marker, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    last = await cdp.evaluate(`fetch('/api/conversations/${Number(conversationId)}/messages/page?limit=200', {
+      headers: { Authorization: 'Bearer ' + ${q(accessToken)} },
+    })
+      .then(async (response) => ({ status: response.status, body: await response.json() }))
+      .then(({ status, body }) => ({
+        status,
+        messages: (body?.data?.items ?? body?.items ?? []).map((message) => ({
+          role: String(message?.role ?? ''),
+          content: String(message?.content ?? ''),
+        })),
+      }))
+      .catch((error) => ({ status: 0, messages: [], error: String(error?.message ?? error) }))`);
+    if (
+      last?.status >= 200 && last?.status < 300
+      && Array.isArray(last.messages)
+      && last.messages.some((message) => message.role === role && message.content.includes(marker))
+    ) {
+      return last;
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `conversation ${conversationId} durable ${role} message ${marker} did not persist within ${timeoutMs}ms; last=${JSON.stringify(last)}`,
   );
 }
 
@@ -2078,6 +2108,17 @@ async function runV41() {
     );
     await openConversation(cdp, convA);
     await fetch(`http://${loopback}:${modelPort}/control/release`, { method: "POST" });
+    // Synchronize on the authoritative durable message before asserting UI ownership.
+    // This keeps the test strict (the reply must really persist) while avoiding a
+    // race between model release, Go finalization and the React projection.
+    await waitForPersistedConversationMessage(
+      cdp,
+      tokenA,
+      convB,
+      "assistant",
+      `DELAYED_CONVERSATION_REPLY_${delayedMarker}`,
+      60000,
+    );
     await sleep(1200);
     assert.ok(!(await workspaceText(cdp)).includes(`DELAYED_CONVERSATION_REPLY_${delayedMarker}`), "late B response overwrote active conversation A");
     await openConversation(cdp, convB);
