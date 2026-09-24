@@ -279,7 +279,11 @@ test("Desktop-only outage acceptance proves the owned Windows listener is down",
   assert.match(harness, /V4_1_E2E_DESKTOP_ONLY/);
   assert.match(harness, /async function stopOwnedLoopbackListener/);
   assert.match(harness, /Get-NetTCPConnection/);
-  assert.match(harness, /Stop-Process -Id \$_\.OwningProcess -Force/);
+  assert.match(harness, /async function captureDesktopBridgeOwnership/);
+  assert.match(harness, /desktop\.__agentmeshQaDesktopOwnership = await captureDesktopBridgeOwnership/);
+  assert.match(harness, /listenerIdentityMatches/);
+  assert.match(harness, /Refusing to kill an unowned process/);
+  assert.doesNotMatch(harness, /Stop-Process -Id \$_\.OwningProcess -Force/);
   assert.match(harness, /Desktop Bridge still listening on its owned QA port/);
   assert.match(harness, /safeMessageVisible/);
   assert.match(harness, /requestDiagnostics/);

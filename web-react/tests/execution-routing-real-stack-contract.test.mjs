@@ -42,7 +42,7 @@ test("Execution Routing focused case56 keeps interactive delivery independent of
 test("Desktop Bridge degradation asserts the real listener is gone in focused and full Chrome", () => {
   const harness = read("e2e/v4-1-browser-e2e.mjs");
   assert.match(harness, /async function stopDesktopBridge\(child, port, processLog\)/);
-  assert.match(harness, /await stopOwnedLoopbackListener\(port, processLog\)/);
+  assert.match(harness, /await stopOwnedLoopbackListener\(port, processLog, ownership, diagnostics\)/);
   assert.match(harness, /loopbackPortAccepting\(port\)/);
   assert.doesNotMatch(harness, /await stopChild\(desktop\)/);
   assert.match(harness, /desktopShutdownVerified = true/);
@@ -88,7 +88,10 @@ test("Execution Routing focused browser proves ENABLED to OFF restart replay reu
 
 test("Desktop Bridge shutdown retries the owned listener instead of trusting launcher exit", () => {
   const harness = read("e2e/v4-1-browser-e2e.mjs");
-  assert.match(harness, /const deadline = Date\.now\(\) \+ 30000/);
-  assert.match(harness, /await stopOwnedLoopbackListener\(port, processLog\)/);
+  assert.match(harness, /const deadline = Date\.now\(\) \+ 15000/);
+  assert.match(harness, /const ownership = child\?\.__agentmeshQaDesktopOwnership \?\? null/);
+  assert.match(harness, /listenerIdentityMatches/);
+  assert.doesNotMatch(harness, /withTimeout\(stopDesktopBridge\(/);
+  assert.match(harness, /await stopOwnedLoopbackListener\(port, processLog, ownership, diagnostics\)/);
   assert.match(harness, /after repeated owned-listener shutdown/);
 });

@@ -23,6 +23,29 @@ test("Conversation Reliability history keeps late assistant results owned by the
   assert.match(history, /latestRun\.task\.requestId/);
 });
 
+test("Conversation Reliability semantic marker rename preserves the deterministic fixture contract", () => {
+  assert.match(v41Browser, /const aMarker = `CONVERSATION_A_\$\{stamp\}`/);
+  assert.match(v41Browser, /user\.match\(\/CONVERSATION_\[AB\]_\[A-Z0-9_/);
+  assert.match(v41Browser, /return \{ content: `CONVERSATION_REPLY_\$\{marker\}` \}/);
+  assert.match(v41Browser, /await sendPrompt\(cdp, aMarker, `CONVERSATION_REPLY_\$\{aMarker\}`\)/);
+  assert.doesNotMatch(v41Browser, /Browser Reliability_\[AB\]/);
+});
+
+
+test("Conversation Reliability durable reply synchronization reuses the canonical API client and legal history paging", () => {
+  const helperStart = v41Browser.indexOf("async function waitForRecentConversationMessagePersistence");
+  assert.ok(helperStart >= 0, "durable reply synchronization helper must exist");
+  const helperEnd = v41Browser.indexOf("async function createConversationThroughBrowser", helperStart);
+  assert.ok(helperEnd > helperStart, "durable reply synchronization helper boundary must exist");
+  const helper = v41Browser.slice(helperStart, helperEnd);
+
+  assert.match(helper, /apiRequest\(/);
+  assert.match(helper, /messages\/page\?limit=100/);
+  assert.doesNotMatch(helper, /limit=200/);
+  assert.doesNotMatch(helper, /cdp\.evaluate/);
+  assert.match(v41Browser, /await waitForRecentConversationMessagePersistence\(\s*apiBase,\s*tokenA,\s*convB/s);
+});
+
 test("Conversation Reliability conversation opening lands at the true bottom without hijacking manual history reading", () => {
   assert.match(workspace, /data-testid="workspace-message-scroll"/);
   assert.match(workspace, /messagesLoading/);
@@ -161,16 +184,64 @@ test("Conversation Reliability canonical real-stack closes browser, capsule, Red
   assert.match(v41Browser, /MySQL capsule disappeared after Redis clear/);
 });
 
-test("Conversation Reliability browser waits for the concrete anchor invariant instead of a fixed sleep", () => {
-  const helperStart = v41Browser.indexOf("async function loadOneOlderPagePreservingViewport");
-  assert.ok(helperStart >= 0, "older-history helper must exist");
+test("Conversation Reliability browser observes concrete anchor stability on animation frames without relaxing the displacement gate", () => {
+  const helperStart = v41Browser.indexOf("async function waitForConcreteOlderHistoryAnchorSettlement");
+  assert.ok(helperStart >= 0, "frame-based anchor settlement helper must exist");
   const helperEnd = v41Browser.indexOf("async function composerValue", helperStart);
   assert.ok(helperEnd > helperStart, "older-history helper block must exist");
   const helper = v41Browser.slice(helperStart, helperEnd);
-  assert.match(helper, /Conversation Reliability concrete older-history anchor settlement/);
-  assert.match(helper, /Math\.abs\(top - .*\) <= 16/);
-  assert.match(helper, /5000/);
+  assert.match(helper, /requestAnimationFrame\(tick\)/);
+  assert.match(helper, /new WheelEvent\('wheel'/);
+  assert.match(helper, /Conversation Reliability reader intent did not hold the top viewport/);
+  assert.match(helper, /node\.scrollTop=0/);
+  assert.match(helper, /tolerancePx = 16/);
+  assert.match(helper, /stableFramesRequired = 3/);
+  assert.match(helper, /stableTopDeltaPx = 1/);
+  assert.match(helper, /quietMsRequired = 600/);
+  assert.match(helper, /lastGeometryChangeAt/);
+  assert.match(helper, /historyLoading/);
+  assert.match(helper, /quietFor >= quietMsRequired/);
+  assert.match(helper, /stable-concrete-anchor-after-quiet-window/);
+  assert.match(helper, /maxFrames = 150/);
+  assert.match(helper, /maxWallMs = 10000/);
+  assert.match(helper, /wallTimer=setTimeout/);
+  assert.match(helper, /settlement\.settled/);
+  assert.match(helper, /anchorDisplacement <= 16/);
+  assert.doesNotMatch(helper, /Conversation Reliability concrete older-history anchor settlement",\s*5000/);
   assert.doesNotMatch(helper, /await sleep\(120\)/);
 
   assert.match(workspace, /anchor\.settleFrames >=\s*MESSAGE_ANCHOR_STABLE_FRAMES/);
+});
+
+test("Conversation Reliability Desktop shutdown captures listener ownership and fails closed on foreign PID reuse", () => {
+  assert.match(v41Browser, /async function captureDesktopBridgeOwnership/);
+  assert.match(v41Browser, /queryWindowsLoopbackListenerIdentities/);
+  assert.match(v41Browser, /desktop\.__agentmeshQaDesktopOwnership = await captureDesktopBridgeOwnership/);
+  assert.match(v41Browser, /listenerIdentityMatches/);
+  assert.match(v41Browser, /desktopServerPids\(readProcessLog\(\)\)/);
+  assert.match(v41Browser, /listener ownership could not be proven/);
+  assert.match(v41Browser, /PID reuse must not turn an unrelated process into a QA-owned process/);
+  assert.match(v41Browser, /Refusing to kill an unowned process/);
+  assert.match(v41Browser, /startup listener ownership was not captured/);
+  assert.match(v41Browser, /refusing to terminate an unverified PID/);
+  assert.match(v41Browser, /child\.kill\("SIGTERM"\)/);
+  assert.match(v41Browser, /taskkill", \["\/PID", String\(pid\), "\/F"\]/);
+  assert.match(v41Browser, /Stop-Process -Id \${pid} -Force -ErrorAction Stop/);
+  assert.doesNotMatch(v41Browser, /Stop-Process -Id \$_\.OwningProcess -Force/);
+});
+
+test("Conversation Reliability Desktop shutdown uses TCP closure as authority without a shorter outer timeout", () => {
+  const helperStart = v41Browser.indexOf("async function stopDesktopBridge");
+  assert.ok(helperStart >= 0, "Desktop shutdown helper must exist");
+  const helperEnd = v41Browser.indexOf("async function closeBrowser", helperStart);
+  assert.ok(helperEnd > helperStart, "Desktop shutdown helper boundary must exist");
+  const helper = v41Browser.slice(helperStart, helperEnd);
+
+  assert.match(helper, /stopOwnedLoopbackListener/);
+  assert.match(helper, /loopbackPortAccepting/);
+  assert.match(helper, /const deadline = Date\.now\(\) \+ 15000/);
+  assert.match(helper, /Desktop Bridge still listening on its owned QA port/);
+  assert.match(helper, /captured=/);
+  assert.match(helper, /current=/);
+  assert.doesNotMatch(v41Browser, /withTimeout\(stopDesktopBridge\(/);
 });

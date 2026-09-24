@@ -148,21 +148,206 @@ async function stopChild(child) {
   }
 }
 
-async function stopOwnedLoopbackListener(port, processLog) {
-  if (process.platform !== "win32") return;
-  const serverPids = [...String(processLog ?? "").matchAll(/Started server process \[(\d+)\]/g)];
-  const serverPid = Number(serverPids.at(-1)?.[1] ?? 0);
-  if (serverPid > 0) {
-    await spawnCollected("taskkill", ["/PID", String(serverPid), "/T", "/F"], { windowsHide: true }, 10000).catch(() => {});
-  }
-  const script = [
-    `$listener = Get-NetTCPConnection -LocalAddress '${loopback}' -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue`,
-    `if ($listener) { $listener | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force } }`,
+function desktopServerPids(processLog) {
+  return [...String(processLog ?? "").matchAll(/Started server process \[(\d+)\]/g)]
+    .map((match) => Number(match[1]))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
+function normalizeListenerIdentity(raw) {
+  const pid = Number(raw?.pid ?? 0);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return {
+    pid,
+    startedAt: String(raw?.startedAt ?? "").trim(),
+    imagePath: String(raw?.imagePath ?? "").trim(),
+    localAddress: String(raw?.localAddress ?? "").trim(),
+  };
+}
+
+function listenerIdentityMatches(owned, current) {
+  if (!owned || !current || owned.pid !== current.pid) return false;
+  // PID reuse must not turn an unrelated process into a QA-owned process.
+  // Compare stable process metadata whenever both snapshots could read it.
+  if (owned.startedAt && current.startedAt && owned.startedAt !== current.startedAt) return false;
+  if (owned.imagePath && current.imagePath
+      && owned.imagePath.toLowerCase() !== current.imagePath.toLowerCase()) return false;
+  return true;
+}
+
+async function queryWindowsLoopbackListenerIdentities(port) {
+  if (process.platform !== "win32") return { identities: [], source: "non-windows", errors: [] };
+  const errors = [];
+  const psScript = [
+    `$items = @(Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | ForEach-Object {`,
+    `  $pidValue = [int]$_.OwningProcess`,
+    `  $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue`,
+    `  $started = ''`,
+    `  $image = ''`,
+    `  if ($proc) {`,
+    `    try { $started = $proc.StartTime.ToUniversalTime().ToString('o') } catch {}`,
+    `    try { $image = $proc.Path } catch {}`,
+    `  }`,
+    `  [PSCustomObject]@{ pid = $pidValue; startedAt = $started; imagePath = $image; localAddress = [string]$_.LocalAddress }`,
+    `})`,
+    `$items | ConvertTo-Json -Compress`,
   ].join("; ");
-  // Stop-Process can make the helper itself observe a non-zero native status
-  // after the listener has already disappeared. Port closure below is the
-  // authoritative assertion, so tolerate only that helper exit code here.
-  await spawnCollected("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true }, 10000).catch(() => {});
+  try {
+    const { stdout } = await spawnCollected(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psScript],
+      { windowsHide: true },
+      4000,
+    );
+    const raw = stdout.trim();
+    if (raw) {
+      const decoded = JSON.parse(raw);
+      const identities = (Array.isArray(decoded) ? decoded : [decoded])
+        .map(normalizeListenerIdentity)
+        .filter(Boolean)
+        .filter((item) => [loopback, "0.0.0.0", `::ffff:${loopback}`].includes(item.localAddress));
+      if (identities.length > 0) return { identities, source: "Get-NetTCPConnection", errors };
+    }
+  } catch (error) {
+    errors.push(`Get-NetTCPConnection: ${error?.message ?? error}`);
+  }
+
+  // A few Windows images intermittently expose the TCP table before the
+  // NetTCPConnection cmdlet sees the row. netstat is a read-only fallback;
+  // it is never used to infer ownership beyond the PID captured at startup.
+  try {
+    const { stdout } = await spawnCollected("netstat.exe", ["-ano", "-p", "tcp"], { windowsHide: true }, 4000);
+    const identities = [];
+    const seen = new Set();
+    for (const line of stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0].toUpperCase() !== "TCP") continue;
+      const localEndpoint = columns[1] ?? "";
+      const localMatch = localEndpoint.match(/:(\d+)$/);
+      const remoteMatch = columns[2]?.match(/:(\d+)$/);
+      const pid = Number(columns.at(-1));
+      const localHost = localEndpoint.slice(0, Math.max(0, localEndpoint.length - String(localMatch?.[0] ?? "").length));
+      if (![loopback, "0.0.0.0", `[::ffff:${loopback}]`].includes(localHost)) continue;
+      if (Number(localMatch?.[1] ?? -1) !== Number(port)) continue;
+      if (Number(remoteMatch?.[1] ?? -1) !== 0) continue;
+      if (!Number.isInteger(pid) || pid <= 0 || seen.has(pid)) continue;
+      seen.add(pid);
+      identities.push({ pid, startedAt: "", imagePath: "", localAddress: "" });
+    }
+    if (identities.length > 0) return { identities, source: "netstat", errors };
+  } catch (error) {
+    errors.push(`netstat: ${error?.message ?? error}`);
+  }
+  return { identities: [], source: "none", errors };
+}
+
+async function captureDesktopBridgeOwnership(child, port, processLog, timeoutMs = 5000) {
+  const launcherPid = Number(child?.pid ?? 0);
+  const readProcessLog = typeof processLog === "function" ? processLog : () => processLog;
+  if (process.platform !== "win32") {
+    return {
+      launcherPid,
+      listenerIdentities: [],
+      serverPids: desktopServerPids(readProcessLog()),
+    };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot = { identities: [], source: "none", errors: [] };
+  let lastDeclaredPids = [];
+  while (Date.now() < deadline) {
+    lastSnapshot = await queryWindowsLoopbackListenerIdentities(port);
+    const serverPids = desktopServerPids(readProcessLog());
+    lastDeclaredPids = [...new Set([launcherPid, ...serverPids].filter((pid) => pid > 0))];
+    if (lastSnapshot.identities.length > 0) {
+      const unexpected = lastSnapshot.identities.filter((item) => !lastDeclaredPids.includes(item.pid));
+      if (unexpected.length === 0) {
+        return {
+          launcherPid,
+          listenerIdentities: lastSnapshot.identities,
+          serverPids,
+        };
+      }
+    }
+    if (!(await loopbackPortAccepting(port))) {
+      throw new Error(`Desktop Bridge listener on QA port ${port} disappeared before ownership could be captured`);
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `Desktop Bridge listener ownership could not be proven for QA port ${port}; `
+    + `declared=${lastDeclaredPids.join(",") || "none"}; `
+    + `listener=${lastSnapshot.identities.map((item) => item.pid).join(",") || "unresolved"}; `
+    + `refusing unsafe shutdown${lastSnapshot.errors.length ? ` (${lastSnapshot.errors.join(" | ")})` : ""}`,
+  );
+}
+
+async function killOwnedWindowsProcessTree(pid, diagnostics) {
+  const attemptMarker = `owned-listener termination attempted PID ${pid}`;
+  if (diagnostics.includes(attemptMarker)) return false;
+  diagnostics.push(attemptMarker);
+
+  // The listener PID has already been checked against the startup ownership
+  // snapshot by stopOwnedLoopbackListener(). Kill that exact process only.
+  // Do not use /T here: traversing a Windows process tree can be denied even
+  // when the QA process is allowed to terminate the exact child it spawned.
+  try {
+    await spawnCollected("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true }, 5000);
+    return true;
+  } catch (error) {
+    diagnostics.push(`taskkill exact PID ${pid}: ${error?.message ?? error}`);
+  }
+
+  // Some Windows environments deny taskkill.exe while allowing the same
+  // owner process to be terminated through PowerShell/.NET. This remains safe
+  // because pid was matched against the captured listener identity above.
+  try {
+    await spawnCollected(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Stop-Process -Id ${pid} -Force -ErrorAction Stop`,
+      ],
+      { windowsHide: true },
+      5000,
+    );
+    return true;
+  } catch (error) {
+    diagnostics.push(`Stop-Process exact PID ${pid}: ${error?.message ?? error}`);
+    return false;
+  }
+}
+
+async function stopOwnedLoopbackListener(port, processLog, ownership, diagnostics = []) {
+  if (process.platform !== "win32") return;
+  const snapshot = await queryWindowsLoopbackListenerIdentities(port);
+  diagnostics.push(...snapshot.errors);
+  if (snapshot.identities.length === 0) return;
+
+  const captured = Array.isArray(ownership?.listenerIdentities) ? ownership.listenerIdentities : [];
+  if (captured.length === 0) {
+    const loggedServerPids = desktopServerPids(processLog);
+    throw new Error(
+      `Desktop Bridge QA port ${port} is still listening, but startup listener ownership was not captured; `
+      + `logged server PID(s)=${loggedServerPids.join(",") || "none"}; refusing to terminate an unverified PID`,
+    );
+  }
+
+  const foreign = snapshot.identities.filter(
+    (current) => !captured.some((owned) => listenerIdentityMatches(owned, current)),
+  );
+  if (foreign.length > 0) {
+    throw new Error(
+      `Desktop Bridge QA port ${port} is now owned by foreign listener PID(s) ${foreign.map((item) => item.pid).join(",")}; `
+      + `captured QA PID(s) ${captured.map((item) => item.pid).join(",")}. Refusing to kill an unowned process`,
+    );
+  }
+
+  for (const current of snapshot.identities) {
+    await killOwnedWindowsProcessTree(current.pid, diagnostics);
+  }
 }
 
 // A Python uvicorn launcher can exit while its server child remains alive on
@@ -184,21 +369,67 @@ async function loopbackPortAccepting(port) {
 }
 
 async function stopDesktopBridge(child, port, processLog) {
-  await stopChild(child);
-  // On Windows uvicorn may leave a spawned server process behind after the
-  // Python launcher exits. Re-resolve the current listening PID on every pass
-  // instead of assuming one taskkill is immediately observable. The port—not
-  // the launcher handle—is the authoritative ownership/availability signal.
-  const deadline = Date.now() + 30000;
-  let attempts = 0;
-  while (Date.now() < deadline) {
-    attempts += 1;
-    await stopOwnedLoopbackListener(port, processLog);
+  const diagnostics = [];
+  const ownership = child?.__agentmeshQaDesktopOwnership ?? null;
+
+  try {
+    if (process.platform === "win32") {
+      // First use the ChildProcess handle that this QA run itself owns. This
+      // avoids taskkill /T permission failures and cannot target an unrelated
+      // process because the handle came directly from spawn().
+      if (child && child.exitCode === null && child.signalCode === null) {
+        try {
+          const signalSent = child.kill("SIGTERM");
+          diagnostics.push(`launcher child.kill(SIGTERM) sent=${signalSent}`);
+        } catch (error) {
+          diagnostics.push(`launcher child.kill(SIGTERM): ${error?.message ?? error}`);
+        }
+        await waitForChildExit(child, 2500);
+      }
+    } else {
+      try {
+        await stopChild(child);
+      } catch (error) {
+        diagnostics.push(`launcher cleanup: ${error?.message ?? error}`);
+      }
+    }
+
     if (!(await loopbackPortAccepting(port))) return;
-    await sleep(Math.min(750, 150 + attempts * 50));
+
+    // On Windows uvicorn may leave a spawned server process behind after the
+    // Python launcher exits. Re-resolve the current listening PID on every pass,
+    // but terminate it only when it matches the listener identity captured after
+    // this run's real Desktop preflight. The port—not the launcher handle—is the
+    // authoritative ownership/availability signal.
+    const deadline = Date.now() + 15000;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts += 1;
+      await stopOwnedLoopbackListener(port, processLog, ownership, diagnostics);
+      if (!(await loopbackPortAccepting(port))) return;
+      await sleep(Math.min(600, 100 + attempts * 50));
+    }
+
+    const finalSnapshot = process.platform === "win32"
+      ? await queryWindowsLoopbackListenerIdentities(port)
+      : { identities: [], errors: [] };
+    diagnostics.push(...(finalSnapshot.errors ?? []));
+    assert.equal(
+      await loopbackPortAccepting(port),
+      false,
+      `Desktop Bridge still listening on its owned QA port ${port} after repeated owned-listener shutdown; `
+        + `launcher=${ownership?.launcherPid ?? "unknown"}; `
+        + `server=${(ownership?.serverPids ?? []).join(",") || "none"}; `
+        + `captured=${(ownership?.listenerIdentities ?? []).map((item) => item.pid).join(",") || "none"}; `
+        + `current=${(finalSnapshot.identities ?? []).map((item) => item.pid).join(",") || "unresolved"}; `
+        + `diagnostics=${diagnostics.join(" | ") || "none"}`,
+    );
+  } finally {
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
+    child?.stdin?.destroy();
+    child?.unref?.();
   }
-  assert.equal(await loopbackPortAccepting(port), false,
-    `Desktop Bridge still listening on its owned QA port ${port} after repeated owned-listener shutdown`);
 }
 
 async function closeBrowser(child, cdp) {
@@ -824,33 +1055,29 @@ async function waitForConversationHistoryReady(cdp, id, timeoutMs = 20000) {
   );
 }
 
-async function waitForPersistedConversationMessage(cdp, accessToken, conversationId, role, marker, timeoutMs = 60000) {
+async function waitForRecentConversationMessagePersistence(baseUrl, accessToken, conversationId, role, marker, timeoutMs = 60000) {
   const deadline = Date.now() + timeoutMs;
-  let last = null;
+  let lastMessages = [];
+
   while (Date.now() < deadline) {
-    last = await cdp.evaluate(`fetch('/api/conversations/${Number(conversationId)}/messages/page?limit=200', {
-      headers: { Authorization: 'Bearer ' + ${q(accessToken)} },
-    })
-      .then(async (response) => ({ status: response.status, body: await response.json() }))
-      .then(({ status, body }) => ({
-        status,
-        messages: (body?.data?.items ?? body?.items ?? []).map((message) => ({
-          role: String(message?.role ?? ''),
-          content: String(message?.content ?? ''),
-        })),
-      }))
-      .catch((error) => ({ status: 0, messages: [], error: String(error?.message ?? error) }))`);
-    if (
-      last?.status >= 200 && last?.status < 300
-      && Array.isArray(last.messages)
-      && last.messages.some((message) => message.role === role && message.content.includes(marker))
-    ) {
-      return last;
-    }
+    const page = await apiRequest(
+      baseUrl,
+      accessToken,
+      "GET",
+      `/api/conversations/${Number(conversationId)}/messages/page?limit=100`,
+    );
+    lastMessages = Array.isArray(page?.items) ? page.items : [];
+    const persisted = lastMessages.find(
+      (message) => String(message?.role ?? "") === role
+        && String(message?.content ?? "").includes(marker),
+    );
+    if (persisted) return persisted;
     await sleep(100);
   }
+
   throw new Error(
-    `conversation ${conversationId} durable ${role} message ${marker} did not persist within ${timeoutMs}ms; last=${JSON.stringify(last)}`,
+    `conversation ${conversationId} durable ${role} message ${marker} did not persist within ${timeoutMs}ms; `
+      + `lastMessageCount=${lastMessages.length}`,
   );
 }
 
@@ -906,12 +1133,185 @@ async function assertConversationAtBottom(cdp, label, timeoutMs = 5000) {
   throw new Error(`${label} did not land at the latest-message bottom: ${JSON.stringify(last)}`);
 }
 
+async function waitForConcreteOlderHistoryAnchorSettlement(
+  cdp,
+  anchorId,
+  targetTop,
+  {
+    tolerancePx = 16,
+    stableFramesRequired = 3,
+    stableTopDeltaPx = 1,
+    quietMsRequired = 600,
+    maxFrames = 150,
+    maxWallMs = 10000,
+  } = {},
+) {
+  return await cdp.evaluate(`(() => new Promise((resolve) => {
+    const anchorId=${q(anchorId)};
+    const targetTop=${Number(targetTop)};
+    const tolerancePx=${Number(tolerancePx)};
+    const stableFramesRequired=${Number(stableFramesRequired)};
+    const stableTopDeltaPx=${Number(stableTopDeltaPx)};
+    const quietMsRequired=${Number(quietMsRequired)};
+    const maxFrames=${Number(maxFrames)};
+    const maxWallMs=${Number(maxWallMs)};
+    const started=performance.now();
+    let frames=0;
+    let stableFrames=0;
+    let previousTop=null;
+    let previousSnapshot=null;
+    let lastGeometryChangeAt=started;
+    let missingFrames=0;
+    let finished=false;
+    let lastSnapshot=null;
+    const samples=[];
+
+    const snapshot=() => {
+      const node=document.querySelector('[data-testid="workspace-message-scroll"]');
+      const selector='[data-message-id="' + CSS.escape(String(anchorId)) + '"]';
+      const anchor=document.querySelector(selector);
+      const top=anchor?.getBoundingClientRect().top ?? null;
+      const displacement=Number.isFinite(top) ? Math.abs(top-targetTop) : null;
+      const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
+        .map((item)=>Number(item.getAttribute('data-message-id')||0));
+      const historyButton=document.querySelector('[data-testid="message-history-load-earlier"] button');
+      return {
+        top,
+        displacement,
+        scrollTop: node?.scrollTop ?? null,
+        scrollHeight: node?.scrollHeight ?? null,
+        clientHeight: node?.clientHeight ?? null,
+        count: ids.length,
+        firstIds: ids.slice(0,5),
+        lastIds: ids.slice(-5),
+        historyLoading: Boolean(historyButton?.disabled),
+      };
+    };
+
+    let wallTimer=null;
+    const finish=(settled, reason, last) => {
+      if (finished) return;
+      finished=true;
+      if (wallTimer != null) clearTimeout(wallTimer);
+      resolve({
+        settled,
+        reason,
+        frames,
+        stableFrames,
+        missingFrames,
+        elapsedMs: Math.round((performance.now()-started)*100)/100,
+        targetTop,
+        tolerancePx,
+        stableFramesRequired,
+        stableTopDeltaPx,
+        quietMsRequired,
+        quietForMs: Math.round((performance.now()-lastGeometryChangeAt)*100)/100,
+        maxFrames,
+        maxWallMs,
+        last,
+        samples,
+      });
+    };
+
+    const tick=() => {
+      if (finished) return;
+      frames += 1;
+      const current=snapshot();
+      lastSnapshot=current;
+      const geometryChanged = previousSnapshot == null ||
+        !Number.isFinite(current.top) ||
+        !Number.isFinite(previousSnapshot.top) ||
+        Math.abs(current.top-previousSnapshot.top) > stableTopDeltaPx ||
+        Math.abs((current.scrollTop ?? 0)-(previousSnapshot.scrollTop ?? 0)) > 1 ||
+        Math.abs((current.scrollHeight ?? 0)-(previousSnapshot.scrollHeight ?? 0)) > 1 ||
+        Math.abs((current.clientHeight ?? 0)-(previousSnapshot.clientHeight ?? 0)) > 1 ||
+        current.count !== previousSnapshot.count ||
+        current.firstIds.join(',') !== previousSnapshot.firstIds.join(',') ||
+        current.lastIds.join(',') !== previousSnapshot.lastIds.join(',') ||
+        current.historyLoading !== previousSnapshot.historyLoading;
+
+      if (geometryChanged) lastGeometryChangeAt=performance.now();
+
+      if (!Number.isFinite(current.top) || current.historyLoading) {
+        if (!Number.isFinite(current.top)) missingFrames += 1;
+        stableFrames = 0;
+      } else {
+        const stableTop = previousTop == null || Math.abs(current.top-previousTop) <= stableTopDeltaPx;
+        if (current.displacement <= tolerancePx && stableTop) stableFrames += 1;
+        else stableFrames = 0;
+        previousTop = current.top;
+      }
+      previousSnapshot=current;
+
+      const quietFor=performance.now()-lastGeometryChangeAt;
+      samples.push({
+        frame: frames,
+        top: current.top,
+        displacement: current.displacement,
+        scrollTop: current.scrollTop,
+        scrollHeight: current.scrollHeight,
+        clientHeight: current.clientHeight,
+        historyLoading: current.historyLoading,
+        quietForMs: Math.round(quietFor*100)/100,
+      });
+      if (samples.length > 12) samples.shift();
+
+      if (stableFrames >= stableFramesRequired && quietFor >= quietMsRequired && !current.historyLoading) {
+        finish(true, 'stable-concrete-anchor-after-quiet-window', current);
+        return;
+      }
+      if (frames >= maxFrames) {
+        finish(false, 'frame-budget-exhausted', current);
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+
+    wallTimer=setTimeout(() => {
+      const current=lastSnapshot ?? snapshot();
+      finish(false, 'wall-clock-budget-exhausted', current);
+    }, maxWallMs);
+    requestAnimationFrame(tick);
+  }))()`);
+}
+
 async function loadOneOlderPagePreservingViewport(cdp) {
-  const before = await cdp.evaluate(`(() => {
+  const before = await cdp.evaluate(`(async () => {
     const node=document.querySelector('[data-testid="workspace-message-scroll"]');
     const button=document.querySelector('[data-testid="message-history-load-earlier"] button');
     if(!node||!button)return null;
+
+    // This setup represents a reader intentionally leaving newest-message
+    // auto-follow before requesting older history. A bare scrollTop = 0
+    // is not equivalent to real user scrolling because it does not fire the
+    // Workspace wheel/pointer intent handler that cancels pending bottom-settle
+    // animation frames. Dispatch reader intent first, then move to the top.
+    node.dispatchEvent(
+      new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -1200,
+      }),
+    );
     node.scrollTop=0;
+    node.dispatchEvent(new Event('scroll', { bubbles: true }));
+
+    // Prove that the old conversation-open auto-follow transaction really
+    // yielded before capturing the anchor used by this test. This is a setup
+    // invariant, not an anchor acceptance relaxation.
+    await new Promise((resolve) => {
+      let frames=0;
+      const tick=() => {
+        frames += 1;
+        if(frames >= 4) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
     const anchor=document.querySelector('[data-testid="message-user"][data-message-id], [data-testid="message-assistant"][data-message-id]');
     const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
       .map((item)=>Number(item.getAttribute('data-message-id')||0));
@@ -926,6 +1326,10 @@ async function loadOneOlderPagePreservingViewport(cdp) {
   })()`);
   assert.ok(before, "Conversation Reliability older-history viewport fixture was unavailable");
   assert.ok(before.anchorId && Number.isFinite(before.anchorTop), "Conversation Reliability visible message anchor was unavailable");
+  assert.ok(
+    before.scrollTop <= 1,
+    `Conversation Reliability reader intent did not hold the top viewport before older-history load: ${JSON.stringify(before)}`,
+  );
 
   assert.equal(
     await cdp.evaluate(`(() => { const button=document.querySelector('[data-testid="message-history-load-earlier"] button'); if(!button||button.disabled)return false; button.click(); return true; })()`),
@@ -940,21 +1344,14 @@ async function loadOneOlderPagePreservingViewport(cdp) {
     10000,
   );
 
-  // Production intentionally settles prepend anchoring across several layout
-  // frames (ResizeObserver + rAF). Under CPU pressure it now keeps a bounded
-  // 2s/120-frame recovery window so a wall-clock timeout cannot fire before
-  // enough layout frames exist to prove stability. Keep the exact displacement
-  // requirement and wait beyond that production bound for the invariant itself.
-  await waitFor(
+  // Observe the same durable element on real animation frames. This does not
+  // correct scroll position or relax the <=16px gate. It only avoids treating
+  // a slow frame schedule as a generic wall-clock timeout and records enough
+  // geometry to distinguish a real displacement from a QA timing failure.
+  const settlement = await waitForConcreteOlderHistoryAnchorSettlement(
     cdp,
-    `(() => {
-      const anchor=document.querySelector('[data-message-id="${before.anchorId}"]');
-      if(!anchor)return false;
-      const top=anchor.getBoundingClientRect().top;
-      return Number.isFinite(top) && Math.abs(top - ${Number(before.anchorTop)}) <= 16;
-    })()`,
-    "Conversation Reliability concrete older-history anchor settlement",
-    5000,
+    before.anchorId,
+    before.anchorTop,
   );
 
   const after = await cdp.evaluate(`(() => {
@@ -1020,6 +1417,7 @@ async function loadOneOlderPagePreservingViewport(cdp) {
       hasConcreteAnchor
         ? "concrete-element"
         : "height-fallback",
+    settlement,
   };
 
   console.log(
@@ -1027,6 +1425,10 @@ async function loadOneOlderPagePreservingViewport(cdp) {
   );
 
   if (hasConcreteAnchor) {
+    assert.ok(
+      settlement.settled,
+      `Conversation Reliability concrete older-history anchor did not become stably settled: ${JSON.stringify(diagnostics)}`,
+    );
     assert.ok(
       anchorDisplacement <= 16,
       `loading older history displaced the visible message anchor: ${JSON.stringify(diagnostics)}`,
@@ -1264,7 +1666,7 @@ function modelFixtureReply(body, desktopRoot) {
 
   const delayed = user.match(/DELAYED_CONVERSATION_[A-Z0-9_\-]+/i)?.[0];
   if (delayed) return { content: `DELAYED_CONVERSATION_REPLY_${delayed}` };
-  const marker = user.match(/Browser Reliability_[AB]_[A-Z0-9_\-]+/i)?.[0];
+  const marker = user.match(/CONVERSATION_[AB]_[A-Z0-9_\-]+/i)?.[0];
   if (marker) return { content: `CONVERSATION_REPLY_${marker}` };
   return { content: "AgentMesh V4.1 deterministic browser fixture response." };
 }
@@ -1522,6 +1924,14 @@ async function runV41() {
     if (!desktopProbe.ok) {
       throw new Error(`real Desktop Bridge preflight failed: HTTP ${desktopProbe.status} ${await desktopProbe.text()}`);
     }
+    // Freeze the listener identity only after a real authenticated Bridge call
+    // succeeds. Shutdown may act on this captured identity, never on an
+    // arbitrary process that happens to own the same port later.
+    desktop.__agentmeshQaDesktopOwnership = await captureDesktopBridgeOwnership(
+      desktop,
+      desktopPort,
+      () => desktopLog,
+    );
 
     runtimePython = resolvePython(runtimeRoot, "V4_1_E2E_RUNTIME_PYTHON");
     // Validate connectivity and clear only this run's namespace. The prefix is
@@ -2111,8 +2521,8 @@ async function runV41() {
     // Synchronize on the authoritative durable message before asserting UI ownership.
     // This keeps the test strict (the reply must really persist) while avoiding a
     // race between model release, Go finalization and the React projection.
-    await waitForPersistedConversationMessage(
-      cdp,
+    await waitForRecentConversationMessagePersistence(
+      apiBase,
       tokenA,
       convB,
       "assistant",
@@ -2415,7 +2825,10 @@ async function runV41() {
     // Enforce this also after focused-mode early return and on failures.
     if (desktopStarted && !desktopShutdownVerified) {
       try {
-        await withTimeout(stopDesktopBridge(desktop, desktopPort, desktopLog), 18000, "V4.1 Desktop Bridge cleanup");
+        // stopDesktopBridge is internally bounded. Do not wrap it in a shorter
+        // outer timeout that can declare failure while owned-listener recovery
+        // is still executing.
+        await stopDesktopBridge(desktop, desktopPort, desktopLog);
         desktopShutdownVerified = true;
         desktop = undefined;
       } catch (error) { cleanupError ??= error; }
