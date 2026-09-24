@@ -38,7 +38,7 @@ from app.models.runtime import resolve_project_model_runtime
 from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse, TraceEvent
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
-from app.semantics.intent_understanding import TaskUnderstandingRequest, TaskUnderstandingResult, understand
+from app.semantics.execution_routing import ExecutionRoutingRequest, ExecutionRoutingResult, decide_execution_route
 
 registry = None
 engine = None
@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AgentMesh Runtime",
-    version="0.4.0-p1-knowledge",
+    version="0.4.0-knowledge",
     lifespan=lifespan,
 )
 
@@ -260,16 +260,15 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
     candidate_token = set_candidate_knowledge_ids(None)
     try:
         response = await engine.run(req, event_sink=event_sink, delta_sink=delta_sink)
-        # P23 metadata comes only from the internal Go-signed execution request.
+        # Execution-routing metadata comes only from the internal Go-signed execution request.
         # Persist the same privacy-safe decision trace for direct and durable
         # runs, including the no-DAG Knowledge executor, without re-routing.
-        if req.p23_strategy in {"SINGLE_CAPABILITY", "WORKFLOW", "RUNTIME"}:
+        if req.execution_route == "RUNTIME":
             response.trace.insert(0, TraceEvent(**{
-                "kind": "routing", "title": "P23 Execution Decision",
+                "kind": "routing", "title": "Execution Route Decision",
                 "status": "completed", "elapsedMs": 0,
                 "detail": json.dumps({
-                    "decisionVersion": "p23.v2" if req.p23_strategy == "RUNTIME" else "p23.v1", "strategy": req.p23_strategy,
-                    "capabilityKind": req.p23_capability_kind,
+                    "decisionVersion": "execution-routing.v1", "strategy": req.execution_route,
                 }, ensure_ascii=False),
             }))
         return response
@@ -278,22 +277,22 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
         reset_knowledge_scope(token)
 
 
-@app.post("/internal/v1/p23/understand", response_model=TaskUnderstandingResult)
-async def p23_understand(
-    req: TaskUnderstandingRequest,
+@app.post("/internal/v1/routing/understand", response_model=ExecutionRoutingResult)
+async def decide_execution_route_execution_route(
+    req: ExecutionRoutingRequest,
     x_internal_token: str = Header(default=""),
 ):
     """Trusted, read-only preflight. A suggestion is never execution permission."""
     verify_internal(x_internal_token)
-    baseline = understand(req)
-    from app.semantics.semantic_intent_model import should_use_semantic_model, describe_with_model
-    if not should_use_semantic_model(req, baseline):
+    baseline = decide_execution_route(req)
+    from app.semantics.execution_routing_model import should_use_semantic_routing_model, describe_routing_with_model
+    if not should_use_semantic_routing_model(req, baseline):
         return baseline
-    described = await describe_with_model(engine, req)
+    described = await describe_routing_with_model(engine, req)
     if described is None:
         return baseline  # conservative RUNTIME; never silently downgrade to chat
     descriptor, usage = described
-    refined = understand(req, descriptor=descriptor)
+    refined = decide_execution_route(req, descriptor=descriptor)
     return refined.model_copy(update={
         "model_calls": int(usage["model_calls"]),
         "model_tokens": int(usage["model_tokens"]),

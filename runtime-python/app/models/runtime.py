@@ -173,7 +173,7 @@ def resolve_project_model_runtime(
 ) -> ResolvedModelRuntime:
     """Build a request-local BYOK runtime without mutating RuntimeContext.
 
-    Normal task execution keeps the P9-compatible fallback where ``modelName`` may
+    Normal task execution keeps the governance-compatible fallback where ``modelName`` may
     also be a multimodal model. Knowledge ingestion can opt into
     ``require_explicit_vision=True`` so image bytes are never silently sent to a
     text-only model when ``visionModelName`` was not configured.
@@ -274,7 +274,7 @@ class ModelRuntimeResolver:
                 route_decision=route_decision,
             )
 
-        # P9 Project BYOK is request-local. It never mutates RuntimeContext and
+        # Project BYOK is request-local. It never mutates RuntimeContext and
         # therefore cannot leak across projects or later requests.
         if project_model is not None:
             resolved = resolve_project_model_runtime(project_model)

@@ -140,7 +140,7 @@ type MemoryListInput struct {
 	Limit int
 }
 
-// MemoryUpsertResult is returned by the internal P3.2 automatic-memory
+// MemoryUpsertResult is returned by the internal automatic-memory
 // contract. The action is intentionally explicit so Runtime Trace can show
 // whether a durable memory was created, updated, left unchanged, or preserved
 // because an inferred candidate had lower authority than an existing memory.
@@ -431,7 +431,7 @@ func (s *MemoryService) ByKey(
 	return memory, nil
 }
 
-// UpsertAutomatic is the Go-side persistence/ownership boundary for P3.2.
+// UpsertAutomatic is the Go-side persistence/ownership boundary for memory write policy.
 //
 // It is deliberately key-based and user-global. There is no project_id in the
 // contract. Automatic inferred memories are lower-authority than memories that

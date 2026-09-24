@@ -142,7 +142,7 @@ def _int(item: dict[str, Any], key: str, default: int) -> int:
 
 
 def create_model_plugins() -> list[ModelGatewayPlugin]:
-    """Create the default runtime plus optional P7 routing candidates.
+    """Create the default runtime plus optional Adaptive Routing routing candidates.
 
     ``MODEL_RUNTIME_POOL_JSON`` is intentionally optional. A malformed pool is
     rejected at startup rather than silently routing to an unexpected model.

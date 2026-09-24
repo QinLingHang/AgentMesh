@@ -60,6 +60,6 @@ try {
     Pop-Location
 }
 
-Write-Host "P10 production preflight: PASS" -ForegroundColor Green
+Write-Host "Production preflight: PASS" -ForegroundColor Green
 Write-Host "Public origin: $($envMap['PUBLIC_ORIGIN'])"
 Write-Host "TLS required: $requireTls"

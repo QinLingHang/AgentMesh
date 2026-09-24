@@ -21,7 +21,7 @@ function EvalMetric({
   detail: string;
 }) {
   return (
-    <article className="p6-eval-metric">
+    <article className="eval-scorecard-metric">
       <span>{label}</span>
       <strong>{value}</strong>
       <small>{detail}</small>
@@ -38,7 +38,7 @@ export function EvalScorecardPanel({
 
   if (!scorecard) {
     return (
-      <section className="detail-section p6-eval-empty">
+      <section className="detail-section eval-scorecard-empty">
         <div className="section-title">
           <div>
             <h3>质量评估</h3>
@@ -59,7 +59,7 @@ export function EvalScorecardPanel({
           : "不可用";
 
   return (
-    <section className="detail-section p6-eval-section">
+    <section className="detail-section eval-scorecard-section">
       <div className="section-title">
         <div>
           <h3>质量评估</h3>
@@ -67,12 +67,12 @@ export function EvalScorecardPanel({
             统一查看回答质量、事实依据、工具/知识检索/长期记忆贡献，以及耗时、成本和质量预算是否满足。
           </p>
         </div>
-        <span className={`p6-eval-badge ${scorecard.status}`}>
+        <span className={`eval-scorecard-badge ${scorecard.status}`}>
           {badgeText}
         </span>
       </div>
 
-      <div className="p6-eval-hero">
+      <div className="eval-scorecard-hero">
         <div>
           <span>综合评分</span>
           <strong>{scorecard.overallScore.toFixed(3)}</strong>
@@ -89,7 +89,7 @@ export function EvalScorecardPanel({
         </div>
       </div>
 
-      <div className="p6-eval-grid">
+      <div className="eval-scorecard-grid">
         <EvalMetric label="任务完成度" value={percent(scorecard.taskSuccess)} detail="运行状态与最终任务完成情况" />
         <EvalMetric label="Judge 任务完成" value={percent(scorecard.taskCompletion ?? scorecard.taskSuccess)} detail="V2 结构化评测的任务完成维度" />
         <EvalMetric label="回答质量" value={percent(scorecard.answerQuality)} detail="智能体质量评估结果" />
@@ -111,7 +111,7 @@ export function EvalScorecardPanel({
       </div>
 
       {scorecard.judgeReason && (
-        <div className="p6-eval-violations">
+        <div className="eval-scorecard-violations">
           <strong>评测说明</strong>
           <div>
             <span>{scorecard.judgeReason}</span>
@@ -120,7 +120,7 @@ export function EvalScorecardPanel({
       )}
 
       {scorecard.violations.length > 0 && (
-        <div className="p6-eval-violations">
+        <div className="eval-scorecard-violations">
           <strong>策略与预算信号</strong>
           <div>
             {scorecard.violations.map((item) => (

@@ -693,7 +693,7 @@ export type MCPDiscoveredTool = {
   original_tool_name: string;
 };
 // =========================================================
-// P9 Enterprise Governance
+// Enterprise Governance
 // =========================================================
 export type ProjectRole = "OWNER" | "ADMIN" | "DEVELOPER" | "VIEWER";
 export type ProjectMember = {

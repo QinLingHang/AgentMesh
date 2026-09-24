@@ -9,7 +9,7 @@ import (
 )
 
 func TestBuildPrivacySafeDLQMessageDoesNotRetainSourcePayloadOrKey(t *testing.T) {
-	secret := "P21-QA-SYNTHETIC-SECRET-DO-NOT-RETAIN"
+	secret := "EVENT-DELIVERY-QA-SYNTHETIC-SECRET-DO-NOT-RETAIN"
 	message := kafka.Message{
 		Topic:     "agentmesh.runtime.events",
 		Partition: 7,

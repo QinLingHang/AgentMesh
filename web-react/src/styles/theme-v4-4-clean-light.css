@@ -398,7 +398,7 @@
 .memory-trace-panel-shell,
 .run-context-card,
 .run-health-card,
-.p6-eval-section {
+.eval-scorecard-section {
   color: var(--v44-text-2) !important;
   background: var(--v44-surface) !important;
   border-color: var(--v44-border) !important;

@@ -231,7 +231,7 @@
   overscroll-behavior: contain;
 
   /*
-   * P20 FIX14 owns prepend anchoring explicitly with a concrete message DOM
+   * Conversation Reliability Prepend Anchoring owns prepend anchoring explicitly with a concrete message DOM
    * element. Disable the browser's independent scroll anchoring so native and
    * application compensation cannot compete during history insertion.
    */
@@ -3517,7 +3517,7 @@ button.project-resource-card:hover {
 }
 
 /* =========================================================
-   P2 Project Runtime Context
+   Project Runtime Context
    ========================================================= */
 
 .project-runtime-panel {
@@ -3829,7 +3829,7 @@ button.project-resource-card:hover {
 }
 
 /* =========================================================
-   P5 Human-in-the-loop approval card
+   Human-in-the-loop approval card
    ========================================================= */
 .approval-composer {
   gap: 14px;

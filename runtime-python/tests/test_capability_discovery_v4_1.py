@@ -73,7 +73,7 @@ def test_computer_use_selection_expands_session_dependencies():
 
 def test_project_knowledge_is_discovered_without_explicit_knowledge_base_phrase():
     project = discover_capabilities(
-        "AgentMesh P9 BYOK 是怎么设计和实现的？",
+        "AgentMesh Project BYOK 是怎么设计和实现的？",
     )
     assert project.use_project_knowledge is True
 
@@ -335,7 +335,7 @@ def test_continuation_can_resume_desktop_or_project_knowledge_without_tool_name(
     knowledge_query, used_history, _ = contextualize_discovery_task(
         "展开讲讲",
         [
-            InteractiveMessage(role="user", content="AgentMesh P9 BYOK 是怎么设计的？"),
+            InteractiveMessage(role="user", content="AgentMesh Project BYOK 是怎么设计的？"),
             InteractiveMessage(role="assistant", content="我可以继续从项目实现角度展开。"),
         ],
     )
@@ -345,10 +345,10 @@ def test_continuation_can_resume_desktop_or_project_knowledge_without_tool_name(
     assert continuation_subject_task(
         "展开讲讲",
         [
-            InteractiveMessage(role="user", content="AgentMesh P9 BYOK 是怎么设计的？"),
+            InteractiveMessage(role="user", content="AgentMesh Project BYOK 是怎么设计的？"),
             InteractiveMessage(role="assistant", content="我可以继续从项目实现角度展开。"),
         ],
-    ) == "AgentMesh P9 BYOK 是怎么设计的？"
+    ) == "AgentMesh Project BYOK 是怎么设计的？"
 
 
 def test_general_conversation_continuation_preserves_topic_without_inventing_capabilities():
@@ -425,9 +425,9 @@ def test_explicit_cli_with_runtime_named_workdir_still_selects_tool_run():
 
 def test_test_marker_language_does_not_fake_cli_execution_intent():
     samples = [
-        "记住这个测试标记：P20-CONV-A-001",
-        "这个测试标记叫 P20-CONV-A-001",
-        "Remember this test marker: P20-CONV-A-001",
+        "记住这个测试标记：CONVERSATION-RELIABILITY-A-001",
+        "这个测试标记叫 Conversation Reliability-CONV-A-001",
+        "Remember this test marker: Conversation Reliability-CONV-A-001",
     ]
 
     for task in samples:
@@ -448,7 +448,7 @@ def test_explicit_test_execution_still_selects_cli_tool_run():
         assert "local.tool.run" in result.selected_tool_names, task
 
 def test_new_marker_turn_does_not_inherit_prior_read_execution_intent():
-    marker = "记住这个测试标记：P20-CONV-A-001"
+    marker = "记住这个测试标记：CONVERSATION-RELIABILITY-A-001"
     history = [
         {
             "role": "user",

@@ -347,7 +347,7 @@ func (h *MemoryHandler) InternalListActive(
 	)
 }
 
-// InternalUpsert is used only by the trusted Python Runtime after P3.2 has
+// InternalUpsert is used only by the trusted Python Runtime after memory write policy has
 // extracted a durable candidate from the direct user message. The internal
 // token middleware protects the route; user_id remains explicit so persistence
 // stays inside the Go ownership boundary rather than allowing Python to query

@@ -9,9 +9,9 @@ import "time"
 //   - there is intentionally no project_id
 //   - Project Knowledge remains a separate project-scoped domain
 //
-// P3.1 only provides the durable CRUD foundation. Automatic extraction,
+// The memory foundation provides the durable CRUD foundation. Automatic extraction,
 // semantic retrieval, prompt injection, and model-driven merging are added in
-// later P3 stages.
+// later memory stages.
 type UserMemory struct {
 	ID int64 `json:"id"`
 
@@ -36,8 +36,8 @@ type UserMemory struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
-// MemoryFilter is intentionally lexical only in P3.1.
-// Semantic/vector retrieval belongs to P3.3.
+// MemoryFilter is intentionally lexical only in memory boundary.
+// Semantic/vector retrieval belongs to memory retrieval.
 type MemoryFilter struct {
 	Category string
 

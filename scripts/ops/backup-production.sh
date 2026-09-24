@@ -33,7 +33,7 @@ backup_volume $VOLUME_PREFIX-milvus-data milvus_data.tar.gz
 
 ( cd "$BACKUP_DIR" && sha256sum mysql.sql *.tar.gz > SHA256SUMS )
 cat > "$BACKUP_DIR/manifest.json" <<JSON
-{"format":"agentmesh-p10-backup-v1","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","secretsAndTlsExcluded":true}
+{"format":"agentmesh-production-backup-v1","createdAt":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","secretsAndTlsExcluded":true}
 JSON
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d >/dev/null
 trap - EXIT

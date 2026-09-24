@@ -32,4 +32,4 @@ fi
 
 cd "$ROOT"
 docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" config --quiet
-echo "P10 production preflight: PASS"
+echo "Production preflight: PASS"

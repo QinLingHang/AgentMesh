@@ -147,7 +147,7 @@ func v3DispatcherLeaseStressIterations(t *testing.T) int {
 	t.Helper()
 	raw := os.Getenv("V4_1_LEASE_STRESS_ITERATIONS")
 	if raw == "" {
-		// Keep ordinary package/full-suite runs lightweight. FIX5 acceptance sets
+		// Keep ordinary package/full-suite runs lightweight. Dispatcher Lease Reliability acceptance sets
 		// this environment variable to 100 and exercises 100 real ownership
 		// transfers inside one isolated database instead of recreating/migrating
 		// the database 100 times with `go test -count=100`.

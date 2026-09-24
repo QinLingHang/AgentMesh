@@ -1,4 +1,4 @@
-"""P22/RAG V1.1: every governed retrieval must pass live authorization."""
+"""Knowledge Runtime/RAG V1.1: every governed retrieval must pass live authorization."""
 import asyncio
 
 import pytest

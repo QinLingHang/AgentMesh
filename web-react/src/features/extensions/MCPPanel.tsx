@@ -3,7 +3,7 @@ import { createMCPServer, deleteMCPServer, discoverMCPTools, seedDemoMCPServer }
 import type { MCPDiscoveredTool, MCPServer } from "../../types";
 import { Icon } from "../../components/common/Icon";
 
-// P4 validation contract: python -m app.mcp.demo_server / 127.0.0.1:9583/mcp
+// Tool/MCP validation contract: python -m app.mcp.demo_server / 127.0.0.1:9583/mcp
 export function MCPPanel({ servers, reload }: { servers: MCPServer[]; reload: () => Promise<void> }) {
   const [name, setName] = useState("Local MCP");
   const [endpoint, setEndpoint] = useState("http://127.0.0.1:9583/mcp");

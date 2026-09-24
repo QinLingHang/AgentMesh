@@ -1845,14 +1845,14 @@
 }
 
 /* =========================================================
-   P6 Eval Scorecard
+   Evaluation Scorecard
    ========================================================= */
-.p6-eval-section {
+.eval-scorecard-section {
   display: grid;
   gap: 18px;
 }
 
-.p6-eval-badge {
+.eval-scorecard-badge {
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
@@ -1862,65 +1862,65 @@
   background: rgba(148, 163, 184, 0.14);
 }
 
-.p6-eval-badge.pass { color: #15803d; background: rgba(34, 197, 94, 0.12); }
-.p6-eval-badge.warning { color: #b45309; background: rgba(245, 158, 11, 0.14); }
-.p6-eval-badge.fail { color: #b91c1c; background: rgba(239, 68, 68, 0.12); }
+.eval-scorecard-badge.pass { color: #15803d; background: rgba(34, 197, 94, 0.12); }
+.eval-scorecard-badge.warning { color: #b45309; background: rgba(245, 158, 11, 0.14); }
+.eval-scorecard-badge.fail { color: #b91c1c; background: rgba(239, 68, 68, 0.12); }
 
-.p6-eval-hero {
+.eval-scorecard-hero {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
 }
 
-.p6-eval-hero > div,
-.p6-eval-metric {
+.eval-scorecard-hero > div,
+.eval-scorecard-metric {
   border: 1px solid var(--border-color, #e5e7eb);
   border-radius: 14px;
   padding: 16px;
   background: var(--panel-bg, #fff);
 }
 
-.p6-eval-hero span,
-.p6-eval-metric span,
-.p6-eval-hero small,
-.p6-eval-metric small {
+.eval-scorecard-hero span,
+.eval-scorecard-metric span,
+.eval-scorecard-hero small,
+.eval-scorecard-metric small {
   display: block;
   color: var(--text-secondary, #64748b);
 }
 
-.p6-eval-hero strong {
+.eval-scorecard-hero strong {
   display: block;
   margin: 6px 0;
   font-size: 28px;
 }
 
-.p6-eval-grid {
+.eval-scorecard-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 
-.p6-eval-metric strong {
+.eval-scorecard-metric strong {
   display: block;
   margin: 5px 0;
   font-size: 19px;
 }
 
-.p6-eval-violations {
+.eval-scorecard-violations {
   border: 1px solid rgba(245, 158, 11, 0.35);
   background: rgba(245, 158, 11, 0.08);
   border-radius: 14px;
   padding: 14px 16px;
 }
 
-.p6-eval-violations div {
+.eval-scorecard-violations div {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
   margin-top: 10px;
 }
 
-.p6-eval-violations span {
+.eval-scorecard-violations span {
   padding: 4px 8px;
   border-radius: 8px;
   background: rgba(245, 158, 11, 0.12);
@@ -1928,12 +1928,12 @@
 }
 
 @media (max-width: 900px) {
-  .p6-eval-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .eval-scorecard-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 640px) {
-  .p6-eval-hero,
-  .p6-eval-grid { grid-template-columns: 1fr; }
+  .eval-scorecard-hero,
+  .eval-scorecard-grid { grid-template-columns: 1fr; }
 }
 
 .reliability-event-list {

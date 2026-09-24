@@ -139,7 +139,7 @@ async function freePort() {
   });
 }
 function browserCandidates() {
-  const configured = process.env.V4_BROWSER_BIN || process.env.P11_BROWSER_BIN;
+  const configured = process.env.V4_BROWSER_BIN || process.env.BROWSER_E2E_BIN;
   const env = configured ? [configured] : [];
   if (process.platform === "win32") return [...env, "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe", "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"];
   return [...env, "/usr/bin/chromium", "/usr/bin/google-chrome", "/usr/bin/chromium-browser"];

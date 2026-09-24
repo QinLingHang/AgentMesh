@@ -268,7 +268,7 @@ func TestExecuteResponseMapsObservability(
 				"toolFailures":0
 			},
 			"scorecard":{
-				"evaluator":"p6_deterministic_v1",
+				"evaluator":"deterministic_scorecard_v1",
 				"status":"pass",
 				"overallScore":0.93,
 				"taskSuccess":1,
@@ -322,11 +322,11 @@ func TestExecuteResponseMapsObservability(
 	}
 
 	if response.Observability.ModelEstimatedCost != 0.0025 || !response.Observability.ModelCostKnown || response.Observability.ToolSuccesses != 1 {
-		t.Fatalf("unexpected p6 telemetry: %+v", response.Observability)
+		t.Fatalf("unexpected evaluation telemetry: %+v", response.Observability)
 	}
 
 	if response.Scorecard == nil || response.Scorecard.OverallScore != 0.93 || response.Scorecard.Status != "pass" {
-		t.Fatalf("unexpected p6 scorecard: %+v", response.Scorecard)
+		t.Fatalf("unexpected evaluation scorecard: %+v", response.Scorecard)
 	}
 }
 
@@ -750,11 +750,11 @@ func TestP9ExecuteRequestMapsProjectModelWithoutPublicProjection(t *testing.T) {
 		if projectModel["apiKey"] != "tenant-secret" || projectModel["modelName"] != "tenant-model" {
 			t.Fatalf("project model mismatch: %#v", projectModel)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"request_id": "p9", "status": "COMPLETED", "answer": "ok", "citations": []any{}, "scheduler": "greedy", "task_profile": map[string]any{}, "selected_agents": []string{}, "estimated_cost": 0, "elapsed_ms": 1, "trace": []any{}, "dag": map[string]any{}, "agent_feedback": []any{}, "observability": map[string]any{}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"request_id": "governance", "status": "COMPLETED", "answer": "ok", "citations": []any{}, "scheduler": "greedy", "task_profile": map[string]any{}, "selected_agents": []string{}, "estimated_cost": 0, "elapsed_ms": 1, "trace": []any{}, "dag": map[string]any{}, "agent_feedback": []any{}, "observability": map[string]any{}})
 	}))
 	defer server.Close()
 	client := NewClient(server.URL, "internal-test-token", time.Second)
-	_, err := client.Execute(context.Background(), ExecuteRequest{UserID: 1, RequestID: "p9", Task: "hello", Scheduler: "greedy", Agents: []model.Agent{{ID: 1, Name: "General", Endpoint: "internal://general", Protocol: "internal", Capabilities: []string{"general"}}}, ProjectModel: &ProjectModelRuntime{Provider: "openai-compatible", BaseURL: "https://api.example.test/v1", ModelName: "tenant-model", APIKey: "tenant-secret"}})
+	_, err := client.Execute(context.Background(), ExecuteRequest{UserID: 1, RequestID: "governance", Task: "hello", Scheduler: "greedy", Agents: []model.Agent{{ID: 1, Name: "General", Endpoint: "internal://general", Protocol: "internal", Capabilities: []string{"general"}}}, ProjectModel: &ProjectModelRuntime{Provider: "openai-compatible", BaseURL: "https://api.example.test/v1", ModelName: "tenant-model", APIKey: "tenant-secret"}})
 	if err != nil {
 		t.Fatal(err)
 	}

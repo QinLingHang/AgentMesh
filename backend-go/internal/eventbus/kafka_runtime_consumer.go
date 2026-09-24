@@ -87,7 +87,7 @@ func (c *RuntimeEventConsumer) Start(parent context.Context) {
 		return
 	}
 	if len(c.cfg.Brokers) == 0 || strings.TrimSpace(c.cfg.Topic) == "" || strings.TrimSpace(c.cfg.GroupID) == "" {
-		log.Printf("p21 kafka consumer disabled: incomplete configuration")
+		log.Printf("kafka consumer disabled: incomplete configuration")
 		return
 	}
 
@@ -144,7 +144,7 @@ func (c *RuntimeEventConsumer) loop(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("p21 kafka fetch failed")
+			log.Printf("kafka fetch failed")
 			if !sleepContext(ctx, 500*time.Millisecond) {
 				return
 			}
@@ -157,12 +157,12 @@ func (c *RuntimeEventConsumer) loop(ctx context.Context) {
 				`DELETE FROM processed_runtime_events WHERE processed_at < ?`,
 				time.Now().UTC().Add(-c.cfg.DedupeRetention),
 			); cleanupErr != nil {
-				log.Printf("p21 event dedupe cleanup failed")
+				log.Printf("event dedupe cleanup failed")
 			}
 			nextCleanup = time.Now().UTC().Add(10 * time.Minute)
 		}
 
-		// P21 FIX: fully resolve this exact fetched record before asking the reader
+		// Event Delivery FIX: fully resolve this exact fetched record before asking the reader
 		// for a later offset. FetchMessage advances the reader's in-memory cursor;
 		// fetching a later record after a transient failure could otherwise allow a
 		// higher CommitMessages call to commit past the failed offset.
@@ -173,7 +173,7 @@ func (c *RuntimeEventConsumer) loop(ctx context.Context) {
 			// Business effect (or privacy-safe DLQ handoff) is already durable. A
 			// later higher commit may subsume this offset; replay remains safe because
 			// event_id dedupe and callback recovery are idempotent.
-			log.Printf("p21 kafka commit failed topic=%s partition=%d offset=%d", message.Topic, message.Partition, message.Offset)
+			log.Printf("kafka commit failed topic=%s partition=%d offset=%d", message.Topic, message.Partition, message.Offset)
 		}
 	}
 }
@@ -192,7 +192,7 @@ func (c *RuntimeEventConsumer) processFetchedMessage(ctx context.Context, messag
 		isPermanent := errors.As(err, &permanent)
 		if !isPermanent && attempt < c.cfg.ProcessMaxAttempts {
 			c.retries.Add(1)
-			log.Printf("p21 runtime event retry position=%s attempt=%d", position, attempt)
+			log.Printf("runtime event retry position=%s attempt=%d", position, attempt)
 			if !sleepContext(ctx, time.Duration(minInt(attempt, 5))*250*time.Millisecond) {
 				return false
 			}
@@ -211,7 +211,7 @@ func (c *RuntimeEventConsumer) processFetchedMessage(ctx context.Context, messag
 				return true
 			}
 			c.dlqPublishFailures.Add(1)
-			log.Printf("p21 runtime event DLQ publish failed position=%s", position)
+			log.Printf("runtime event DLQ publish failed position=%s", position)
 			if !sleepContext(ctx, time.Second) {
 				return false
 			}

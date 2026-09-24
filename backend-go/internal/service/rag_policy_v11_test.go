@@ -44,7 +44,7 @@ func TestRagV11SnapshotIsUpperBoundAfterRevocation(t *testing.T) {
 	}
 }
 
-func TestP22RouteExplicitReliabilityWins(t *testing.T) {
+func TestKnowledgeRuntimeRouteExplicitReliabilityWins(t *testing.T) {
 	svc := &TaskService{}
 	in := RunTaskInput{Task: "你好", Constraints: model.TaskConstraints{RetryOnWorkerLoss: true}}
 	route := svc.DecideDeliveryMode(in)
@@ -53,7 +53,7 @@ func TestP22RouteExplicitReliabilityWins(t *testing.T) {
 	}
 }
 
-func TestP22RouteLongTaskAndShortChat(t *testing.T) {
+func TestKnowledgeRuntimeRouteLongTaskAndShortChat(t *testing.T) {
 	svc := &TaskService{}
 	if got := svc.DecideDeliveryMode(RunTaskInput{Task: "检查整个仓库，运行所有测试"}); got.Mode != "durable" || got.Reason != "long_running_intent" {
 		t.Fatalf("long work must use reliable queue: %+v", got)

@@ -156,8 +156,8 @@ class _ProjectRetriever:
         return [
             RetrievalHit(
                 document=RetrievalDocument(
-                    id="p9-byok",
-                    text="AgentMesh P9 stores BYOK configuration under project governance scope.",
+                    id="project-byok",
+                    text="AgentMesh Project governance stores BYOK configuration under project governance scope.",
                     source="project-docs",
                     metadata={"knowledgeBaseId": 9},
                 ),
@@ -181,10 +181,10 @@ async def test_project_specific_question_discovers_knowledge_without_saying_know
                     "allowedKnowledgeBaseIds": [9],
                 },
                 knowledgeCatalog=[{
-                    "knowledgeBaseId": 9, "name": "AgentMesh P9 BYOK 设计实现",
+                    "knowledgeBaseId": 9, "name": "AgentMesh Project BYOK 设计实现",
                     "scope": "PROJECT", "accessible": True,
                 }],
-                task="AgentMesh P9 BYOK 是怎么设计和实现的？",
+                task="AgentMesh Project BYOK 是怎么设计和实现的？",
                 agents=[_agent(1, "General", ["general"])],
             )
         )
@@ -212,7 +212,7 @@ async def test_knowledge_continuation_retrieves_previous_topic_instead_of_bare_f
                     "allowedKnowledgeBaseIds": [9],
                 },
                 knowledgeCatalog=[{
-                    "knowledgeBaseId": 9, "name": "AgentMesh P9 BYOK 设计实现",
+                    "knowledgeBaseId": 9, "name": "AgentMesh Project BYOK 设计实现",
                     "scope": "PROJECT", "accessible": True,
                 }],
                 conversationId=86,
@@ -220,7 +220,7 @@ async def test_knowledge_continuation_retrieves_previous_topic_instead_of_bare_f
                 history=[
                     InteractiveMessage(
                         role="user",
-                        content="AgentMesh P9 BYOK 是怎么设计和实现的？",
+                        content="AgentMesh Project BYOK 是怎么设计和实现的？",
                     ),
                     InteractiveMessage(
                         role="assistant",
@@ -232,7 +232,7 @@ async def test_knowledge_continuation_retrieves_previous_topic_instead_of_bare_f
         )
 
         assert retriever.calls
-        assert "AgentMesh P9 BYOK" in retriever.calls[0]["query"]
+        assert "AgentMesh Project BYOK" in retriever.calls[0]["query"]
         assert retriever.calls[0]["query"] != "展开讲讲"
     finally:
         await registry.stop_all()

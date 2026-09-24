@@ -126,7 +126,7 @@ class ControlPlaneLongTermMemorySource:
 
     Python Runtime intentionally does not connect to MySQL directly.  The
     internal token protects the control-plane contract while user_id remains
-    explicit, matching the P3.1 ownership model.
+    explicit, matching the memory ownership model.
     """
 
     def __init__(
@@ -222,7 +222,7 @@ class ControlPlaneLongTermMemorySource:
 class HybridLongTermMemoryRetriever:
     """Query-dependent retrieval over user-global long-term memories.
 
-    P3.3 deliberately separates *memory retrieval* from Project Knowledge RAG:
+    Memory retrieval deliberately separates *memory retrieval* from Project Knowledge RAG:
 
         user_id -> active user memories -> relevance ranking -> prompt context
 

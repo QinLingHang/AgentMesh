@@ -137,7 +137,7 @@ type ObservabilitySummary struct {
 }
 
 // ============================================================
-// P6 Run Scorecard
+// Evaluation Run Scorecard
 // ============================================================
 
 type RunScorecard struct {
@@ -185,7 +185,7 @@ type RunScorecard struct {
 }
 
 // ============================================================
-// P9 request-local Project BYOK model runtime. APIKey is sent only over the
+// Governance request-local Project BYOK model runtime. APIKey is sent only over the
 // trusted internal Go -> Python channel and is never returned to browsers.
 // ============================================================
 type ProjectModelRuntime struct {
@@ -223,9 +223,8 @@ type RuntimeAttachment struct {
 // ============================================================
 
 type ExecuteRequest struct {
-	P23Strategy       string `json:"p23Strategy,omitempty"`
-	P23CapabilityKind string `json:"p23CapabilityKind,omitempty"`
-	UserID            int64  `json:"user_id"`
+	ExecutionRoute string `json:"executionRoute,omitempty"`
+	UserID         int64  `json:"user_id"`
 
 	RequestID string `json:"request_id"`
 

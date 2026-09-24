@@ -30,7 +30,7 @@ func TestProjectRuntimeFiltersSelectedResources(t *testing.T) {
 	}
 }
 
-func TestP2MissingBindingsNeverCreateRuntimeResources(t *testing.T) {
+func TestProjectRuntimeMissingBindingsNeverCreateRuntimeResources(t *testing.T) {
 	for _, mode := range []string{"all", "selected"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx := &model.ProjectRuntimeContext{AgentMode: mode, AgentIDs: []int64{999}, ToolMode: mode, ToolIDs: []int64{999}, MCPMode: mode, MCPServerIDs: []int64{999}}
@@ -46,7 +46,7 @@ func TestP2MissingBindingsNeverCreateRuntimeResources(t *testing.T) {
 	}
 }
 
-func TestP2BindingNormalization(t *testing.T) {
+func TestProjectRuntimeBindingNormalization(t *testing.T) {
 	for _, mode := range []string{"all", "selected"} {
 		cfg, err := normalizeProjectRuntimeConfig(model.ProjectRuntimeConfig{AgentMode: mode, ToolMode: mode, MCPMode: mode, AgentIDs: []int64{-1, 0, 2, 2}, ToolIDs: []int64{0, 2, 2}, MCPServerIDs: []int64{2, -1, 2}})
 		if err != nil {

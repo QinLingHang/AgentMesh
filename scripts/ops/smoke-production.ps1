@@ -12,5 +12,5 @@ if ($live -ne "alive" -and $live.status -ne "alive") { throw "gateway liveness f
 $ready = Invoke-RestMethod -Uri "$publicOrigin/readyz" -TimeoutSec 5
 if ($ready.status -ne "ready") { throw "control-plane readiness failed" }
 
-Write-Host "P10 live deployment smoke: PASS" -ForegroundColor Green
+Write-Host "Production live deployment smoke: PASS" -ForegroundColor Green
 Write-Host "Gateway: $publicOrigin"

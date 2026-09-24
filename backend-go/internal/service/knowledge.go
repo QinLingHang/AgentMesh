@@ -718,7 +718,7 @@ func (s *KnowledgeService) CleanupProject(
 }
 
 // =========================================================
-// P1 Knowledge Ingestion / Runtime Scope
+// Knowledge Ingestion / Runtime Scope
 // =========================================================
 
 func (s *KnowledgeService) enqueueIndex(file model.KnowledgeFile) {

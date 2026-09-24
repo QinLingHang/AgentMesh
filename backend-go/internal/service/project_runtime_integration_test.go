@@ -29,9 +29,9 @@ import (
 // and drops its own database; the DSN's database is deliberately never used.
 func p2Database(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	dsn := os.Getenv("P2_TEST_MYSQL_DSN")
+	dsn := os.Getenv("QA_TEST_MYSQL_DSN")
 	if dsn == "" {
-		t.Skip("set P2_TEST_MYSQL_DSN to run isolated MySQL acceptance tests")
+		t.Skip("set QA_TEST_MYSQL_DSN to run isolated MySQL acceptance tests")
 	}
 	cfg, err := mysql.ParseDSN(dsn)
 	if err != nil {
@@ -44,7 +44,7 @@ func p2Database(t *testing.T) (*sql.DB, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { admin.Close() })
-	name := fmt.Sprintf("agentmesh_p2_test_%d", time.Now().UnixNano())
+	name := fmt.Sprintf("agentmesh_project_runtime_test_%d", time.Now().UnixNano())
 	if _, err = admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func p2Database(t *testing.T) (*sql.DB, string) {
 	return database, cfg.FormatDSN()
 }
 
-func TestP2DatabaseRuntimeAcceptance(t *testing.T) {
+func TestProjectRuntimeDatabaseAcceptance(t *testing.T) {
 	database, dsn := p2Database(t)
 	ctx := context.Background()
 	repo := repository.NewMySQL(database)
@@ -107,13 +107,13 @@ func TestP2DatabaseRuntimeAcceptance(t *testing.T) {
 		}
 		return id
 	}
-	uid := insert("INSERT INTO users(email,password_hash,display_name) VALUES('p2-a@example.test','fixture','P2 A')")
-	other := insert("INSERT INTO users(email,password_hash,display_name) VALUES('p2-b@example.test','fixture','P2 B')")
+	uid := insert("INSERT INTO users(email,password_hash,display_name) VALUES('qa-a@example.test','fixture','QA Database A')")
+	other := insert("INSERT INTO users(email,password_hash,display_name) VALUES('qa-b@example.test','fixture','QA Database B')")
 	projectA := insert("INSERT INTO projects(user_id,name,description) VALUES(?,'A','fixture')", uid)
 	projectB := insert("INSERT INTO projects(user_id,name,description) VALUES(?,'B','fixture')", uid)
 	foreignProject := insert("INSERT INTO projects(user_id,name,description) VALUES(?,'Foreign','fixture')", other)
 	conversation := func(owner, project int64) int64 {
-		id := insert("INSERT INTO conversations(user_id,title) VALUES(?,'P2 fixture')", owner)
+		id := insert("INSERT INTO conversations(user_id,title) VALUES(?,'QA Database fixture')", owner)
 		if project > 0 {
 			insert("INSERT INTO project_conversations(project_id,conversation_id) VALUES(?,?)", project, id)
 		}

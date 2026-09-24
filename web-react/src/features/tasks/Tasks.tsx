@@ -279,7 +279,7 @@ export function Tasks({
       [tasks],
     );
 
-  // P8 reliability remains available for developer diagnostics in Run Details.
+  // runtime reliability remains available for developer diagnostics in Run Details.
   // The product-facing task list intentionally does not surface worker/circuit internals.
   // reliability.availableWorkers
   // reliability.circuitOpenWorkers

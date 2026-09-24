@@ -54,7 +54,7 @@ class _ExecutionRecord:
 
 
 class DurableExecutionManager:
-    """P8 Runtime worker boundary.
+    """Durable Runtime Runtime worker boundary.
 
     Acceptance and execution are deliberately separated. `submit` performs only
     capacity/draining/idempotency checks and then returns immediately. The actual

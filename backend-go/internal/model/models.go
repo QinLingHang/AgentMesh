@@ -399,7 +399,7 @@ type Task struct {
 
 	EffectiveRagPolicy EffectiveRagPolicy `json:"effectiveRagPolicy"`
 
-	// direct keeps the historical synchronous request path. durable is P8's
+	// direct keeps the historical synchronous request path. durable is Durable Runtime's
 	// queued/leased worker path and is persisted with the task.
 	DeliveryMode string `json:"deliveryMode"`
 

@@ -24,7 +24,7 @@ class ModelPerformanceStore:
     """Process-local EWMA telemetry for Model runtimes.
 
     Agent historical metrics are persisted in Go/MySQL. Model telemetry is
-    intentionally process-local in P7: it adapts during the Runtime lifetime
+    intentionally process-local in Adaptive Routing: it adapts during the Runtime lifetime
     without introducing a second persistence subsystem. A later control-plane
     phase can persist this same contract if cross-restart model learning is
     required.
@@ -123,7 +123,7 @@ class AdaptiveModelRouter:
     ) -> ModelRouteDecision:
         """Route across an explicit runtime set.
 
-        P7 originally routed only process-global model plugins registered in the
+        Adaptive Routing originally routed only process-global model plugins registered in the
         RuntimeContext. The user BYOK model pool is request-local by design, so
         this method reuses the exact same scoring/performance store without
         mutating global runtime state or leaking credentials between users.

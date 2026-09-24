@@ -27,7 +27,7 @@ test("V4.1 conversation message projection is owned by the active conversation",
     /setMessageProjection\(\(projection\)\s*=>\s*mergeLatestMessagePage\(/s,
   );
 
-  // P20 FIX13+ preserves an already-expanded same-conversation history window
+  // Conversation Reliability History Anchor+ preserves an already-expanded same-conversation history window
   // while allowing the newest authoritative page to refresh duplicate rows.
   assert.match(app, /function mergeLatestMessagePage/);
   assert.match(app, /hasMore:\s*projection\.hasMore/);

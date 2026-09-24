@@ -621,7 +621,7 @@ export function Workspace({
     // 1. Markdown / attachments / historical run metadata can grow scrollHeight.
     // 2. Composer / toolbar layout can shrink clientHeight.
     //
-    // Repositioning only once (FIX10) covered the first synchronous commit but
+    // Repositioning only once (Conversation Ownership) covered the first synchronous commit but
     // could still finish above the real bottom after either late layout change.
     let remainingFrames = 3;
     const canContinueFollowing = () =>
@@ -781,7 +781,7 @@ export function Workspace({
       return null;
     }
 
-    // FIX15: the concrete durable message is authoritative. Total scroll-height
+    // Message Anchor: the concrete durable message is authoritative. Total scroll-height
     // growth is only a missing-anchor fallback because loading older rows can
     // legitimately reorder already-rendered turns.
     if (
@@ -990,7 +990,7 @@ export function Workspace({
     }
 
     // Enter explicit viewport ownership before the async page request starts.
-    // FIX15 keeps one post-commit coordinator: useLayoutEffect may make the
+    // Message Anchor keeps one post-commit coordinator: useLayoutEffect may make the
     // first correction, ResizeObserver only marks geometry dirty, and rAF owns
     // all settling/release decisions.
     cancelScheduledMessageScroll();
@@ -1151,7 +1151,7 @@ export function Workspace({
       };
       refresh();
       // Poll only if the event stream is disconnected. This is also the
-      // compatibility fallback for servers that predate P22 SSE.
+      // compatibility fallback for servers that predate Knowledge Runtime SSE.
       const fallback = window.setInterval(() => {
         if (!streaming) refresh();
       }, 1000);

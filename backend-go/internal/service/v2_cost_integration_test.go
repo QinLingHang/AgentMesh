@@ -106,7 +106,7 @@ func TestV2CostAccountingAggregationIsolationAndFilters(t *testing.T) {
 		t.Fatalf("provider/model filter mismatch: %+v", filtered)
 	}
 
-	// Preserve the existing P9 IDOR-hiding contract: unrelated users must not
+	// Preserve the existing governance IDOR-hiding contract: unrelated users must not
 	// learn whether a foreign project exists, so project-scoped cost access
 	// returns ErrNotFound rather than ErrForbidden.
 	if _, err = governance.CostSummary(ctx, outsider, &project, model.CostQuery{}); err != ErrNotFound {

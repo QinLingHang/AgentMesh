@@ -451,7 +451,7 @@ class GreedySchedulerPlugin(
 class AdaptiveSchedulerPlugin(
     SchedulerPlugin
 ):
-    """P7 explainable adaptive Agent router.
+    """Adaptive Routing explainable adaptive Agent router.
 
     Historical capability metrics come from the Go/MySQL control plane.  The
     router combines quality, reliability, latency, cost, load and bounded

@@ -69,6 +69,6 @@ If prices are not configured, the UI shows model cost as **未配置** rather th
 
 ## Offline regression
 
-`runtime-python/evals/p6_baseline_cases.jsonl` provides capability-oriented seed cases. `app.eval.baseline.compare_scorecards` supplies the reusable comparison primitive for CI / regression datasets.
+`runtime-python/evals/evaluation_baseline_cases.jsonl` provides capability-oriented seed cases. `app.eval.baseline.compare_scorecards` supplies the reusable comparison primitive for CI / regression datasets.
 
 Tests should remain organized by capability, not by historical P-stage wrapper scripts.

@@ -2,7 +2,7 @@ package repository
 
 import "testing"
 
-func TestP22DurableEventFingerprintSeparatesFenceAndExecution(t *testing.T) {
+func TestKnowledgeRuntimeDurableEventFingerprintSeparatesFenceAndExecution(t *testing.T) {
 	original := durableEventFingerprint("RUNNING", "LEASED", "execution-a", 1)
 	if original != durableEventFingerprint("RUNNING", "LEASED", "execution-a", 1) {
 		t.Fatal("identical snapshots must deduplicate")
@@ -19,7 +19,7 @@ func TestP22DurableEventFingerprintSeparatesFenceAndExecution(t *testing.T) {
 	}
 }
 
-func TestP22WorkerPhaseFingerprintDedupesByAttemptAndOrdinal(t *testing.T) {
+func TestKnowledgeRuntimeWorkerPhaseFingerprintDedupesByAttemptAndOrdinal(t *testing.T) {
 	base := workerPhaseFingerprint("exec-a", 2, 1)
 	if base != workerPhaseFingerprint("exec-a", 2, 1) {
 		t.Fatal("worker phase must be idempotent")
