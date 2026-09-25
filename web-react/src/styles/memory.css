@@ -1,5 +1,5 @@
 /* =========================================================
-   P3.4 User-global Memory Management
+   memory governance User-global Memory Management
    ========================================================= */
 
 .memory-center {
@@ -447,7 +447,7 @@
 }
 
 /* =========================================================
-   P3.4 Memory Observability in Run Details
+   memory governance Memory Observability in Run Details
    ========================================================= */
 
 .memory-trace-panel-shell {

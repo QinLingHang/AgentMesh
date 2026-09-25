@@ -243,7 +243,7 @@ def build_run_scorecard(inputs: ScorecardInputs) -> RunScorecard:
         status = "pass"
 
     return RunScorecard(
-        evaluator="p6_deterministic_v1",
+        evaluator="deterministic_scorecard_v1",
         status=status,
         overallScore=overall,
         taskSuccess=_clamp(task_success),

@@ -360,7 +360,7 @@ func ensureRuntimeSchema(
 		return err
 	}
 
-	// P8 durable Runtime schema belongs to the normal incremental migration
+	// durable Runtime schema belongs to the normal incremental migration
 	// path. This keeps production, integration tests and alternate entrypoints
 	// on the same task schema instead of relying on cmd/server to add columns.
 	if err := EnsureDurableRuntimeSchema(ctx, db); err != nil {

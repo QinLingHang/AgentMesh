@@ -77,7 +77,7 @@ class HttpResultTransport:
                     last_error = exc
                 if attempt + 1 < self._max_retries:
                     await asyncio.sleep(min(0.25 * (2**attempt), 2.0))
-            # Compatibility mode preserves the P8 behavior: callback transport
+            # Compatibility mode preserves the Durable Runtime behavior: callback transport
             # exhaustion must not reclassify a successful Agent execution as a
             # Runtime failure. Kafka mode is the production path that provides
             # durable eventual delivery.

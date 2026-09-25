@@ -91,7 +91,7 @@ function riskCopy(tool: Tool) {
   return tool.riskLevel === "high" ? "高风险" : tool.riskLevel === "medium" ? "中风险" : "低风险";
 }
 
-// P4 validation contract: 添加 HTTP Tool / app.tools.http_demo_server
+// Tool/MCP validation contract: 添加 HTTP Tool / app.tools.http_demo_server
 export function ToolsPanel({ tools, reload }: { tools: Tool[]; reload: () => Promise<void> }) {
   const [name, setName] = useState("local_http_echo");
   const [endpoint, setEndpoint] = useState("http://127.0.0.1:9584/tool/echo");

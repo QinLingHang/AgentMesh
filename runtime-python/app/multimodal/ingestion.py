@@ -201,7 +201,7 @@ async def ingest_multimodal_document(
         else:
             visual_status = "disabled" if page_count else "not_applicable"
     else:
-        # Text-first formats retain the P1 ingestion behavior while receiving
+        # Text-first formats retain the knowledge ingestion behavior while receiving
         # explicit modality metadata for V2 retrieval.
         from app.knowledge.parser import parse_document_bytes
 

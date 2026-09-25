@@ -1,6 +1,6 @@
 param(
     [string]$Python = "python",
-    [string]$MySQLDSN = $env:P2_TEST_MYSQL_DSN
+    [string]$MySQLDSN = $env:QA_TEST_MYSQL_DSN
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,8 +10,8 @@ Write-Host "=== AgentMesh V3 Distributed Runtime Targeted Validation ==="
 Write-Host "Root: $Root"
 
 if ($MySQLDSN) {
-    $env:P2_TEST_MYSQL_DSN = $MySQLDSN
-    $env:P3_TEST_MYSQL_DSN = $MySQLDSN
+    $env:QA_TEST_MYSQL_DSN = $MySQLDSN
+    $env:MEMORY_TEST_MYSQL_DSN = $MySQLDSN
 }
 
 Push-Location "$Root\runtime-python"
@@ -23,8 +23,8 @@ finally { Pop-Location }
 
 Push-Location "$Root\backend-go"
 try {
-    if (-not $env:P2_TEST_MYSQL_DSN) {
-        Write-Warning "P2_TEST_MYSQL_DSN is not set; mandatory V3 MySQL integration tests will skip."
+    if (-not $env:QA_TEST_MYSQL_DSN) {
+        Write-Warning "QA_TEST_MYSQL_DSN is not set; mandatory V3 MySQL integration tests will skip."
     }
     go test ./internal/service -run '^TestV3' -count=1 -v
     if ($LASTEXITCODE -ne 0) { throw "V3 Go targeted tests failed" }

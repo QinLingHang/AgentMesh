@@ -269,28 +269,45 @@ func (s *ProjectRuntimeService) Update(
 	return updated, nil
 }
 
-func (s *ProjectRuntimeService) ResolveForConversation(
+type projectRuntimeLookupDiagnostic struct {
+	Stage   string
+	Outcome string
+	Err     error
+}
+
+func (s *ProjectRuntimeService) resolveForConversationDetailed(
 	ctx context.Context,
 	uid int64,
 	conversationID int64,
-) (*model.ProjectRuntimeContext, error) {
+) (*model.ProjectRuntimeContext, []projectRuntimeLookupDiagnostic, error) {
 	if conversationID <= 0 {
-		return nil, ErrInvalidInput
+		return nil, nil, ErrInvalidInput
 	}
 
+	diagnostics := make([]projectRuntimeLookupDiagnostic, 0, 2)
 	projectID, err := s.repo.ProjectIDByConversation(
 		ctx,
 		uid,
 		conversationID,
 	)
 	if errors.Is(err, repository.ErrNotOwned) {
-		return nil, ErrNotFound
+		err = ErrNotFound
+	}
+	conversationOutcome := "MISS"
+	if projectID != nil {
+		conversationOutcome = "FOUND"
 	}
 	if err != nil {
-		return nil, err
+		conversationOutcome = "ERROR"
+	}
+	diagnostics = append(diagnostics, projectRuntimeLookupDiagnostic{
+		Stage: "CONVERSATION_OWNERSHIP", Outcome: conversationOutcome, Err: err,
+	})
+	if err != nil {
+		return nil, diagnostics, err
 	}
 	if projectID == nil {
-		return nil, nil
+		return nil, diagnostics, nil
 	}
 
 	config, err := s.Get(
@@ -298,8 +315,15 @@ func (s *ProjectRuntimeService) ResolveForConversation(
 		uid,
 		*projectID,
 	)
+	projectOutcome := "FOUND"
 	if err != nil {
-		return nil, err
+		projectOutcome = "ERROR"
+	}
+	diagnostics = append(diagnostics, projectRuntimeLookupDiagnostic{
+		Stage: "PROJECT_RUNTIME", Outcome: projectOutcome, Err: err,
+	})
+	if err != nil {
+		return nil, diagnostics, err
 	}
 
 	return &model.ProjectRuntimeContext{
@@ -312,7 +336,24 @@ func (s *ProjectRuntimeService) ResolveForConversation(
 		MCPMode:         config.MCPMode,
 		MCPServerIDs:    config.MCPServerIDs,
 		Policy:          config.Policy,
-	}, nil
+	}, diagnostics, nil
+}
+
+func (s *ProjectRuntimeService) ResolveForConversation(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+) (*model.ProjectRuntimeContext, error) {
+	resolved, _, err := s.resolveForConversationDetailed(ctx, uid, conversationID)
+	return resolved, err
+}
+
+func (s *ProjectRuntimeService) ResolveForConversationWithDiagnostics(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+) (*model.ProjectRuntimeContext, []projectRuntimeLookupDiagnostic, error) {
+	return s.resolveForConversationDetailed(ctx, uid, conversationID)
 }
 
 type projectRuntimeResolver interface {

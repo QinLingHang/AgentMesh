@@ -6,7 +6,7 @@ import (
 )
 
 // EnsureMemorySchema upgrades both existing and fresh AgentMesh databases with
-// the P3.1 user-global long-term-memory store.
+// the user-global long-term-memory store.
 //
 // The absence of project_id is intentional: Memory is User-global while
 // Project Knowledge remains strictly Project-scoped.

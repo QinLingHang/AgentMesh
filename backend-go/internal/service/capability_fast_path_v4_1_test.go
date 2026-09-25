@@ -11,7 +11,7 @@ func TestShouldUseInteractiveFastPathAutonomousCapabilityRouting(t *testing.T) {
 		"运行 go test ./...",
 		"帮我截图看看当前屏幕",
 		"帮我看看 GitHub 上这个 PR",
-		"AgentMesh P9 BYOK 是怎么设计的",
+		"AgentMesh Project BYOK 是怎么设计的",
 		"帮我做一次代码审查",
 		"查询一下库存还剩多少",
 		"帮我计算 382*927",

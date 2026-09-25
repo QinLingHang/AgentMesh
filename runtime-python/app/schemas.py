@@ -14,6 +14,8 @@ from app.tools.contracts import (
     ToolDefinition,
 )
 
+from app.request_contracts import ModelSelection, ProjectModelRuntime, TaskConstraints
+
 
 class AgentCapabilityProfile(
     BaseModel
@@ -122,33 +124,6 @@ class AgentProfile(
     status: str = "ACTIVE"
 
 
-class TaskConstraints(
-    BaseModel
-):
-    model_config = ConfigDict(
-        populate_by_name=True
-    )
-
-    max_latency_ms: int = Field(
-        default=8000,
-        alias="maxLatencyMs",
-    )
-
-    max_cost: float = Field(
-        default=0.15,
-        alias="maxCost",
-    )
-
-    min_quality: float = Field(
-        default=0.8,
-        alias="minQuality",
-    )
-
-    retry_on_worker_loss: bool = Field(
-        default=False,
-        alias="retryOnWorkerLoss",
-    )
-
 RuntimeStatus = Literal[
     "SUBMITTED",
     "RUNNING",
@@ -190,7 +165,7 @@ class RuntimeContinuation(
         "AUTH_REQUIRED",
     ]
 
-    # P5 tool approval continuation. These fields are persisted only on the
+    # Secure Action tool approval continuation. These fields are persisted only on the
     # trusted Go side; browsers never submit authoritative tool arguments.
     kind: Literal[
         "agent",
@@ -230,26 +205,6 @@ class RuntimeContinuation(
     summary: str | None = None
 
 
-
-class ProjectModelRuntime(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    service_id: int | None = Field(default=None, alias="serviceId")
-    service_name: str | None = Field(default=None, alias="serviceName")
-    provider: str = "openai-compatible"
-    base_url: str = Field(alias="baseUrl")
-    model_name: str = Field(alias="modelName")
-    vision_model_name: str | None = Field(default=None, alias="visionModelName")
-    api_key: SecretStr = Field(alias="apiKey")
-    auto_route: bool = Field(default=True, alias="autoRoute")
-    is_default: bool = Field(default=False, alias="isDefault")
-
-
-class ModelSelection(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    mode: Literal["auto", "manual"] = "auto"
-    service_id: int | None = Field(default=None, alias="serviceId")
 
 class RuntimeAttachment(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -322,8 +277,7 @@ class RuntimeRequest(
 
     user_id: int
     request_id: str
-    p23_strategy: Literal["DIRECT_ANSWER", "SINGLE_CAPABILITY", "WORKFLOW", "RUNTIME"] | None = Field(default=None, alias="p23Strategy")
-    p23_capability_kind: Literal["KNOWLEDGE", "TOOL", "MCP", "AGENT"] | None = Field(default=None, alias="p23CapabilityKind")
+    execution_route: Literal["RUNTIME"] | None = Field(default=None, alias="executionRoute")
 
     conversation_id: int | None = Field(
         default=None,
@@ -761,7 +715,7 @@ class ObservabilitySummary(
 class RunScorecard(
     BaseModel
 ):
-    """P6 per-run evaluation and governance scorecard.
+    """Evaluation per-run evaluation and governance scorecard.
 
     This is developer-facing observability metadata. It intentionally stores
     scores/counters only and never raw Memory, Tool, RAG, or user-secret text.
@@ -771,7 +725,7 @@ class RunScorecard(
         populate_by_name=True
     )
 
-    evaluator: str = "p6_deterministic_v1"
+    evaluator: str = "deterministic_scorecard_v1"
 
     status: Literal[
         "pass",

@@ -357,7 +357,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	// resurrected by a queued payload.
 	req := runtimeclient.ExecuteRequest{
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
-		P23Strategy: in.P23Strategy, P23CapabilityKind: in.P23CapabilityKind, Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
+		ExecutionRoute: in.ExecutionRoute, Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection:     runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
 		RagPolicy:          in.RagPolicy,
@@ -372,7 +372,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 
 	task, _, err := s.repo.CreateQueuedTaskAndRuntimeJob(ctx, model.Task{
 		ClientRequestID: in.ClientRequestID, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{
+		PendingUserMessageMetadata: executionRoutingMetadata(in, map[string]any{
 			"runtimePhase": "durable_queued", "deliveryMode": "durable", "attachments": attachmentMeta,
 		}),
 		UserID: uid, ConversationID: in.ConversationID, RequestID: requestID,
@@ -469,9 +469,9 @@ func (s *DurableRuntimeService) dispatchTick(ctx context.Context) {
 	if !now.Before(s.nextReconcileAt) {
 		s.nextReconcileAt = now.Add(time.Minute)
 		if reconciled, reconcileErr := s.repo.ReconcileCommittedCompletingJobs(ctx, now.Add(-10*time.Minute)); reconcileErr != nil {
-			log.Printf("p21 reconcile committed callbacks failed: %v", reconcileErr)
+			log.Printf("event delivery reconcile committed callbacks failed: %v", reconcileErr)
 		} else if reconciled > 0 {
-			log.Printf("p21 reconciled committed callbacks count=%d", reconciled)
+			log.Printf("event delivery reconciled committed callbacks count=%d", reconciled)
 		}
 	}
 
@@ -608,7 +608,7 @@ func (s *DurableRuntimeService) dispatchOne(
 		req.ModelPool = modelPool
 		req.ModelSelection = runtimeclient.ModelSelection{Mode: normalizedSelection.Mode, ServiceID: normalizedSelection.ServiceID}
 	}
-	if len(agents) == 0 && !(req.P23Strategy == "RUNTIME" && req.EffectiveRagPolicy.Mode != model.RagModeOff && len(req.EffectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
+	if len(agents) == 0 && !(req.ExecutionRoute == "RUNTIME" && req.EffectiveRagPolicy.Mode != model.RagModeOff && len(req.EffectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
 		_ = s.repo.FailRuntimeJob(ctx, job.ID, "project runtime has no enabled agents")
 		return
 	}
@@ -730,8 +730,8 @@ func (s *DurableRuntimeService) Callback(ctx context.Context, jobID int64, callb
 	return err
 }
 
-// CallbackWithOutcome preserves the P8/P10 HTTP callback contract while exposing
-// the no-op reason needed by the P21 Kafka consumer for observability. It is also
+// CallbackWithOutcome preserves the Durable Runtime/HTTP callback contract while exposing
+// the no-op reason needed by the Event Delivery Kafka consumer for observability. It is also
 // restart-safe for callbacks that were fenced into COMPLETING before a consumer
 // process crashed: the same execution/worker/lease may resume finalization, while
 // stale workers remain fenced out.
@@ -748,7 +748,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 	}
 
 	// V3 adds a monotonic fence epoch on top of the random lease token. Older
-	// P8 workers omit it (zero) and remain compatible; V3 workers must match the
+	// legacy workers omit it (zero) and remain compatible; V3 workers must match the
 	// current assignment so callbacks from a recovered stale node are ignored.
 	if callback.FenceEpoch != 0 && callback.FenceEpoch != job.FenceEpoch {
 		return DurableCallbackStaleFence, nil
@@ -835,7 +835,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 			}
 		}
 	}
-	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability, response.EstimatedCost)
+	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability)
 
 	if runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED" {
 		if response.Continuation == nil {
@@ -900,7 +900,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 	if err := s.taskService.agents.RecordAgentFeedback(ctx, job.UserID, task.RequestID, response.AgentFeedback); err != nil {
 		// Evaluation feedback persistence is important but cannot turn an already
 		// completed user task into an execution replay.
-		log.Printf("p8 agent feedback persistence failed: %v", err)
+		log.Printf("durable-runtime agent feedback persistence failed: %v", err)
 	}
 	if err := s.repo.MarkRuntimeJobCompleted(ctx, jobID); err != nil {
 		return "", err

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 )
 
-// EnsureV3DistributedRuntimeSchema upgrades the durable runtime from the P8
+// EnsureV3DistributedRuntimeSchema upgrades the durable runtime from the Durable Runtime
 // single-node worker registry into a multi-node topology with an HA dispatcher
 // lease and explicit cross-node fencing metadata. The migration is additive and
 // idempotent so existing V2 volumes can be upgraded in place.
@@ -80,7 +80,7 @@ func EnsureV3DistributedRuntimeSchema(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
-	// Existing P8 workers become one-node-per-worker until their next V3
+	// Existing legacy workers become one-node-per-worker until their next V3
 	// heartbeat supplies an explicit node identity. This preserves scheduling
 	// availability during rolling upgrades.
 	if _, err := db.ExecContext(ctx, `

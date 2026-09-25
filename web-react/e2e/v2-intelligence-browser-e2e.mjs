@@ -428,7 +428,7 @@ async function freePort() {
 }
 
 function browserCandidates() {
-  const configured = process.env.V2_BROWSER_BIN || process.env.P11_BROWSER_BIN;
+  const configured = process.env.V2_BROWSER_BIN || process.env.BROWSER_E2E_BIN;
   const env = configured ? [configured] : [];
   if (process.platform === "win32") {
     return [

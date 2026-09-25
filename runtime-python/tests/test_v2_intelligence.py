@@ -288,7 +288,7 @@ async def test_pdf_visual_limit_is_reported_as_partial(monkeypatch: pytest.Monke
     from app.multimodal import ingestion as module
 
     monkeypatch.setattr(module, "_page_texts", lambda _: ["page one", "page two", "page three"])
-    monkeypatch.setattr(module, "_render_pdf_pages", lambda *_args, **_kwargs: [(1, b"p1"), (2, b"p2")])
+    monkeypatch.setattr(module, "_render_pdf_pages", lambda *_args, **_kwargs: [(1, b"knowledge"), (2, b"page-2")])
 
     result = await ingest_multimodal_document(
         content=b"synthetic-pdf",
@@ -400,7 +400,7 @@ def test_request_local_model_runtime_requires_explicit_vision_for_knowledge() ->
         "apiKey": "sk-synthetic-v2-only",
     })
 
-    # Normal P9 task execution remains backward compatible: a provider may expose
+    # Normal Governance task execution remains backward compatible: a provider may expose
     # one multimodal model through modelName. Knowledge ingestion is stricter and
     # requires an explicit visionModelName before it sends image bytes.
     normal = resolve_project_model_runtime(configured)

@@ -6,4 +6,4 @@ set -a; . "$ENV_FILE"; set +a
 ORIGIN=${PUBLIC_ORIGIN%/}
 curl -fsS "$ORIGIN/livez" >/dev/null
 curl -fsS "$ORIGIN/readyz" | grep -q '"status":"ready"'
-echo "P10 live deployment smoke: PASS ($ORIGIN)"
+echo "Production live deployment smoke: PASS ($ORIGIN)"

@@ -40,7 +40,7 @@ function auditResultLabel(result: string) {
   }
 }
 
-// Validation vocabulary retained for P9 compatibility; the visible UI uses calmer product wording.
+// Validation vocabulary retained for governance compatibility; the visible UI uses calmer product wording.
 // 审计日志 · 添加组织成员 · 绑定当前 Project 到组织
 export function Governance({ projects }: { projects: Project[] }) {
   const [projectId, setProjectId] = useState<number | null>(projects[0]?.id ?? null);

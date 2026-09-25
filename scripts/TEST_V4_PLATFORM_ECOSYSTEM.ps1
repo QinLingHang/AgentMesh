@@ -11,11 +11,11 @@ function Run-Step([string]$Name, [scriptblock]$Action) {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
 }
 
-if (-not $env:P2_TEST_MYSQL_DSN) {
-    throw "P2_TEST_MYSQL_DSN is required; mandatory V4 MySQL tests must not be skipped."
+if (-not $env:QA_TEST_MYSQL_DSN) {
+    throw "QA_TEST_MYSQL_DSN is required; mandatory V4 MySQL tests must not be skipped."
 }
-if (-not $env:P3_TEST_MYSQL_DSN) { $env:P3_TEST_MYSQL_DSN = $env:P2_TEST_MYSQL_DSN }
-if (-not $env:P3_TEST_PYTHON) { $env:P3_TEST_PYTHON = (Get-Command $Python).Source }
+if (-not $env:MEMORY_TEST_MYSQL_DSN) { $env:MEMORY_TEST_MYSQL_DSN = $env:QA_TEST_MYSQL_DSN }
+if (-not $env:AGENTMESH_TEST_PYTHON) { $env:AGENTMESH_TEST_PYTHON = (Get-Command $Python).Source }
 
 Run-Step "V4 Go/MySQL" {
     Push-Location "$Root\backend-go"

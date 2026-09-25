@@ -45,7 +45,7 @@ try {
         [ordered]@{ name = $_.Name; sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); bytes = $_.Length }
     }
     [ordered]@{
-        format = "agentmesh-p10-backup-v1"
+        format = "agentmesh-production-backup-v1"
         createdAt = (Get-Date).ToUniversalTime().ToString("o")
         files = $files
         note = "Secrets (.env.production) and TLS private keys are intentionally excluded."

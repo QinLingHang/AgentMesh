@@ -501,7 +501,7 @@ function normalizeScorecard(
   return {
     evaluator: asString(
       record.evaluator,
-      "p6_deterministic_v1",
+      "deterministic_scorecard_v1",
     ),
     status,
     overallScore: asNumber(record.overallScore),

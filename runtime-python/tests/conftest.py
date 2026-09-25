@@ -23,7 +23,7 @@ os.environ["RAG_BACKEND"] = "inmemory"
 os.environ["EMBEDDING_BACKEND"] = "hash"
 os.environ["RERANKER_BACKEND"] = "heuristic"
 
-# Dedicated P3 retrieval tests inject their own deterministic sources.
+# Dedicated memory retrieval tests inject their own deterministic sources.
 # The ordinary full suite must never depend on a live Go/MySQL memory service.
 os.environ["MEMORY_RETRIEVAL_ENABLED"] = "false"
 

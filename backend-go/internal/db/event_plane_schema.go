@@ -5,7 +5,7 @@ import (
 	"database/sql"
 )
 
-// EnsureEventPlaneSchema owns the P21 Kafka consumer idempotency ledger.
+// EnsureEventPlaneSchema owns the Event Delivery Kafka consumer idempotency ledger.
 // Kafka delivery is at-least-once; the ledger makes business effects idempotent
 // across duplicate delivery, consumer restarts, and offset replay.
 func EnsureEventPlaneSchema(ctx context.Context, db *sql.DB) error {

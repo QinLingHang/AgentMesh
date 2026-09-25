@@ -208,8 +208,8 @@ func (r *MySQL) ListKnowledgeBases(
 		WHERE (
 			kb.scope = 'GLOBAL' AND kb.user_id = ?
 			OR kb.scope = 'PROJECT' AND EXISTS (
-				SELECT 1 FROM projects p2
-				WHERE p2.id=kb.project_id AND (p2.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p2.id AND pm.user_id=?))
+				SELECT 1 FROM projects project_row
+				WHERE project_row.id=kb.project_id AND (project_row.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=project_row.id AND pm.user_id=?))
 			)
 		)
 		`+knowledgeBaseGroup+`
@@ -252,7 +252,7 @@ func (r *MySQL) KnowledgeBaseByID(
 			WHERE kb.id = ?
 			  AND (
 				kb.scope='GLOBAL' AND kb.user_id=?
-				OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects p2 WHERE p2.id=kb.project_id AND (p2.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p2.id AND pm.user_id=?)))
+				OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects project_row WHERE project_row.id=kb.project_id AND (project_row.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=project_row.id AND pm.user_id=?)))
 			  )
 			`+knowledgeBaseGroup+`
 			LIMIT 1
@@ -507,7 +507,7 @@ func (r *MySQL) ListKnowledgeFilesByBase(
 		WHERE f.knowledge_base_id = ?
 		  AND (
 			kb.scope='GLOBAL' AND kb.user_id=?
-			OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects p2 WHERE p2.id=kb.project_id AND (p2.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p2.id AND pm.user_id=?)))
+			OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects project_row WHERE project_row.id=kb.project_id AND (project_row.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=project_row.id AND pm.user_id=?)))
 		  )
 		ORDER BY f.created_at DESC, f.id DESC
 		`,
@@ -543,7 +543,7 @@ func (r *MySQL) ListKnowledgeFilesByProject(
 		knowledgeFileSelect+`
 		WHERE kb.scope = 'PROJECT'
 		  AND kb.project_id = ?
-		  AND EXISTS (SELECT 1 FROM projects p2 WHERE p2.id=kb.project_id AND (p2.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p2.id AND pm.user_id=?)))
+		  AND EXISTS (SELECT 1 FROM projects project_row WHERE project_row.id=kb.project_id AND (project_row.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=project_row.id AND pm.user_id=?)))
 		ORDER BY f.created_at DESC, f.id DESC
 		`,
 		projectID,
@@ -608,7 +608,7 @@ func (r *MySQL) KnowledgeFileByID(
 			WHERE f.id = ?
 			  AND (
 				kb.scope='GLOBAL' AND f.user_id=?
-				OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects p2 WHERE p2.id=kb.project_id AND (p2.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=p2.id AND pm.user_id=?)))
+				OR kb.scope='PROJECT' AND EXISTS (SELECT 1 FROM projects project_row WHERE project_row.id=kb.project_id AND (project_row.user_id=? OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id=project_row.id AND pm.user_id=?)))
 			  )
 			LIMIT 1
 			`,
@@ -752,7 +752,7 @@ func (r *MySQL) UnbindGlobalKnowledgeBase(
 }
 
 // =========================================================
-// P1 Knowledge Index Lifecycle
+// Knowledge Index Lifecycle
 // =========================================================
 
 func (r *MySQL) PrepareKnowledgeFileReindex(

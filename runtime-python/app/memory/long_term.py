@@ -98,7 +98,7 @@ class MemoryCandidateDetector:
 
     Only the *direct user task text* is inspected. Project Knowledge, RAG
     evidence, tool results, MCP results, citations and assistant output never
-    enter this detector, which is the primary P3.2 source-boundary guarantee.
+    enter this detector, which is the primary automatic-memory source-boundary guarantee.
     """
 
     _explicit_patterns = (
@@ -498,7 +498,7 @@ class ControlPlaneLongTermMemorySink:
 
 
 class AutomaticLongTermMemoryWriter:
-    """P3.2 automatic write orchestrator.
+    """automatic memory write orchestrator.
 
     This component intentionally has no retrieval or prompt-injection behavior.
     It only turns direct user text into durable user-global memory candidates and

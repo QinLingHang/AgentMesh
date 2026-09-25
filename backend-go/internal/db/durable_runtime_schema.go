@@ -5,7 +5,7 @@ import (
 	"database/sql"
 )
 
-// EnsureDurableRuntimeSchema adds the P8 durable execution control-plane
+// EnsureDurableRuntimeSchema adds the durable execution control-plane
 // tables. It is additive and safe for existing Docker volumes.
 func EnsureDurableRuntimeSchema(ctx context.Context, db *sql.DB) error {
 	statements := []string{
@@ -87,7 +87,7 @@ func EnsureDurableRuntimeSchema(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 
-	// P22: metadata-only durable task state journal. The sequence is a durable,
+	// Knowledge Runtime: metadata-only durable task state journal. The sequence is a durable,
 	// globally monotonic replay cursor; filtering always uses the owned task ID.
 	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS durable_task_events (
@@ -107,7 +107,7 @@ func EnsureDurableRuntimeSchema(ctx context.Context, db *sql.DB) error {
 	`); err != nil {
 		return err
 	}
-	// ROUND5: append metadata-only worker phases to the *same* journal so SSE
+	// Worker Phase Journal: append metadata-only worker phases to the *same* journal so SSE
 	// state and phase events share a monotonic cursor. Existing rows default to
 	// state, and upgrades never drop or rewrite historical events.
 	for _, column := range []struct{ name, ddl string }{

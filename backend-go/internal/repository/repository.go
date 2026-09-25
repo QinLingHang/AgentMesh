@@ -573,7 +573,7 @@ type TaskRepository interface {
 }
 
 // =========================================================
-// P8 Durable Runtime Repository
+// Durable Runtime Repository
 // =========================================================
 
 type DurableRuntimeRepository interface {

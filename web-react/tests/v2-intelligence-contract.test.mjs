@@ -55,17 +55,19 @@ test("V2 usage and cost API plus UI are wired without secret reads", () => {
   assert.match(api, /getRunCost/);
   assert.match(api, /provider/);
   assert.match(api, /model/);
-  assert.match(overview, /Model Cost/);
+  assert.match(overview, /Token Model Cost/);
+  assert.match(overview, /价格未配置/);
+  assert.match(overview, /工具调用 \/ MCP 事件/);
   assert.match(overview, /RAG Latency/);
   assert.match(governance, /V2 Runtime 成本分析/);
   assert.doesNotMatch(api, /decrypt.*cost|secret.*cost/i);
 });
 
-test("V2 deterministic browser acceptance is wired and P11 uses current Chinese navigation", () => {
+test("V2 deterministic browser acceptance is wired and browser suite uses current Chinese navigation", () => {
   const pkg = JSON.parse(read("package.json"));
   const v2e2e = read("e2e/v2-intelligence-browser-e2e.mjs");
-  const p11e2e = read("e2e/p11-browser-e2e.mjs");
-  const p12e2e = read("e2e/p12-dev-session-restore.mjs");
+  const p11e2e = read("e2e/browser-e2e.mjs");
+  const p12e2e = read("e2e/dev-session-restore.mjs");
 
   assert.equal(pkg.scripts["test:e2e:v2"], "node e2e/v2-intelligence-browser-e2e.mjs");
   for (const token of ["v2-architecture.png", "图片 2 张", "HYBRID", "已选多模态证据", "引用质量", "MODEL COST"]) {

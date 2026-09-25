@@ -44,14 +44,14 @@ class Settings(
 
     model_http_trust_env: bool = True
 
-    # Optional pricing metadata for P6 cost telemetry.  Keep zero when the
+    # Optional pricing metadata for Evaluation cost telemetry.  Keep zero when the
     # provider/account pricing is unknown; this never invents a monetary cost.
     model_input_cost_per_million: float = 0.0
     model_output_cost_per_million: float = 0.0
 
-    # P7 adaptive Model Router. Extra runtimes are optional and configured as
+    # Adaptive Routing adaptive Model Router. Extra runtimes are optional and configured as
     # a JSON array. Existing deployments with a single default runtime keep the
-    # exact P1-P6 behaviour. Example entries are documented in docs/p7.
+    # exact Evaluation behaviour. Example entries are documented in docs/runtime.
     model_router_enabled: bool = True
     model_runtime_pool_json: str = "[]"
     model_routing_default_quality: float = 0.82
@@ -59,7 +59,7 @@ class Settings(
     model_routing_default_avg_cost: float = 0.0
     model_routing_default_success_rate: float = 1.0
 
-    # P6 deterministic evaluation is isolated from the main task: an evaluator
+    # Evaluation deterministic evaluation is isolated from the main task: an evaluator
     # failure must not turn a successful Agent task into a failed task.
     eval_scorecard_enabled: bool = True
 
@@ -86,8 +86,8 @@ class Settings(
     # Medium/high-complexity requests can be decomposed into a bounded semantic
     # ExecutionPlan. Invalid/unavailable model output fails safely to the
     # existing deterministic profiler/scheduler path.
-    p23_semantic_model_enabled: bool = True
-    p23_semantic_model_timeout_seconds: float = 1.2
+    execution_routing_semantic_model_enabled: bool = True
+    execution_routing_semantic_model_timeout_seconds: float = 6.0
 
     semantic_planner_enabled: bool = True
     semantic_planner_timeout_seconds: float = 12.0
@@ -126,7 +126,7 @@ class Settings(
     desktop_max_tool_iterations: int = 20
 
     # =====================================================
-    # P8 Distributed Runtime Worker
+    # Durable Runtime Distributed Runtime Worker
     # =====================================================
 
     runtime_worker_enabled: bool = True
@@ -145,10 +145,10 @@ class Settings(
     runtime_worker_dedupe_retention_seconds: float = 3600.0
 
     # =====================================================
-    # P21 Event Plane / Runtime Result Transport
+    # Event Delivery Event Plane / Runtime Result Transport
     # =====================================================
 
-    # http preserves the P8 callback path. kafka persists results into a local
+    # http preserves the Durable Runtime callback path. kafka persists results into a local
     # SQLite outbox first, then publishes runtime.execution.result events.
     runtime_result_transport: str = "http"
     kafka_brokers: str = "127.0.0.1:29092"
@@ -197,7 +197,7 @@ class Settings(
     )
 
     # =====================================================
-    # User-global Long-term Memory Auto Write (P3.2)
+    # User-global Long-term Memory Auto Write (memory write policy)
     # =====================================================
 
     memory_auto_write_enabled: bool = True
@@ -209,7 +209,7 @@ class Settings(
     memory_auto_write_max_items: int = 3
 
     # =====================================================
-    # User-global Long-term Memory Retrieval (P3.3)
+    # User-global Long-term Memory Retrieval (memory retrieval)
     # =====================================================
 
     memory_retrieval_enabled: bool = True
@@ -234,7 +234,7 @@ class Settings(
     memory_retrieval_relevance_weight: float = 0.15
 
     # =====================================================
-    # Conversation Memory Compression / Selective Recall (P20)
+    # Conversation Memory Compression / Selective Recall
     # =====================================================
 
     # Raw Redis memory remains a small working-memory window. Older turns are

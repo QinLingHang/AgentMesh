@@ -54,6 +54,10 @@ _WORKFLOW_CUES = (
     "分析并", "排查并", "检查并", "测试并", "先检查", "先分析", "再测试",
     "then ", "after that", "if there", "followed by", "and test", "fix and",
 )
+_AGENT_DELEGATION_RE = re.compile(
+    r"(?:选择|使用|调用|指定|交给|让).{0,16}(?:agent|智能体)",
+    re.IGNORECASE,
+)
 
 
 def has_implicit_business_knowledge_need(text: str) -> bool:
@@ -73,7 +77,9 @@ def has_live_personal_data_need(text: str) -> bool:
 
 
 _RAG_DISABLE = (
-    "不要检索知识库", "不想检索知识库", "不要查知识库", "不检索知识库", "关闭知识库", "不用知识库", "不要使用知识库", "不使用知识库", "不要rag", "关闭rag",
+    "不要检索知识库", "不想检索知识库", "不要查知识库", "不检索知识库", "关闭知识库", "不用知识库", "不要使用知识库", "不使用知识库",
+    "不需要知识检索", "无需知识检索", "不要知识检索", "不使用知识检索", "不需要知识库", "无需知识库",
+    "不要rag", "关闭rag",
     "do not use rag", "don't use rag", "do not search the knowledge base", "without rag",
 )
 _RAG_ENABLE = (
@@ -99,10 +105,52 @@ _FORBID_PATTERNS = (
     ("don't delete", "delete"), ("do not delete", "delete"), ("do not modify", "modify"),
 )
 
+# Explicit capability prohibitions are deterministic policy constraints, not
+# semantic guesses. They only narrow what discovery may use; they never grant
+# a capability. Ambiguous capability need is still decided by semantic routing.
+_FORBIDDEN_CAPABILITY_PATTERNS = {
+    "mcp": (
+        "不要mcp", "不要 mcp", "不需要mcp", "不需要 mcp", "无需mcp", "无需 mcp",
+        "不使用mcp", "不使用 mcp", "不要使用mcp", "不要使用 mcp", "别用mcp", "别用 mcp",
+        "不要调用mcp", "不要调用 mcp", "without mcp", "no mcp",
+        "do not use mcp", "don't use mcp",
+    ),
+    "tool": (
+        "不要工具", "不需要工具", "无需工具", "不要使用工具", "不使用工具", "别用工具",
+        "without tools", "no tools", "do not use tools", "don't use tools",
+    ),
+}
+
 
 def _contains(text: str, values: Iterable[str]) -> bool:
     lower = text.casefold()
     return any(value.casefold() in lower for value in values)
+
+
+def _without_markers(text: str, values: Iterable[str]) -> str:
+    """Remove explicit policy phrases before looking for positive intent."""
+    out = text.casefold()
+    for value in sorted((str(item).casefold() for item in values), key=len, reverse=True):
+        out = out.replace(value, " ")
+    return out
+
+
+def _contains_action(text: str) -> bool:
+    """Match English action verbs as tokens, never inside identifiers/terms.
+
+    In particular ``run`` must not make the noun ``Runtime`` an operational
+    request. CJK action markers intentionally keep substring semantics.
+    """
+    lower = text.casefold()
+    for value in _ACTION:
+        marker = value.casefold()
+        if marker.isascii():
+            pattern = rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])"
+            if re.search(pattern, lower):
+                return True
+        elif marker in lower:
+            return True
+    return False
 
 
 def _extract_entities(text: str) -> list[str]:
@@ -113,6 +161,25 @@ def _extract_entities(text: str) -> list[str]:
     return entities[:16]
 
 
+_INLINE_SOURCE_BOUNDARY_RE = re.compile(
+    r"(?:^|[。；;]\s*)(?:文本|内容|原文|材料|source|text|content)\s*[：:]",
+    re.IGNORECASE,
+)
+
+
+def _instruction_scope(text: str) -> str:
+    """Return the instruction portion before an explicitly labelled payload.
+
+    Content after ``文本：``/``内容：`` is user-provided data. Capability and
+    policy inference must not execute or classify words that merely occur
+    inside that payload (for example ``Runtime`` or ``执行计划``).
+    """
+    match = _INLINE_SOURCE_BOUNDARY_RE.search(text)
+    if match is None:
+        return text
+    return text[:match.start()].strip()
+
+
 def analyze_task_semantics(
     task: str,
     *,
@@ -121,11 +188,12 @@ def analyze_task_semantics(
     enable_implicit_business: bool = False,
 ) -> TaskSemanticIntent:
     text = " ".join(str(task or "").split())
-    lower = text.casefold()
+    intent_text = _instruction_scope(text)
+    lower = intent_text.casefold()
     reasons: list[str] = []
 
-    explicit_disable = _contains(text, _RAG_DISABLE)
-    explicit_enable = _contains(text, _RAG_ENABLE)
+    explicit_disable = _contains(intent_text, _RAG_DISABLE)
+    explicit_enable = _contains(intent_text, _RAG_ENABLE)
     if explicit_disable:
         rag_preference = RagPreference.DISABLE
         reasons.append("user explicitly disabled knowledge retrieval")
@@ -135,10 +203,13 @@ def analyze_task_semantics(
     else:
         rag_preference = RagPreference.UNSPECIFIED
 
-    knowledge_reference = _contains(text, _KNOWLEDGE_REFERENCE)
-    business_knowledge = enable_implicit_business and has_implicit_business_knowledge_need(text)
-    live_personal_data = enable_implicit_business and has_live_personal_data_need(text)
-    required_knowledge = _contains(text, _REQUIRED_KNOWLEDGE) or (business_knowledge and not live_personal_data)
+    # A negated capability mention ("不需要知识检索") is a policy bound,
+    # not positive evidence that governed Knowledge is needed. Remove only the
+    # explicit disable phrases, then detect any independent positive reference.
+    knowledge_reference = _contains(_without_markers(intent_text, _RAG_DISABLE), _KNOWLEDGE_REFERENCE)
+    business_knowledge = enable_implicit_business and has_implicit_business_knowledge_need(intent_text)
+    live_personal_data = enable_implicit_business and has_live_personal_data_need(intent_text)
+    required_knowledge = _contains(intent_text, _REQUIRED_KNOWLEDGE) or (business_knowledge and not live_personal_data)
     if explicit_disable:
         # Dependency describes the task, not the permission. A task may still
         # require evidence even when the user has disabled retrieval; the gate
@@ -155,11 +226,11 @@ def analyze_task_semantics(
     else:
         dependency = KnowledgeDependency.NONE
 
-    action = _contains(text, _ACTION)
-    toolish = (action and _contains(text, _TOOLISH)) or live_personal_data
-    external = (action and _contains(text, _EXTERNAL)) or live_personal_data
-    requires_memory = _contains(text, _MEMORY)
-    explanation = _contains(text, _EXPLANATION)
+    action = _contains_action(intent_text)
+    toolish = (action and _contains(intent_text, _TOOLISH)) or live_personal_data
+    external = (action and _contains(intent_text, _EXTERNAL)) or live_personal_data
+    requires_memory = _contains(intent_text, _MEMORY)
+    explanation = _contains(intent_text, _EXPLANATION)
     explanation_only = explanation and not action
 
     forbidden: list[str] = []
@@ -168,10 +239,23 @@ def analyze_task_semantics(
             forbidden.append(action_name)
             reasons.append(f"user prohibited action: {action_name}")
 
+    forbidden_capabilities: list[str] = []
+    for capability, markers in _FORBIDDEN_CAPABILITY_PATTERNS.items():
+        if _contains(intent_text, markers):
+            forbidden_capabilities.append(capability)
+            reasons.append(f"user prohibited capability: {capability}")
+
     capabilities = [str(item).strip() for item in profiler_capabilities if str(item).strip()]
+    if _AGENT_DELEGATION_RE.search(intent_text) and "agent" not in {item.casefold() for item in capabilities}:
+        capabilities.append("agent")
+        reasons.append("user explicitly requested Agent delegation")
     if dependency != KnowledgeDependency.NONE and "knowledge" not in {item.casefold() for item in capabilities}:
         capabilities.append("knowledge")
-    if toolish and "tool" not in {item.casefold() for item in capabilities}:
+    if (
+        toolish
+        and "tool" not in {item.casefold() for item in capabilities}
+        and "tool" not in forbidden_capabilities
+    ):
         capabilities.append("tool")
 
     intents: list[str] = []
@@ -207,6 +291,7 @@ def analyze_task_semantics(
         intents=intents,
         entities=_extract_entities(text),
         requiredCapabilities=list(dict.fromkeys(capabilities)),
+        forbiddenCapabilities=forbidden_capabilities,
         forbiddenActions=forbidden,
         knowledgeDependency=dependency,
         ragPreference=rag_preference,

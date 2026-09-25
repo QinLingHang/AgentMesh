@@ -95,7 +95,7 @@ def parse_document_bytes(
     text = _normalize_text(text)
     if not text:
         raise ValueError(
-            "no extractable text found; scanned PDF OCR is not enabled in P1"
+            "no extractable text found; scanned PDF OCR is not enabled in knowledge"
         )
 
     return text

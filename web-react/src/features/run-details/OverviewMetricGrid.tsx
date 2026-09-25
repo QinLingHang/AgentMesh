@@ -107,15 +107,15 @@ export function OverviewMetricGrid({
         />
 
         <MetricCard
-          label="Model Cost"
-          value={o.modelCostKnown ? formatMoney(o.modelEstimatedCost) : "未配置"}
+          label="Token Model Cost"
+          value={o.modelCostKnown ? formatMoney(o.modelEstimatedCost) : "价格未配置"}
           hint={`${o.modelProvider || "provider"} · ${o.modelName || "model"}`}
         />
 
         <MetricCard
-          label="工具与外部服务"
+          label="工具调用 / MCP 事件"
           value={`${o.toolCalls} / ${o.mcpEvents}`}
-          hint="工具调用 / 外部服务事件"
+          hint="真实 Tool 调用次数 / MCP 生命周期事件数"
         />
 
         <MetricCard

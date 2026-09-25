@@ -16,9 +16,10 @@ import (
 )
 
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
+	baseURL           string
+	token             string
+	http              *http.Client
+	streamIdleTimeout time.Duration
 }
 
 func NewClient(
@@ -31,11 +32,74 @@ func NewClient(
 			baseURL,
 			"/",
 		),
-		token: token,
+		token:             token,
+		streamIdleTimeout: timeout,
 		http: &http.Client{
 			Timeout: timeout,
 		},
 	}
+}
+
+func (c *Client) streamingHTTPClient() *http.Client {
+	streamClient := *c.http
+	// Streaming bodies are bounded by request context, an inactivity deadline
+	// and Runtime/provider execution deadlines. A whole-response Client.Timeout
+	// would abort healthy streams merely because total execution exceeded it.
+	streamClient.Timeout = 0
+	return &streamClient
+}
+
+type RuntimeStreamPartialSummary struct {
+	EventCount         int
+	TraceEventCount    int
+	DeltaEventCount    int
+	LastTraceKind      string
+	LastTraceStatus    string
+	LastTraceElapsedMS int64
+}
+
+type RuntimeStreamError struct {
+	Cause   error
+	Partial RuntimeStreamPartialSummary
+}
+
+func (e *RuntimeStreamError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "runtime stream failed"
+	}
+	return e.Cause.Error()
+}
+
+func (e *RuntimeStreamError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *RuntimeStreamError) PartialTrace() []map[string]any {
+	if e == nil || e.Partial.EventCount == 0 {
+		return nil
+	}
+	return []map[string]any{{
+		"kind":            "runtime_stream_partial_summary",
+		"title":           "Runtime stream partial summary",
+		"status":          "error",
+		"detail":          "bounded transport diagnostics; no prompt or trace detail persisted",
+		"elapsedMs":       e.Partial.LastTraceElapsedMS,
+		"eventCount":      e.Partial.EventCount,
+		"traceCount":      e.Partial.TraceEventCount,
+		"deltaCount":      e.Partial.DeltaEventCount,
+		"lastTraceKind":   e.Partial.LastTraceKind,
+		"lastTraceStatus": e.Partial.LastTraceStatus,
+	}}
+}
+
+func runtimeStreamError(cause error, partial RuntimeStreamPartialSummary) error {
+	if cause == nil {
+		cause = errors.New("runtime stream failed")
+	}
+	return &RuntimeStreamError{Cause: cause, Partial: partial}
 }
 
 // ============================================================
@@ -137,7 +201,7 @@ type ObservabilitySummary struct {
 }
 
 // ============================================================
-// P6 Run Scorecard
+// Evaluation Run Scorecard
 // ============================================================
 
 type RunScorecard struct {
@@ -185,7 +249,7 @@ type RunScorecard struct {
 }
 
 // ============================================================
-// P9 request-local Project BYOK model runtime. APIKey is sent only over the
+// Governance request-local Project BYOK model runtime. APIKey is sent only over the
 // trusted internal Go -> Python channel and is never returned to browsers.
 // ============================================================
 type ProjectModelRuntime struct {
@@ -223,9 +287,8 @@ type RuntimeAttachment struct {
 // ============================================================
 
 type ExecuteRequest struct {
-	P23Strategy       string `json:"p23Strategy,omitempty"`
-	P23CapabilityKind string `json:"p23CapabilityKind,omitempty"`
-	UserID            int64  `json:"user_id"`
+	ExecutionRoute string `json:"executionRoute,omitempty"`
+	UserID         int64  `json:"user_id"`
 
 	RequestID string `json:"request_id"`
 
@@ -379,11 +442,7 @@ func (c *Client) StreamInteractive(
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Internal-Token", c.token)
 
-	streamClient := *c.http
-	// A streaming response is bounded by the request context and provider-side
-	// timeout. http.Client.Timeout would otherwise abort the full body even
-	// after healthy deltas have begun arriving.
-	streamClient.Timeout = 0
+	streamClient := c.streamingHTTPClient()
 	resp, err := streamClient.Do(r)
 	if err != nil {
 		return err
@@ -526,7 +585,13 @@ func WithStreamEventSink(ctx context.Context, sink StreamEventSink) context.Cont
 	if sink == nil {
 		return ctx
 	}
-	return context.WithValue(ctx, streamEventSinkKey{}, sink)
+	// Browser/request cancellation only stops best-effort delivery to that
+	// consumer; it must not cancel the authoritative Runtime execution or its
+	// final persistence. Runtime/provider deadlines and executeStream's idle
+	// timeout remain the bounded execution controls. context.WithoutCancel keeps
+	// request-scoped values while removing the transport deadline/Done signal.
+	authoritative := context.WithoutCancel(ctx)
+	return context.WithValue(authoritative, streamEventSinkKey{}, sink)
 }
 
 func streamEventSinkFromContext(ctx context.Context) StreamEventSink {
@@ -630,7 +695,9 @@ func (c *Client) executeStream(
 	}
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-Internal-Token", c.token)
-	resp, err := c.http.Do(r)
+
+	streamClient := c.streamingHTTPClient()
+	resp, err := streamClient.Do(r)
 	if err != nil {
 		return nil, err
 	}
@@ -639,53 +706,141 @@ func (c *Client) executeStream(
 		return nil, runtimeResponseError(resp)
 	}
 
+	type scanResult struct {
+		line []byte
+		err  error
+		done bool
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	scanCh := make(chan scanResult, 1)
+	stopScan := make(chan struct{})
+	defer close(stopScan)
+	go func() {
+		for scanner.Scan() {
+			item := scanResult{line: append([]byte(nil), scanner.Bytes()...)}
+			select {
+			case scanCh <- item:
+			case <-stopScan:
+				return
+			}
+		}
+		item := scanResult{err: scanner.Err(), done: true}
+		select {
+		case scanCh <- item:
+		case <-stopScan:
+		}
+	}()
+
+	var idleTimer *time.Timer
+	var idleC <-chan time.Time
+	if c.streamIdleTimeout > 0 {
+		idleTimer = time.NewTimer(c.streamIdleTimeout)
+		idleC = idleTimer.C
+		defer idleTimer.Stop()
+	}
+	resetIdle := func() {
+		if idleTimer == nil {
+			return
+		}
+		if !idleTimer.Stop() {
+			select {
+			case <-idleTimer.C:
+			default:
+			}
+		}
+		idleTimer.Reset(c.streamIdleTimeout)
+	}
+
+	partial := RuntimeStreamPartialSummary{}
 	var final *ExecuteResponse
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var event map[string]any
-		if err := json.Unmarshal(line, &event); err != nil {
-			return nil, fmt.Errorf("invalid runtime stream event: %w", err)
-		}
-		if sink != nil {
-			// Observability sinks are deliberately fail-open. A client-side stream
-			// writer failure must not alter the Runtime result.
-			func() {
-				defer func() { _ = recover() }()
-				sink(event)
-			}()
-		}
-		typeValue, _ := event["type"].(string)
-		switch typeValue {
-		case "result":
-			raw, err := json.Marshal(event["result"])
-			if err != nil {
-				return nil, err
+	for {
+		select {
+		case <-ctx.Done():
+			_ = resp.Body.Close()
+			return nil, runtimeStreamError(ctx.Err(), partial)
+		case <-idleC:
+			_ = resp.Body.Close()
+			return nil, runtimeStreamError(
+				fmt.Errorf("runtime stream idle timeout after %s", c.streamIdleTimeout), partial,
+			)
+		case item := <-scanCh:
+			if item.done {
+				if item.err != nil {
+					return nil, runtimeStreamError(item.err, partial)
+				}
+				if final == nil {
+					return nil, runtimeStreamError(errors.New("runtime stream ended without result"), partial)
+				}
+				return final, nil
 			}
-			var out ExecuteResponse
-			if err := json.Unmarshal(raw, &out); err != nil {
-				return nil, err
+			resetIdle()
+			line := bytes.TrimSpace(item.line)
+			if len(line) == 0 {
+				continue
 			}
-			final = &out
-		case "error":
-			message, _ := event["message"].(string)
-			if strings.TrimSpace(message) == "" {
-				message = "runtime stream failed"
+			var event map[string]any
+			if err := json.Unmarshal(line, &event); err != nil {
+				return nil, runtimeStreamError(fmt.Errorf("invalid runtime stream event: %w", err), partial)
 			}
-			return nil, errors.New(message)
+			partial.EventCount++
+			typeValue, _ := event["type"].(string)
+			switch typeValue {
+			case "trace":
+				partial.TraceEventCount++
+				if trace, ok := event["trace"].(map[string]any); ok {
+					partial.LastTraceKind, _ = trace["kind"].(string)
+					partial.LastTraceStatus, _ = trace["status"].(string)
+					switch value := trace["elapsedMs"].(type) {
+					case float64:
+						partial.LastTraceElapsedMS = int64(value)
+					case int64:
+						partial.LastTraceElapsedMS = value
+					case int:
+						partial.LastTraceElapsedMS = int64(value)
+					}
+				}
+			case "delta":
+				partial.DeltaEventCount++
+			}
+
+			if sink != nil {
+				// Observability sinks are deliberately fail-open. A client-side stream
+				// writer failure must not alter the Runtime result.
+				func() {
+					defer func() { _ = recover() }()
+					sink(event)
+				}()
+			}
+
+			switch typeValue {
+			case "result":
+				raw, err := json.Marshal(event["result"])
+				if err != nil {
+					return nil, runtimeStreamError(err, partial)
+				}
+				var out ExecuteResponse
+				if err := json.Unmarshal(raw, &out); err != nil {
+					return nil, runtimeStreamError(err, partial)
+				}
+				final = &out
+			case "error":
+				message, _ := event["message"].(string)
+				if strings.TrimSpace(message) == "" {
+					message = "runtime stream failed"
+				}
+				nodeID, _ := event["nodeId"].(string)
+				causeCategory, _ := event["causeCategory"].(string)
+				if strings.TrimSpace(nodeID) != "" || strings.TrimSpace(causeCategory) != "" {
+					return nil, runtimeStreamError(fmt.Errorf(
+						"%s [node=%s cause=%s]",
+						message, strings.TrimSpace(nodeID), strings.TrimSpace(causeCategory),
+					), partial)
+				}
+				return nil, runtimeStreamError(errors.New(message), partial)
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	if final == nil {
-		return nil, errors.New("runtime stream ended without result")
-	}
-	return final, nil
 }
 
 // ============================================================

@@ -1534,7 +1534,7 @@ body {
 .memory-trace-panel-shell,
 .run-context-card,
 .run-health-card,
-.p6-eval-section {
+.eval-scorecard-section {
   background: #171e24;
   border-color: var(--am-line);
   box-shadow: none;

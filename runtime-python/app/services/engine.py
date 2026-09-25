@@ -29,6 +29,7 @@ from app.agents.capability import (
     effective_capability_profile,
 )
 from app.config import settings
+from app.runtime_streaming_policy import recent_conversation_context_allows_stream
 from app.capabilities import (
     contextualize_discovery_task,
     continuation_subject_task,
@@ -157,6 +158,7 @@ from app.planning import (
 from app.services.plan_compiler import (
     PlanCompiler,
 )
+from app.services.upstream_context import build_bounded_upstream_context
 from app.services.quality_gate import (
     QualityGate,
     QualityGateError,
@@ -195,6 +197,7 @@ from app.tools.loop import safe as safe_tool_payload
 # ============================================================
 # Runtime Control-flow Signal
 # ============================================================
+
 
 
 class RuntimeTaskInterrupted(
@@ -881,7 +884,7 @@ class RuntimeEngine:
             )
 
         # ====================================================
-        # User-global Long-term Memory Automatic Writer (P3.2)
+        # User-global Long-term Memory Automatic Writer (memory write policy)
         #
         # Source boundary:
         #   ONLY req.task (direct user text) is passed in.
@@ -939,7 +942,7 @@ class RuntimeEngine:
         )
 
         # ====================================================
-        # User-global Long-term Memory Retrieval (P3.3)
+        # User-global Long-term Memory Retrieval (memory retrieval)
         #
         # Retrieval reads ONLY user-owned Memory through Go.
         # It is independent from Project Knowledge RAG and does
@@ -1024,7 +1027,7 @@ class RuntimeEngine:
 
 
         # ====================================================
-        # Conversation Memory Capsules (P20)
+        # Conversation Memory Capsules
         #
         # Raw conversation history remains durable in MySQL. Redis keeps only
         # a small working window; older ranges are compressed asynchronously
@@ -1132,7 +1135,7 @@ class RuntimeEngine:
                 await close_retriever()
 
     # ========================================================
-    # P5 Human-in-the-loop Tool Approval Resume
+    # Secure Action Human-in-the-loop Tool Approval Resume
     # ========================================================
 
     async def _resume_tool_approval(
@@ -1324,7 +1327,7 @@ class RuntimeEngine:
             )
             call_started = time.perf_counter()
             try:
-                # Approved high-impact actions deliberately do not use the P4
+                # Approved high-impact actions deliberately do not use the Tool/MCP
                 # automatic retry loop. Ambiguous network failures must fail
                 # closed instead of risking a duplicate side effect.
                 result = await registry.execute(
@@ -2725,17 +2728,14 @@ class RuntimeEngine:
                 )
             )
 
-        # P23 knowledge-only bypass: no Agent is necessary, no DAG is built.
-        # Legacy P22 calls have no p23_strategy and retain their exact path.
+        # Agentless knowledge execution: no Agent is necessary and no DAG is built.
+        # Legacy calls have no execution_route and retain their exact path.
         # Python, not Go, determines whether this is a knowledge-only task.
         # The existing knowledge executor is retained for agent-less projects;
         # it reuses ScopedRetriever, CitationGuard and the normal model resolver.
         # If agents exist, the ordinary Runtime Discovery/Planner/ToolLoop owns
         # the request, regardless of whether one or many capabilities are used.
-        if req.p23_strategy == "SINGLE_CAPABILITY" and req.p23_capability_kind == "KNOWLEDGE":
-            from app.services.single_knowledge_executor import execute_single_knowledge
-            return await execute_single_knowledge(self, req, event_sink=event_sink)
-        if req.p23_strategy == "RUNTIME" and not req.agents:
+        if req.execution_route == "RUNTIME" and not req.agents:
             semantic = analyze_task_semantics(
                 req.task, has_attachments=bool(req.attachments), enable_implicit_business=True,
             )
@@ -2743,8 +2743,8 @@ class RuntimeEngine:
                 and not semantic.requires_tool and req.effective_rag_policy is not None
                 and req.effective_rag_policy.mode != "OFF"
                 and req.effective_rag_policy.allowed_knowledge_base_ids):
-                from app.services.single_knowledge_executor import execute_single_knowledge
-                return await execute_single_knowledge(self, req, event_sink=event_sink)
+                from app.services.knowledge_answer_service import execute_knowledge_answer
+                return await execute_knowledge_answer(self, req, event_sink=event_sink)
             # No synthetic Agent or guessed Tool may be invented to compensate
             # for a missing authorized executor.
             raise RuntimeError("no authorized agent available for this runtime task")
@@ -2763,7 +2763,7 @@ class RuntimeEngine:
         #
         # The task event is the stable trace boundary for every new runtime
         # execution. Capability discovery is work performed *after* the task
-        # has been accepted, so keep this event first for P3.x trace contracts
+        # has been accepted, so keep this event first for Memory trace contracts
         # and downstream consumers that rely on trace[0] being the task.
         # Resume requests short-circuit above and preserve their own lifecycle.
         # ====================================================
@@ -2788,7 +2788,7 @@ class RuntimeEngine:
             req.task,
             has_attachments=bool(req.attachments),
             profiler_capabilities=pre_profile.required_capabilities,
-            enable_implicit_business=req.p23_strategy is not None,
+            enable_implicit_business=req.execution_route is not None,
         )
         merged_capabilities = list(
             dict.fromkeys(
@@ -3080,12 +3080,19 @@ class RuntimeEngine:
 
         if req.mcp_servers and not selected_mcp_server_ids:
             event(
-                "mcp",
-                "MCP Discovery Skipped",
+                "capability_discovery",
+                "MCP Selection Skipped",
                 "completed",
                 json.dumps(
                     {
-                        "reason": "capability discovery found no relevant MCP connector",
+                        "reason": (
+                            "user explicitly prohibited MCP"
+                            if "mcp" in {
+                                item.casefold()
+                                for item in semantic_intent.forbidden_capabilities
+                            }
+                            else "capability discovery found no relevant MCP connector"
+                        ),
                         "configuredServers": len(req.mcp_servers),
                     },
                     ensure_ascii=False,
@@ -3293,7 +3300,7 @@ class RuntimeEngine:
             # A user can manage remembered information directly in chat.
             # Explicit forget commands are handled before normal retrieval so
             # a memory being deleted cannot also be injected into the same
-            # request.  Non-forget requests continue through P3.3 retrieval.
+            # request.  Non-forget requests continue through memory retrieval retrieval.
             # =================================================
 
             long_term_memories: list[
@@ -3494,6 +3501,7 @@ class RuntimeEngine:
             memory_messages: list[
                 MemoryMessage
             ] = []
+            history_source = "none"
 
             if (
                 req.conversation_id
@@ -4923,7 +4931,7 @@ class RuntimeEngine:
                     ),
                 )
 
-            # P22/RAG V1.1: a semantic plan can introduce a knowledge
+            # Knowledge Runtime/RAG V1.1: a semantic plan can introduce a knowledge
             # obligation AFTER the initial low-cost RAG routing. Resolve it
             # once, inside the immutable Go-authorized catalog, BEFORE the
             # scheduler starts any potentially side-effecting Agent/Tool.
@@ -5329,12 +5337,14 @@ class RuntimeEngine:
                 and not memory_forget_requested
                 and not long_term_memories
                 and not conversation_memories
-                and not memory_messages
-                and memory_write_outcome is None
+                and recent_conversation_context_allows_stream(memory_messages, history_source)
+                # Automatic same-turn Memory write is an auxiliary side effect,
+                # never answer context, and is forbidden from being re-retrieved
+                # in this turn. Its completed/skipped outcome must therefore not
+                # turn a native provider stream into one-shot generation.
                 and not model_attachments
                 and req.synthesis_mode != "always"
                 and not collaboration_plan.requires_synthesis
-                and "agentmesh" not in req.task.casefold()
             )
             stream_single_agent_claimed = False
 
@@ -5693,7 +5703,28 @@ class RuntimeEngine:
                         on_model_event=(
                             model_event
                         ),
-                        on_delta=(delta_sink if stream_this_agent else None),
+                        # Runtime DAG internal/model-only nodes consume the
+                        # provider's native stream even when their tokens are
+                        # not browser-facing. The silent sink selects the
+                        # streaming model path without exposing intermediate
+                        # node text. This turns MODEL_TIMEOUT into a progress
+                        # (idle) deadline instead of a whole-generation
+                        # deadline, while the one browser-owned node still
+                        # receives the real delta sink. Tools/attachments keep
+                        # their existing execution semantics.
+                        on_delta=(
+                            delta_sink
+                            if stream_this_agent
+                            else (
+                                (lambda _chunk: None)
+                                if (
+                                    agent.protocol.strip().lower() == "internal"
+                                    and not tool_execution_enabled
+                                    and not model_attachments
+                                )
+                                else None
+                            )
+                        ),
 
                         tool_registry=(
                             tool_registry
@@ -5805,7 +5836,7 @@ class RuntimeEngine:
                         .avg_cost
                     )
 
-                    # P6 hard cost guard. Scheduler/Planner already prefer
+                    # Evaluation hard cost guard. Scheduler/Planner already prefer
                     # candidates inside constraints; this final execution gate
                     # prevents a fallback/reschedule from knowingly crossing
                     # the configured request budget.
@@ -6643,44 +6674,31 @@ class RuntimeEngine:
 
                 if upstream_outputs:
 
-                    upstream_parts: list[
-                        str
-                    ] = []
+                    bounded_upstream = build_bounded_upstream_context(
+                        upstream_outputs,
+                    )
 
-                    for (
-                        upstream_node_id,
-                        upstream_result,
-                    ) in (
-                        upstream_outputs
-                        .items()
-                    ):
-
-                        upstream_text = (
-                            upstream_result[
-                                1
-                            ]
-                        )
-
-                        upstream_parts.append(
-                            (
-                                "[Upstream "
-                                f"{upstream_node_id}]"
-                                "\n"
-                                f"{upstream_text}"
-                            )
-                        )
+                    event(
+                        "context",
+                        "Upstream Context Bounded",
+                        "completed",
+                        json.dumps(
+                            {
+                                "itemCount": bounded_upstream.item_count,
+                                "originalChars": bounded_upstream.original_chars,
+                                "includedChars": bounded_upstream.included_chars,
+                                "truncatedItems": bounded_upstream.truncated_items,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
 
                     task_input = (
                         task_input
                         + "\n\n"
-                        + (
-                            "Upstream Agent "
-                            "Results:"
-                        )
+                        + "Upstream Agent Results:"
                         + "\n\n"
-                        + "\n\n".join(
-                            upstream_parts
-                        )
+                        + bounded_upstream.text
                         + "\n\n"
                         + (
                             "Use the upstream "
@@ -7750,12 +7768,42 @@ class RuntimeEngine:
 
                 try:
 
-                    synthesis_model = (
-                        self.registry
-                        .context
-                        .get(
-                            "model.default"
-                        )
+                    # Synthesis is a real request model call and must honor
+                    # the same request-local BYOK/model-selection contract as
+                    # Agent execution. ``model.default`` is only a registry
+                    # plugin and does not expose native ``generate_stream``;
+                    # using it here silently disabled Full Runtime streaming.
+                    synthesis_agent = AgentProfile(
+                        id=0,
+                        name="ResultSynthesizer",
+                        endpoint="internal://result-synthesis",
+                        protocol="internal",
+                        capabilities=["synthesis"],
+                        modelRuntime="adaptive",
+                    )
+                    synthesis_model = self.model_runtime_resolver.resolve(
+                        synthesis_agent,
+                        adaptive=(
+                            settings.model_router_enabled
+                            and req.scheduler == "adaptive"
+                        ),
+                        constraints=req.constraints,
+                        profile=profile,
+                        project_model=req.project_model,
+                        model_pool=req.model_pool,
+                        model_selection=req.model_selection,
+                    )
+                    event(
+                        "model_route",
+                        "Synthesis Model Runtime Resolved",
+                        "completed",
+                        json.dumps({
+                            "runtime_id": synthesis_model.runtime_id,
+                            "declared_provider": synthesis_model.declared_provider,
+                            "gateway_provider": synthesis_model.gateway_provider,
+                            "model": synthesis_model.model,
+                            "selection_mode": synthesis_model.selection_mode,
+                        }, ensure_ascii=False),
                     )
 
                     # Agent outputs are untrusted intermediate prose. The
@@ -7816,12 +7864,48 @@ class RuntimeEngine:
                         and not blocked_step_reasons
                         and not memory_overview_query
                         and not memory_forget_requested
-                        and memory_write_outcome is None
+                        # Same-turn automatic Memory writes are not injected into
+                        # this answer and cannot be recalled until a later turn.
+                        # They do not invalidate final-answer token streaming.
                         and not long_term_memories
                         and not conversation_memories
-                        and not memory_messages
+                        and recent_conversation_context_allows_stream(memory_messages, history_source)
                         and not required_knowledge
-                        and "agentmesh" not in req.task.casefold()
+                    )
+                    stream_blockers = []
+                    if delta_sink is None:
+                        stream_blockers.append("NO_DELTA_SINK")
+                    if rag_context_hits:
+                        stream_blockers.append("RAG_CONTEXT")
+                    if rag_decision.retrieve:
+                        stream_blockers.append("RAG_RETRIEVAL")
+                    if blocked_step_reasons:
+                        stream_blockers.append("BLOCKED_STEPS")
+                    if memory_overview_query:
+                        stream_blockers.append("MEMORY_OVERVIEW")
+                    if memory_forget_requested:
+                        stream_blockers.append("MEMORY_FORGET")
+                    if long_term_memories:
+                        stream_blockers.append("LONG_TERM_MEMORY")
+                    if conversation_memories:
+                        stream_blockers.append("CONVERSATION_MEMORY")
+                    if not recent_conversation_context_allows_stream(memory_messages, history_source):
+                        stream_blockers.append("RECENT_CONTEXT")
+                    if required_knowledge:
+                        stream_blockers.append("REQUIRED_KNOWLEDGE")
+                    if not callable(getattr(synthesis_model, "generate_stream", None)):
+                        stream_blockers.append("MODEL_STREAM_UNAVAILABLE")
+                    event(
+                        "synthesis", "Synthesis Streaming Decision", "completed",
+                        json.dumps({
+                            "allowDelta": bool(allow_delta and "MODEL_STREAM_UNAVAILABLE" not in stream_blockers),
+                            "blockers": stream_blockers,
+                            "ragHitCount": len(rag_context_hits),
+                            "blockedStepCount": len(blocked_step_reasons),
+                            "longTermMemoryCount": len(long_term_memories),
+                            "conversationMemoryCount": len(conversation_memories),
+                            "historySource": history_source,
+                        }, ensure_ascii=False),
                     )
                     if allow_delta and callable(getattr(synthesis_model, "generate_stream", None)):
                         answer = await synthesis_model.generate_stream(
@@ -8666,7 +8750,7 @@ class RuntimeEngine:
             )
 
             # =================================================
-            # 12. P6 Run Scorecard
+            # 12. Evaluation Run Scorecard
             #
             # Eval is isolated from the main task: a scorecard failure becomes
             # an observability event and never flips a successful user task.

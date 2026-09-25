@@ -288,7 +288,7 @@ async def test_engine_fast_rag_calls_retriever():
             },
             knowledgeCatalog=[{
                 "knowledgeBaseId": 9,
-                "name": "AgentMesh P9 BYOK MCP A2A Tool Runtime Failure Backoff",
+                "name": "AgentMesh Project BYOK MCP A2A Tool Runtime Failure Backoff",
                 "scope": "PROJECT", "accessible": True,
             }],
 

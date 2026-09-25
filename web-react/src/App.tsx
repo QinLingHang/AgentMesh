@@ -52,7 +52,7 @@ import "./styles/theme-v4-2-soft-light.css";
 import "./styles/theme-v4-4-clean-light.css";
 import "./styles/theme-v4-5-user-byok.css";
 import "./styles/theme-v4-6-chinese-light.css";
-import "./styles/p20-light-management-dialog.css";
+import "./styles/light-management-dialog.css";
 
 const Agents = lazy(() =>
   import("./features/agents/Agents").then((module) => ({

@@ -1736,14 +1736,15 @@ func (s *TaskService) recordRunCost(
 	taskID int64,
 	projectID *int64,
 	observability runtimeclient.ObservabilitySummary,
-	estimatedCost float64,
 ) {
 	if s.governance == nil || taskID <= 0 || uid <= 0 {
 		return
 	}
 	status := "unavailable"
+	modelCost := 0.0
 	if observability.ModelCostKnown {
 		status = "estimated"
+		modelCost = observability.ModelEstimatedCost
 	}
 	s.governance.RecordRunCost(ctx, model.RunCostRecord{
 		TaskID: taskID, UserID: uid, ProjectID: projectID,
@@ -1751,7 +1752,7 @@ func (s *TaskService) recordRunCost(
 		InputTokens:   int64(observability.ModelInputTokens),
 		OutputTokens:  int64(observability.ModelOutputTokens),
 		TotalTokens:   int64(observability.ModelTotalTokens),
-		EstimatedCost: estimatedCost, CostStatus: status,
+		EstimatedCost: modelCost, CostStatus: status,
 	})
 }
 
@@ -1805,18 +1806,16 @@ func (s *TaskService) resolveRequestModelRuntimePool(
 
 type RunTaskInput struct {
 	// Non-authoritative to the transport; never include routing results in the original idempotency fingerprint.
-	P23Strategy                    string   `json:"-"`
-	P23CapabilityKind              string   `json:"-"`
-	P23CatalogVersion              string   `json:"-"`
-	P23ReasonCodes                 []string `json:"-"`
-	P23AnalysisSource              string   `json:"-"`
-	P23AnalysisLatencyMS           int64    `json:"-"`
-	P23PreflightModelCalls         int      `json:"-"`
-	P23PreflightModelTokens        int      `json:"-"`
-	P23PreflightModelEstimatedCost float64  `json:"-"`
-	P23PreflightModelCostKnown     bool     `json:"-"`
-	ClientRequestID                string
-	ConversationID                 *int64
+	ExecutionRoute            string   `json:"-"`
+	RoutingReasonCodes        []string `json:"-"`
+	RoutingAnalysisSource     string   `json:"-"`
+	RoutingAnalysisLatencyMS  int64    `json:"-"`
+	RoutingModelCalls         int      `json:"-"`
+	RoutingModelTokens        int      `json:"-"`
+	RoutingModelEstimatedCost float64  `json:"-"`
+	RoutingModelCostKnown     bool     `json:"-"`
+	ClientRequestID           string
+	ConversationID            *int64
 
 	Task string
 
@@ -2174,7 +2173,7 @@ func (s *TaskService) RunInteractiveStream(
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy,
 		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{"runtimePhase": "interactive_stream", "attachments": attachmentMeta}),
+		PendingUserMessageMetadata: executionRoutingMetadata(in, map[string]any{"runtimePhase": "interactive_stream", "attachments": attachmentMeta}),
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
@@ -2252,6 +2251,12 @@ func (s *TaskService) RunInteractiveStream(
 		"serviceId":   modelRoute.ServiceID,
 		"serviceName": modelRoute.ServiceName,
 	})
+	streamDetail, _ := json.Marshal(map[string]any{
+		"provider":  modelRoute.Provider,
+		"model":     modelRoute.Model,
+		"streaming": true,
+		"transport": "go_direct",
+	})
 	trace := []map[string]any{
 		{
 			"kind": "model_route", "title": "Model Route", "status": "completed",
@@ -2259,10 +2264,10 @@ func (s *TaskService) RunInteractiveStream(
 		},
 		{
 			"kind": "model", "title": "Interactive Stream", "status": "completed",
-			"detail": "direct token streaming", "elapsedMs": elapsed,
+			"detail": string(streamDetail), "elapsedMs": elapsed,
 		},
 	}
-	trace = append(p23DecisionTrace(in, "direct"), trace...)
+	trace = append(executionRoutingTrace(in, "direct"), trace...)
 	dag := map[string]any{
 		"nodes": []map[string]any{{"id": "interactive-model", "label": "Interactive Model", "kind": "model", "status": "completed"}},
 		"edges": []map[string]any{},
@@ -2290,13 +2295,13 @@ func (s *TaskService) RunInteractiveStream(
 	if in.ConversationID != nil {
 		assistantMessage = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: finalAnswer, Status: "COMPLETED", RequestID: requestID,
-			Metadata: map[string]any{
+			Metadata: executionRoutingMetadata(in, map[string]any{
 				"taskId": task.ID, "runtimePhase": "interactive_stream", "status": "COMPLETED",
 				"selectedAgents": selectedAgents, "trace": trace, "dag": dag,
 				"scheduler": in.Scheduler, "planner": in.Planner,
 				"executionMode": in.ExecutionMode, "synthesisMode": in.SynthesisMode,
 				"observability": observability, "citations": []runtimeclient.RuntimeCitation{},
-			},
+			}),
 		}
 	}
 
@@ -2315,7 +2320,7 @@ func (s *TaskService) RunInteractiveStream(
 		pid := projectRuntimeContext.ProjectID
 		costProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, costProjectID, observability, cost)
+	s.recordRunCost(ctx, uid, task.ID, costProjectID, observability)
 
 	task.Status = "COMPLETED"
 	task.ResultText = &finalAnswer
@@ -2679,7 +2684,7 @@ func (s *TaskService) Run(
 	}
 
 	// =====================================================
-	// P2 Project Runtime Context
+	// Project Runtime Context
 	//
 	// Conversation -> Project -> Runtime bindings/policy.
 	// Non-project conversations keep the existing account-wide behavior.
@@ -2851,7 +2856,7 @@ func (s *TaskService) Run(
 		Scheduler: in.Scheduler, Planner: in.Planner, ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy, EffectiveRagPolicy: effectiveRagPolicy,
 		ClientRequestID: clientKey, RequestFingerprint: requestFingerprint,
-		PendingUserMessageMetadata: p23TaskMetadata(in, map[string]any{"runtimePhase": "initial", "attachments": attachmentMeta}),
+		PendingUserMessageMetadata: executionRoutingMetadata(in, map[string]any{"runtimePhase": "initial", "attachments": attachmentMeta}),
 	}, in.Constraints)
 	if err != nil {
 		return nil, err
@@ -2895,7 +2900,7 @@ func (s *TaskService) Run(
 			mcpPool,
 		)
 
-	if len(agentPool) == 0 && !(in.P23Strategy == "RUNTIME" && effectiveRagPolicy.Mode != model.RagModeOff && len(effectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
+	if len(agentPool) == 0 && !(in.ExecutionRoute == "RUNTIME" && effectiveRagPolicy.Mode != model.RagModeOff && len(effectiveRagPolicy.AllowedKnowledgeBaseIDs) > 0) {
 		message := "project runtime has no enabled agents"
 
 		_ = s.tasks.FailTask(
@@ -2920,8 +2925,8 @@ func (s *TaskService) Run(
 		runtimeclient.ExecuteRequest{
 			UserID: uid,
 
-			RequestID:   requestID,
-			P23Strategy: in.P23Strategy, P23CapabilityKind: in.P23CapabilityKind,
+			RequestID:      requestID,
+			ExecutionRoute: in.ExecutionRoute,
 
 			ConversationID: in.ConversationID,
 
@@ -2968,13 +2973,7 @@ func (s *TaskService) Run(
 			started,
 		).Milliseconds()
 
-		_ = s.tasks.FailTask(
-			ctx,
-			uid,
-			task.ID,
-			err.Error(),
-			elapsed,
-		)
+		s.failTaskAfterRuntimeError(ctx, uid, task.ID, err, elapsed)
 
 		return nil, err
 	}
@@ -2997,7 +2996,7 @@ func (s *TaskService) Run(
 		pid := projectRuntimeContext.ProjectID
 		runCostProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(
@@ -3130,7 +3129,7 @@ func (s *TaskService) Run(
 	if in.ConversationID != nil {
 		assistantMessage = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: requestID,
-			Metadata: map[string]any{
+			Metadata: executionRoutingMetadata(in, map[string]any{
 				"taskId":         task.ID,
 				"runtimePhase":   "completed",
 				"trace":          response.Trace,
@@ -3145,7 +3144,7 @@ func (s *TaskService) Run(
 				"scorecard":      response.Scorecard,
 				"agentFeedback":  response.AgentFeedback,
 				"citations":      normalizeRuntimeCitations(response.Citations),
-			},
+			}),
 		}
 	}
 
@@ -3628,7 +3627,7 @@ func (s *TaskService) Resume(
 		pid := projectRuntimeContext.ProjectID
 		runCostProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(

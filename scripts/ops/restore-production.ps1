@@ -24,7 +24,7 @@ foreach ($file in @("mysql.sql", "manifest.json") + @($archives.Values)) {
     if (-not (Test-Path (Join-Path $BackupDir $file))) { throw "backup file missing: $file" }
 }
 $manifest = Get-Content (Join-Path $BackupDir "manifest.json") -Raw | ConvertFrom-Json
-if ($manifest.format -ne "agentmesh-p10-backup-v1") { throw "unsupported backup format: $($manifest.format)" }
+if ($manifest.format -ne "agentmesh-production-backup-v1") { throw "unsupported backup format: $($manifest.format)" }
 foreach ($entry in $manifest.files) {
     $path = Join-Path $BackupDir $entry.name
     if (-not (Test-Path $path)) { throw "manifest file missing: $($entry.name)" }

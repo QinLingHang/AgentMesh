@@ -14,7 +14,7 @@ const loopback = "127.0.0.1";
 const webRoot = path.resolve(import.meta.dirname, "..");
 const projectRoot = path.resolve(webRoot, "..");
 const backendRoot = path.join(projectRoot, "backend-go");
-const memberDisplayName = "P12 Browser Member";
+const memberDisplayName = "Browser Test Member";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -49,7 +49,7 @@ async function freePort() {
 }
 
 function browserCandidates() {
-  const env = process.env.P12_BROWSER_BIN || process.env.P11_BROWSER_BIN;
+  const env = process.env.BROWSER_E2E_BIN || process.env.BROWSER_E2E_BIN;
   const candidates = env ? [env] : [];
   if (process.platform === "win32") {
     candidates.push(
@@ -68,7 +68,7 @@ function resolveBrowser() {
   for (const candidate of browserCandidates()) {
     if (candidate && fs.existsSync(candidate)) return candidate;
   }
-  throw new Error("No Chrome/Chromium/Edge binary found. Set P12_BROWSER_BIN explicitly.");
+  throw new Error("No Chrome/Chromium/Edge binary found. Set BROWSER_E2E_BIN explicitly.");
 }
 
 async function waitForUrl(url, timeoutMs = 30000) {
@@ -148,21 +148,206 @@ async function stopChild(child) {
   }
 }
 
-async function stopOwnedLoopbackListener(port, processLog) {
-  if (process.platform !== "win32") return;
-  const serverPids = [...String(processLog ?? "").matchAll(/Started server process \[(\d+)\]/g)];
-  const serverPid = Number(serverPids.at(-1)?.[1] ?? 0);
-  if (serverPid > 0) {
-    await spawnCollected("taskkill", ["/PID", String(serverPid), "/T", "/F"], { windowsHide: true }, 10000).catch(() => {});
-  }
-  const script = [
-    `$listener = Get-NetTCPConnection -LocalAddress '${loopback}' -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue`,
-    `if ($listener) { $listener | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force } }`,
+function desktopServerPids(processLog) {
+  return [...String(processLog ?? "").matchAll(/Started server process \[(\d+)\]/g)]
+    .map((match) => Number(match[1]))
+    .filter((pid) => Number.isInteger(pid) && pid > 0);
+}
+
+function normalizeListenerIdentity(raw) {
+  const pid = Number(raw?.pid ?? 0);
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return {
+    pid,
+    startedAt: String(raw?.startedAt ?? "").trim(),
+    imagePath: String(raw?.imagePath ?? "").trim(),
+    localAddress: String(raw?.localAddress ?? "").trim(),
+  };
+}
+
+function listenerIdentityMatches(owned, current) {
+  if (!owned || !current || owned.pid !== current.pid) return false;
+  // PID reuse must not turn an unrelated process into a QA-owned process.
+  // Compare stable process metadata whenever both snapshots could read it.
+  if (owned.startedAt && current.startedAt && owned.startedAt !== current.startedAt) return false;
+  if (owned.imagePath && current.imagePath
+      && owned.imagePath.toLowerCase() !== current.imagePath.toLowerCase()) return false;
+  return true;
+}
+
+async function queryWindowsLoopbackListenerIdentities(port) {
+  if (process.platform !== "win32") return { identities: [], source: "non-windows", errors: [] };
+  const errors = [];
+  const psScript = [
+    `$items = @(Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | ForEach-Object {`,
+    `  $pidValue = [int]$_.OwningProcess`,
+    `  $proc = Get-Process -Id $pidValue -ErrorAction SilentlyContinue`,
+    `  $started = ''`,
+    `  $image = ''`,
+    `  if ($proc) {`,
+    `    try { $started = $proc.StartTime.ToUniversalTime().ToString('o') } catch {}`,
+    `    try { $image = $proc.Path } catch {}`,
+    `  }`,
+    `  [PSCustomObject]@{ pid = $pidValue; startedAt = $started; imagePath = $image; localAddress = [string]$_.LocalAddress }`,
+    `})`,
+    `$items | ConvertTo-Json -Compress`,
   ].join("; ");
-  // Stop-Process can make the helper itself observe a non-zero native status
-  // after the listener has already disappeared. Port closure below is the
-  // authoritative assertion, so tolerate only that helper exit code here.
-  await spawnCollected("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true }, 10000).catch(() => {});
+  try {
+    const { stdout } = await spawnCollected(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", psScript],
+      { windowsHide: true },
+      4000,
+    );
+    const raw = stdout.trim();
+    if (raw) {
+      const decoded = JSON.parse(raw);
+      const identities = (Array.isArray(decoded) ? decoded : [decoded])
+        .map(normalizeListenerIdentity)
+        .filter(Boolean)
+        .filter((item) => [loopback, "0.0.0.0", `::ffff:${loopback}`].includes(item.localAddress));
+      if (identities.length > 0) return { identities, source: "Get-NetTCPConnection", errors };
+    }
+  } catch (error) {
+    errors.push(`Get-NetTCPConnection: ${error?.message ?? error}`);
+  }
+
+  // A few Windows images intermittently expose the TCP table before the
+  // NetTCPConnection cmdlet sees the row. netstat is a read-only fallback;
+  // it is never used to infer ownership beyond the PID captured at startup.
+  try {
+    const { stdout } = await spawnCollected("netstat.exe", ["-ano", "-p", "tcp"], { windowsHide: true }, 4000);
+    const identities = [];
+    const seen = new Set();
+    for (const line of stdout.split(/\r?\n/)) {
+      const columns = line.trim().split(/\s+/);
+      if (columns.length < 5 || columns[0].toUpperCase() !== "TCP") continue;
+      const localEndpoint = columns[1] ?? "";
+      const localMatch = localEndpoint.match(/:(\d+)$/);
+      const remoteMatch = columns[2]?.match(/:(\d+)$/);
+      const pid = Number(columns.at(-1));
+      const localHost = localEndpoint.slice(0, Math.max(0, localEndpoint.length - String(localMatch?.[0] ?? "").length));
+      if (![loopback, "0.0.0.0", `[::ffff:${loopback}]`].includes(localHost)) continue;
+      if (Number(localMatch?.[1] ?? -1) !== Number(port)) continue;
+      if (Number(remoteMatch?.[1] ?? -1) !== 0) continue;
+      if (!Number.isInteger(pid) || pid <= 0 || seen.has(pid)) continue;
+      seen.add(pid);
+      identities.push({ pid, startedAt: "", imagePath: "", localAddress: "" });
+    }
+    if (identities.length > 0) return { identities, source: "netstat", errors };
+  } catch (error) {
+    errors.push(`netstat: ${error?.message ?? error}`);
+  }
+  return { identities: [], source: "none", errors };
+}
+
+async function captureDesktopBridgeOwnership(child, port, processLog, timeoutMs = 5000) {
+  const launcherPid = Number(child?.pid ?? 0);
+  const readProcessLog = typeof processLog === "function" ? processLog : () => processLog;
+  if (process.platform !== "win32") {
+    return {
+      launcherPid,
+      listenerIdentities: [],
+      serverPids: desktopServerPids(readProcessLog()),
+    };
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let lastSnapshot = { identities: [], source: "none", errors: [] };
+  let lastDeclaredPids = [];
+  while (Date.now() < deadline) {
+    lastSnapshot = await queryWindowsLoopbackListenerIdentities(port);
+    const serverPids = desktopServerPids(readProcessLog());
+    lastDeclaredPids = [...new Set([launcherPid, ...serverPids].filter((pid) => pid > 0))];
+    if (lastSnapshot.identities.length > 0) {
+      const unexpected = lastSnapshot.identities.filter((item) => !lastDeclaredPids.includes(item.pid));
+      if (unexpected.length === 0) {
+        return {
+          launcherPid,
+          listenerIdentities: lastSnapshot.identities,
+          serverPids,
+        };
+      }
+    }
+    if (!(await loopbackPortAccepting(port))) {
+      throw new Error(`Desktop Bridge listener on QA port ${port} disappeared before ownership could be captured`);
+    }
+    await sleep(100);
+  }
+  throw new Error(
+    `Desktop Bridge listener ownership could not be proven for QA port ${port}; `
+    + `declared=${lastDeclaredPids.join(",") || "none"}; `
+    + `listener=${lastSnapshot.identities.map((item) => item.pid).join(",") || "unresolved"}; `
+    + `refusing unsafe shutdown${lastSnapshot.errors.length ? ` (${lastSnapshot.errors.join(" | ")})` : ""}`,
+  );
+}
+
+async function killOwnedWindowsProcessTree(pid, diagnostics) {
+  const attemptMarker = `owned-listener termination attempted PID ${pid}`;
+  if (diagnostics.includes(attemptMarker)) return false;
+  diagnostics.push(attemptMarker);
+
+  // The listener PID has already been checked against the startup ownership
+  // snapshot by stopOwnedLoopbackListener(). Kill that exact process only.
+  // Do not use /T here: traversing a Windows process tree can be denied even
+  // when the QA process is allowed to terminate the exact child it spawned.
+  try {
+    await spawnCollected("taskkill", ["/PID", String(pid), "/F"], { windowsHide: true }, 5000);
+    return true;
+  } catch (error) {
+    diagnostics.push(`taskkill exact PID ${pid}: ${error?.message ?? error}`);
+  }
+
+  // Some Windows environments deny taskkill.exe while allowing the same
+  // owner process to be terminated through PowerShell/.NET. This remains safe
+  // because pid was matched against the captured listener identity above.
+  try {
+    await spawnCollected(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Stop-Process -Id ${pid} -Force -ErrorAction Stop`,
+      ],
+      { windowsHide: true },
+      5000,
+    );
+    return true;
+  } catch (error) {
+    diagnostics.push(`Stop-Process exact PID ${pid}: ${error?.message ?? error}`);
+    return false;
+  }
+}
+
+async function stopOwnedLoopbackListener(port, processLog, ownership, diagnostics = []) {
+  if (process.platform !== "win32") return;
+  const snapshot = await queryWindowsLoopbackListenerIdentities(port);
+  diagnostics.push(...snapshot.errors);
+  if (snapshot.identities.length === 0) return;
+
+  const captured = Array.isArray(ownership?.listenerIdentities) ? ownership.listenerIdentities : [];
+  if (captured.length === 0) {
+    const loggedServerPids = desktopServerPids(processLog);
+    throw new Error(
+      `Desktop Bridge QA port ${port} is still listening, but startup listener ownership was not captured; `
+      + `logged server PID(s)=${loggedServerPids.join(",") || "none"}; refusing to terminate an unverified PID`,
+    );
+  }
+
+  const foreign = snapshot.identities.filter(
+    (current) => !captured.some((owned) => listenerIdentityMatches(owned, current)),
+  );
+  if (foreign.length > 0) {
+    throw new Error(
+      `Desktop Bridge QA port ${port} is now owned by foreign listener PID(s) ${foreign.map((item) => item.pid).join(",")}; `
+      + `captured QA PID(s) ${captured.map((item) => item.pid).join(",")}. Refusing to kill an unowned process`,
+    );
+  }
+
+  for (const current of snapshot.identities) {
+    await killOwnedWindowsProcessTree(current.pid, diagnostics);
+  }
 }
 
 // A Python uvicorn launcher can exit while its server child remains alive on
@@ -184,21 +369,67 @@ async function loopbackPortAccepting(port) {
 }
 
 async function stopDesktopBridge(child, port, processLog) {
-  await stopChild(child);
-  // On Windows uvicorn may leave a spawned server process behind after the
-  // Python launcher exits. Re-resolve the current listening PID on every pass
-  // instead of assuming one taskkill is immediately observable. The port—not
-  // the launcher handle—is the authoritative ownership/availability signal.
-  const deadline = Date.now() + 30000;
-  let attempts = 0;
-  while (Date.now() < deadline) {
-    attempts += 1;
-    await stopOwnedLoopbackListener(port, processLog);
+  const diagnostics = [];
+  const ownership = child?.__agentmeshQaDesktopOwnership ?? null;
+
+  try {
+    if (process.platform === "win32") {
+      // First use the ChildProcess handle that this QA run itself owns. This
+      // avoids taskkill /T permission failures and cannot target an unrelated
+      // process because the handle came directly from spawn().
+      if (child && child.exitCode === null && child.signalCode === null) {
+        try {
+          const signalSent = child.kill("SIGTERM");
+          diagnostics.push(`launcher child.kill(SIGTERM) sent=${signalSent}`);
+        } catch (error) {
+          diagnostics.push(`launcher child.kill(SIGTERM): ${error?.message ?? error}`);
+        }
+        await waitForChildExit(child, 2500);
+      }
+    } else {
+      try {
+        await stopChild(child);
+      } catch (error) {
+        diagnostics.push(`launcher cleanup: ${error?.message ?? error}`);
+      }
+    }
+
     if (!(await loopbackPortAccepting(port))) return;
-    await sleep(Math.min(750, 150 + attempts * 50));
+
+    // On Windows uvicorn may leave a spawned server process behind after the
+    // Python launcher exits. Re-resolve the current listening PID on every pass,
+    // but terminate it only when it matches the listener identity captured after
+    // this run's real Desktop preflight. The port—not the launcher handle—is the
+    // authoritative ownership/availability signal.
+    const deadline = Date.now() + 15000;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts += 1;
+      await stopOwnedLoopbackListener(port, processLog, ownership, diagnostics);
+      if (!(await loopbackPortAccepting(port))) return;
+      await sleep(Math.min(600, 100 + attempts * 50));
+    }
+
+    const finalSnapshot = process.platform === "win32"
+      ? await queryWindowsLoopbackListenerIdentities(port)
+      : { identities: [], errors: [] };
+    diagnostics.push(...(finalSnapshot.errors ?? []));
+    assert.equal(
+      await loopbackPortAccepting(port),
+      false,
+      `Desktop Bridge still listening on its owned QA port ${port} after repeated owned-listener shutdown; `
+        + `launcher=${ownership?.launcherPid ?? "unknown"}; `
+        + `server=${(ownership?.serverPids ?? []).join(",") || "none"}; `
+        + `captured=${(ownership?.listenerIdentities ?? []).map((item) => item.pid).join(",") || "none"}; `
+        + `current=${(finalSnapshot.identities ?? []).map((item) => item.pid).join(",") || "unresolved"}; `
+        + `diagnostics=${diagnostics.join(" | ") || "none"}`,
+    );
+  } finally {
+    child?.stdout?.destroy();
+    child?.stderr?.destroy();
+    child?.stdin?.destroy();
+    child?.unref?.();
   }
-  assert.equal(await loopbackPortAccepting(port), false,
-    `Desktop Bridge still listening on its owned QA port ${port} after repeated owned-listener shutdown`);
 }
 
 async function closeBrowser(child, cdp) {
@@ -253,7 +484,7 @@ function spawnCollected(command, args, options = {}, timeoutMs = 30000) {
 }
 
 async function runFixture(action, args = [], extraEnv = {}) {
-  const { stdout } = await spawnCollected("go", ["run", "./cmd/p12-e2e-fixture", action, ...args], {
+  const { stdout } = await spawnCollected("go", ["run", "./cmd/browser-e2e-fixture", action, ...args], {
     cwd: backendRoot,
     env: { ...process.env, ...extraEnv },
   });
@@ -261,8 +492,8 @@ async function runFixture(action, args = [], extraEnv = {}) {
   return JSON.parse(lines.at(-1));
 }
 
-async function runP20MemoryFixture(action, args = []) {
-  const { stdout } = await spawnCollected("go", ["run", "./cmd/p20-memory-e2e-fixture", action, ...args], {
+async function runConversationMemoryFixture(action, args = []) {
+  const { stdout } = await spawnCollected("go", ["run", "./cmd/conversation-memory-e2e-fixture", action, ...args], {
     cwd: backendRoot,
     env: process.env,
   }, 45000);
@@ -274,8 +505,8 @@ async function inspectRuntimeMemory(runtimePython, runtimeRoot, redisUrl, memory
   const script = [
     'import json, os',
     'import redis',
-    'client = redis.Redis.from_url(os.environ["P20_REDIS_URL"], decode_responses=False)',
-    'prefix = os.environ["P20_MEMORY_PREFIX"]',
+    'client = redis.Redis.from_url(os.environ["CONVERSATION_MEMORY_REDIS_URL"], decode_responses=False)',
+    'prefix = os.environ["CONVERSATION_MEMORY_PREFIX"]',
     'items = []',
     'for key in client.scan_iter(match=(prefix + ":*").encode("utf-8")):',
     '    kind = client.type(key).decode("utf-8")',
@@ -285,7 +516,7 @@ async function inspectRuntimeMemory(runtimePython, runtimeRoot, redisUrl, memory
   ].join('\n');
   const { stdout } = await spawnCollected(runtimePython, ['-c', script], {
     cwd: runtimeRoot,
-    env: { ...process.env, P20_REDIS_URL: redisUrl, P20_MEMORY_PREFIX: memoryPrefix },
+    env: { ...process.env, CONVERSATION_MEMORY_REDIS_URL: redisUrl, CONVERSATION_MEMORY_PREFIX: memoryPrefix },
   }, 15000);
   return JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1));
 }
@@ -747,8 +978,8 @@ async function uploadConversationAttachment(baseUrl, accessToken, conversationId
   return await apiRequest(baseUrl, accessToken, "POST", `/api/conversations/${conversationId}/attachments`, form);
 }
 
-async function browserSubmitP23(cdp, accessToken, conversationId, prompt, attachmentIds = [], options = {}) {
-  const clientRequestId = options.clientRequestId || `p23-browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+async function browserSubmitExecutionRoute(cdp, accessToken, conversationId, prompt, attachmentIds = [], options = {}) {
+  const clientRequestId = options.clientRequestId || `routing-browser-${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const constraints = options.constraints || { maxLatencyMs: 8000, maxCost: 0.15, minQuality: 0.8, retryOnWorkerLoss: false };
   return await cdp.evaluate(`(async () => {
     const response = await fetch('/api/tasks/submit-stream', {
@@ -824,6 +1055,32 @@ async function waitForConversationHistoryReady(cdp, id, timeoutMs = 20000) {
   );
 }
 
+async function waitForRecentConversationMessagePersistence(baseUrl, accessToken, conversationId, role, marker, timeoutMs = 60000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastMessages = [];
+
+  while (Date.now() < deadline) {
+    const page = await apiRequest(
+      baseUrl,
+      accessToken,
+      "GET",
+      `/api/conversations/${Number(conversationId)}/messages/page?limit=100`,
+    );
+    lastMessages = Array.isArray(page?.items) ? page.items : [];
+    const persisted = lastMessages.find(
+      (message) => String(message?.role ?? "") === role
+        && String(message?.content ?? "").includes(marker),
+    );
+    if (persisted) return persisted;
+    await sleep(100);
+  }
+
+  throw new Error(
+    `conversation ${conversationId} durable ${role} message ${marker} did not persist within ${timeoutMs}ms; `
+      + `lastMessageCount=${lastMessages.length}`,
+  );
+}
+
 async function createConversationThroughBrowser(cdp) {
   const before = await currentConversationId(cdp);
   await waitFor(
@@ -876,12 +1133,185 @@ async function assertConversationAtBottom(cdp, label, timeoutMs = 5000) {
   throw new Error(`${label} did not land at the latest-message bottom: ${JSON.stringify(last)}`);
 }
 
+async function waitForConcreteOlderHistoryAnchorSettlement(
+  cdp,
+  anchorId,
+  targetTop,
+  {
+    tolerancePx = 16,
+    stableFramesRequired = 3,
+    stableTopDeltaPx = 1,
+    quietMsRequired = 600,
+    maxFrames = 150,
+    maxWallMs = 10000,
+  } = {},
+) {
+  return await cdp.evaluate(`(() => new Promise((resolve) => {
+    const anchorId=${q(anchorId)};
+    const targetTop=${Number(targetTop)};
+    const tolerancePx=${Number(tolerancePx)};
+    const stableFramesRequired=${Number(stableFramesRequired)};
+    const stableTopDeltaPx=${Number(stableTopDeltaPx)};
+    const quietMsRequired=${Number(quietMsRequired)};
+    const maxFrames=${Number(maxFrames)};
+    const maxWallMs=${Number(maxWallMs)};
+    const started=performance.now();
+    let frames=0;
+    let stableFrames=0;
+    let previousTop=null;
+    let previousSnapshot=null;
+    let lastGeometryChangeAt=started;
+    let missingFrames=0;
+    let finished=false;
+    let lastSnapshot=null;
+    const samples=[];
+
+    const snapshot=() => {
+      const node=document.querySelector('[data-testid="workspace-message-scroll"]');
+      const selector='[data-message-id="' + CSS.escape(String(anchorId)) + '"]';
+      const anchor=document.querySelector(selector);
+      const top=anchor?.getBoundingClientRect().top ?? null;
+      const displacement=Number.isFinite(top) ? Math.abs(top-targetTop) : null;
+      const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
+        .map((item)=>Number(item.getAttribute('data-message-id')||0));
+      const historyButton=document.querySelector('[data-testid="message-history-load-earlier"] button');
+      return {
+        top,
+        displacement,
+        scrollTop: node?.scrollTop ?? null,
+        scrollHeight: node?.scrollHeight ?? null,
+        clientHeight: node?.clientHeight ?? null,
+        count: ids.length,
+        firstIds: ids.slice(0,5),
+        lastIds: ids.slice(-5),
+        historyLoading: Boolean(historyButton?.disabled),
+      };
+    };
+
+    let wallTimer=null;
+    const finish=(settled, reason, last) => {
+      if (finished) return;
+      finished=true;
+      if (wallTimer != null) clearTimeout(wallTimer);
+      resolve({
+        settled,
+        reason,
+        frames,
+        stableFrames,
+        missingFrames,
+        elapsedMs: Math.round((performance.now()-started)*100)/100,
+        targetTop,
+        tolerancePx,
+        stableFramesRequired,
+        stableTopDeltaPx,
+        quietMsRequired,
+        quietForMs: Math.round((performance.now()-lastGeometryChangeAt)*100)/100,
+        maxFrames,
+        maxWallMs,
+        last,
+        samples,
+      });
+    };
+
+    const tick=() => {
+      if (finished) return;
+      frames += 1;
+      const current=snapshot();
+      lastSnapshot=current;
+      const geometryChanged = previousSnapshot == null ||
+        !Number.isFinite(current.top) ||
+        !Number.isFinite(previousSnapshot.top) ||
+        Math.abs(current.top-previousSnapshot.top) > stableTopDeltaPx ||
+        Math.abs((current.scrollTop ?? 0)-(previousSnapshot.scrollTop ?? 0)) > 1 ||
+        Math.abs((current.scrollHeight ?? 0)-(previousSnapshot.scrollHeight ?? 0)) > 1 ||
+        Math.abs((current.clientHeight ?? 0)-(previousSnapshot.clientHeight ?? 0)) > 1 ||
+        current.count !== previousSnapshot.count ||
+        current.firstIds.join(',') !== previousSnapshot.firstIds.join(',') ||
+        current.lastIds.join(',') !== previousSnapshot.lastIds.join(',') ||
+        current.historyLoading !== previousSnapshot.historyLoading;
+
+      if (geometryChanged) lastGeometryChangeAt=performance.now();
+
+      if (!Number.isFinite(current.top) || current.historyLoading) {
+        if (!Number.isFinite(current.top)) missingFrames += 1;
+        stableFrames = 0;
+      } else {
+        const stableTop = previousTop == null || Math.abs(current.top-previousTop) <= stableTopDeltaPx;
+        if (current.displacement <= tolerancePx && stableTop) stableFrames += 1;
+        else stableFrames = 0;
+        previousTop = current.top;
+      }
+      previousSnapshot=current;
+
+      const quietFor=performance.now()-lastGeometryChangeAt;
+      samples.push({
+        frame: frames,
+        top: current.top,
+        displacement: current.displacement,
+        scrollTop: current.scrollTop,
+        scrollHeight: current.scrollHeight,
+        clientHeight: current.clientHeight,
+        historyLoading: current.historyLoading,
+        quietForMs: Math.round(quietFor*100)/100,
+      });
+      if (samples.length > 12) samples.shift();
+
+      if (stableFrames >= stableFramesRequired && quietFor >= quietMsRequired && !current.historyLoading) {
+        finish(true, 'stable-concrete-anchor-after-quiet-window', current);
+        return;
+      }
+      if (frames >= maxFrames) {
+        finish(false, 'frame-budget-exhausted', current);
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+
+    wallTimer=setTimeout(() => {
+      const current=lastSnapshot ?? snapshot();
+      finish(false, 'wall-clock-budget-exhausted', current);
+    }, maxWallMs);
+    requestAnimationFrame(tick);
+  }))()`);
+}
+
 async function loadOneOlderPagePreservingViewport(cdp) {
-  const before = await cdp.evaluate(`(() => {
+  const before = await cdp.evaluate(`(async () => {
     const node=document.querySelector('[data-testid="workspace-message-scroll"]');
     const button=document.querySelector('[data-testid="message-history-load-earlier"] button');
     if(!node||!button)return null;
+
+    // This setup represents a reader intentionally leaving newest-message
+    // auto-follow before requesting older history. A bare scrollTop = 0
+    // is not equivalent to real user scrolling because it does not fire the
+    // Workspace wheel/pointer intent handler that cancels pending bottom-settle
+    // animation frames. Dispatch reader intent first, then move to the top.
+    node.dispatchEvent(
+      new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -1200,
+      }),
+    );
     node.scrollTop=0;
+    node.dispatchEvent(new Event('scroll', { bubbles: true }));
+
+    // Prove that the old conversation-open auto-follow transaction really
+    // yielded before capturing the anchor used by this test. This is a setup
+    // invariant, not an anchor acceptance relaxation.
+    await new Promise((resolve) => {
+      let frames=0;
+      const tick=() => {
+        frames += 1;
+        if(frames >= 4) {
+          resolve();
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
     const anchor=document.querySelector('[data-testid="message-user"][data-message-id], [data-testid="message-assistant"][data-message-id]');
     const ids=[...document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]')]
       .map((item)=>Number(item.getAttribute('data-message-id')||0));
@@ -894,37 +1324,34 @@ async function loadOneOlderPagePreservingViewport(cdp) {
       anchorTop: anchor?.getBoundingClientRect().top ?? null,
     };
   })()`);
-  assert.ok(before, "P20 older-history viewport fixture was unavailable");
-  assert.ok(before.anchorId && Number.isFinite(before.anchorTop), "P20 visible message anchor was unavailable");
+  assert.ok(before, "Conversation Reliability older-history viewport fixture was unavailable");
+  assert.ok(before.anchorId && Number.isFinite(before.anchorTop), "Conversation Reliability visible message anchor was unavailable");
+  assert.ok(
+    before.scrollTop <= 1,
+    `Conversation Reliability reader intent did not hold the top viewport before older-history load: ${JSON.stringify(before)}`,
+  );
 
   assert.equal(
     await cdp.evaluate(`(() => { const button=document.querySelector('[data-testid="message-history-load-earlier"] button'); if(!button||button.disabled)return false; button.click(); return true; })()`),
     true,
-    "P20 older-history button was not clickable",
+    "Conversation Reliability older-history button was not clickable",
   );
 
   await waitFor(
     cdp,
     `document.querySelectorAll('[data-testid="message-user"], [data-testid="message-assistant"]').length > ${before.count}`,
-    "P20 first older-history page",
+    "Conversation Reliability first older-history page",
     10000,
   );
 
-  // Production intentionally settles prepend anchoring across several layout
-  // frames (ResizeObserver + rAF). Under CPU pressure it now keeps a bounded
-  // 2s/120-frame recovery window so a wall-clock timeout cannot fire before
-  // enough layout frames exist to prove stability. Keep the exact displacement
-  // requirement and wait beyond that production bound for the invariant itself.
-  await waitFor(
+  // Observe the same durable element on real animation frames. This does not
+  // correct scroll position or relax the <=16px gate. It only avoids treating
+  // a slow frame schedule as a generic wall-clock timeout and records enough
+  // geometry to distinguish a real displacement from a QA timing failure.
+  const settlement = await waitForConcreteOlderHistoryAnchorSettlement(
     cdp,
-    `(() => {
-      const anchor=document.querySelector('[data-message-id="${before.anchorId}"]');
-      if(!anchor)return false;
-      const top=anchor.getBoundingClientRect().top;
-      return Number.isFinite(top) && Math.abs(top - ${Number(before.anchorTop)}) <= 16;
-    })()`,
-    "P20 concrete older-history anchor settlement",
-    5000,
+    before.anchorId,
+    before.anchorTop,
   );
 
   const after = await cdp.evaluate(`(() => {
@@ -941,7 +1368,7 @@ async function loadOneOlderPagePreservingViewport(cdp) {
     } : null;
   })()`);
 
-  assert.ok(after, "P20 older-history scroll container disappeared");
+  assert.ok(after, "Conversation Reliability older-history scroll container disappeared");
 
   const expectedTop =
     before.scrollTop +
@@ -990,13 +1417,18 @@ async function loadOneOlderPagePreservingViewport(cdp) {
       hasConcreteAnchor
         ? "concrete-element"
         : "height-fallback",
+    settlement,
   };
 
   console.log(
-    `[P20] older-history anchor ${JSON.stringify(diagnostics)}`,
+    `[Conversation Reliability] older-history anchor ${JSON.stringify(diagnostics)}`,
   );
 
   if (hasConcreteAnchor) {
+    assert.ok(
+      settlement.settled,
+      `Conversation Reliability concrete older-history anchor did not become stably settled: ${JSON.stringify(diagnostics)}`,
+    );
     assert.ok(
       anchorDisplacement <= 16,
       `loading older history displaced the visible message anchor: ${JSON.stringify(diagnostics)}`,
@@ -1031,7 +1463,7 @@ async function durableMessageSnapshot(cdp) {
   })()`);
 }
 
-function p20HistoryEvidence(label, snapshot, firstMarker, lastMarker) {
+function conversationReliabilityHistoryEvidence(label, snapshot, firstMarker, lastMarker) {
   const evidence = {
     count: snapshot.count,
     firstIds: snapshot.ids.slice(0, 5),
@@ -1039,7 +1471,7 @@ function p20HistoryEvidence(label, snapshot, firstMarker, lastMarker) {
     firstMarker: snapshot.texts.some((value) => value.includes(firstMarker)),
     lastMarker: snapshot.texts.some((value) => value.includes(lastMarker)),
   };
-  console.log(`[P20] ${label} ${JSON.stringify(evidence)}`);
+  console.log(`[Conversation Reliability] ${label} ${JSON.stringify(evidence)}`);
   return evidence;
 }
 
@@ -1161,10 +1593,10 @@ function modelFixtureReply(body, desktopRoot) {
   if (all.includes("Compress an OLD range of one conversation into a durable memory capsule.")) {
     return {
       content: JSON.stringify({
-        summary: "P20 durable conversation history was compacted into a bounded memory capsule.",
+        summary: "Conversation Reliability durable conversation history was compacted into a bounded memory capsule.",
         facts: ["Raw conversation history remains authoritative in MySQL."],
         decisions: ["Redis is only bounded working memory."],
-        open_tasks: ["Continue P20 reliability validation."],
+        open_tasks: ["Continue Conversation Reliability reliability validation."],
         entities: ["AgentMesh", "Redis", "MySQL"],
         keywords: ["conversation", "memory", "durability"],
         importance: 0.92,
@@ -1232,10 +1664,10 @@ function modelFixtureReply(body, desktopRoot) {
     return { content: desktopMarker ? `授权测试目录包含文件 ${desktopMarker}。` : "已完成本机只读目录查看。" };
   }
 
-  const delayed = user.match(/FIX4_DELAY_[A-Z0-9_\-]+/i)?.[0];
-  if (delayed) return { content: `FIX4_DELAY_REPLY_${delayed}` };
-  const marker = user.match(/FIX4_[AB]_[A-Z0-9_\-]+/i)?.[0];
-  if (marker) return { content: `FIX4_REPLY_${marker}` };
+  const delayed = user.match(/DELAYED_CONVERSATION_[A-Z0-9_\-]+/i)?.[0];
+  if (delayed) return { content: `DELAYED_CONVERSATION_REPLY_${delayed}` };
+  const marker = user.match(/CONVERSATION_[AB]_[A-Z0-9_\-]+/i)?.[0];
+  if (marker) return { content: `CONVERSATION_REPLY_${marker}` };
   return { content: "AgentMesh V4.1 deterministic browser fixture response." };
 }
 
@@ -1401,7 +1833,7 @@ function resolvePython(root, envName) {
 }
 
 async function runV41() {
-  if (!process.env.P2_TEST_MYSQL_DSN) throw new Error("P2_TEST_MYSQL_DSN is required for V4.1 real-stack browser acceptance");
+  if (!process.env.QA_TEST_MYSQL_DSN) throw new Error("QA_TEST_MYSQL_DSN is required for V4.1 real-stack browser acceptance");
 
   const runtimeRoot = path.join(projectRoot, "runtime-python");
   const desktopRootProject = path.join(projectRoot, "desktop-bridge");
@@ -1436,7 +1868,7 @@ async function runV41() {
   const denseCollection = process.env.V4_1_E2E_MILVUS_COLLECTION || `agentmesh_v41_e2e_dense_${stamp}`;
   const hybridCollection = process.env.V4_1_E2E_MILVUS_HYBRID_COLLECTION || `agentmesh_v41_e2e_hybrid_${stamp}`;
 
-  // FIX19: the Go fixture already uses an isolated Redis DB (13), but the
+  // Runtime Redis Isolation: the Go fixture already uses an isolated Redis DB (13), but the
   // Python Runtime previously inherited config.py's default DB 0. Fresh QA
   // MySQL databases reuse small user/conversation ids, so a persistent DB 0
   // could make a new (user=2, conversation=5) consume an earlier run's short
@@ -1492,6 +1924,14 @@ async function runV41() {
     if (!desktopProbe.ok) {
       throw new Error(`real Desktop Bridge preflight failed: HTTP ${desktopProbe.status} ${await desktopProbe.text()}`);
     }
+    // Freeze the listener identity only after a real authenticated Bridge call
+    // succeeds. Shutdown may act on this captured identity, never on an
+    // arbitrary process that happens to own the same port later.
+    desktop.__agentmeshQaDesktopOwnership = await captureDesktopBridgeOwnership(
+      desktop,
+      desktopPort,
+      () => desktopLog,
+    );
 
     runtimePython = resolvePython(runtimeRoot, "V4_1_E2E_RUNTIME_PYTHON");
     // Validate connectivity and clear only this run's namespace. The prefix is
@@ -1536,25 +1976,25 @@ async function runV41() {
         ...process.env,
         BUSINESS_PORT: String(backendPort),
         MYSQL_HOST: fixture.host, MYSQL_PORT: fixture.port, MYSQL_DATABASE: fixture.database, MYSQL_USER: fixture.user, MYSQL_PASSWORD: fixture.password,
-        REDIS_ADDR: process.env.V4_1_E2E_REDIS_ADDR || process.env.P12_E2E_REDIS_ADDR || "127.0.0.1:6382",
-        REDIS_PASSWORD: process.env.V4_1_E2E_REDIS_PASSWORD || process.env.P12_E2E_REDIS_PASSWORD || "",
+        REDIS_ADDR: process.env.V4_1_E2E_REDIS_ADDR || process.env.BROWSER_E2E_REDIS_ADDR || "127.0.0.1:6382",
+        REDIS_PASSWORD: process.env.V4_1_E2E_REDIS_PASSWORD || process.env.BROWSER_E2E_REDIS_PASSWORD || "",
         REDIS_DB: process.env.V4_1_E2E_REDIS_DB || "13",
         JWT_SECRET: "v4-1-browser-jwt-secret-0123456789abcdef", JWT_ISSUER: "agentmesh-v4-1-browser", JWT_ACCESS_TTL_MINUTES: "30", JWT_REFRESH_TTL_DAYS: "3",
         AUTH_REFRESH_COOKIE_NAME: "refresh_token", AUTH_COOKIE_SECURE: "false",
         RUNTIME_BASE_URL: `http://${loopback}:${runtimePort}`, RUNTIME_INTERNAL_TOKEN: runtimeToken, RUNTIME_TIMEOUT_SECONDS: "60",
         MCP_DEMO_ENDPOINT: "http://127.0.0.1:1/mcp", ALLOWED_ORIGINS: `http://127.0.0.1:${frontPort}`,
         TASK_RATE_LIMIT_PER_MINUTE: "1000",
-        // Keep the canonical OFF regression unchanged; isolated P23 QA may
+        // Keep the canonical OFF regression unchanged; isolated Execution Routing QA may
         // exercise Durable but Case 56 must independently select direct mode.
-        DURABLE_RUNTIME_ENABLED: process.env.V4_1_E2E_P23_REAL_STACK_ONLY === "true" ? "true" : "false",
+        DURABLE_RUNTIME_ENABLED: process.env.V4_1_E2E_ROUTING_REAL_STACK_ONLY === "true" ? "true" : "false",
         GOVERNANCE_MASTER_KEY: "v4-1-browser-governance-key-0123456789",
-        P23_DECISION_MODE: process.env.V4_1_E2E_P23_MODE || process.env.P23_DECISION_MODE || "OFF",
+        EXECUTION_ROUTING_MODE: process.env.V4_1_E2E_ROUTING_MODE || process.env.EXECUTION_ROUTING_MODE || "OFF",
         VERIFICATION_PEPPER: "v4-1-browser-verification-pepper-123", VERIFICATION_COOLDOWN_SECONDS: "1", EMAIL_PROVIDER: "console", KNOWLEDGE_STORAGE_ROOT: knowledgeRoot,
       };
-    const spawnGoServer = (mode = goEnv.P23_DECISION_MODE) => {
+    const spawnGoServer = (mode = goEnv.EXECUTION_ROUTING_MODE) => {
       const child = spawn("go", ["run", "./cmd/server"], {
         cwd: backendRoot,
-        env: { ...goEnv, P23_DECISION_MODE: mode },
+        env: { ...goEnv, EXECUTION_ROUTING_MODE: mode },
         stdio: ["ignore", "pipe", "pipe"],
       });
       child.stdout?.on("data", (chunk) => { serverLog += String(chunk); });
@@ -1593,18 +2033,18 @@ async function runV41() {
     tokenA = await waitForAccessToken(() => latestAccessToken);
     await verifyAndReloadV41ModelService(cdp, fixture, apiBase, tokenA, ownerA.email, ownerA.displayName, modelPort);
 
-    if (process.env.V4_1_E2E_P23_REAL_STACK_ONLY === "true") {
-      assert.equal(process.env.V4_1_E2E_P23_MODE || process.env.P23_DECISION_MODE, "ENABLED", "P23 focused browser gate requires ENABLED on the isolated QA stack");
+    if (process.env.V4_1_E2E_ROUTING_REAL_STACK_ONLY === "true") {
+      assert.equal(process.env.V4_1_E2E_ROUTING_MODE || process.env.EXECUTION_ROUTING_MODE, "ENABLED", "Execution Routing focused browser gate requires ENABLED on the isolated QA stack");
 
       // Case 56: two user-owned request-local text files are submitted once,
-      // routed through P23 FastPath, parsed from real stored bytes by Runtime,
+      // routed through Execution Routing FastPath, parsed from real stored bytes by Runtime,
       // and persisted back into the same conversation without Tool execution.
       const case56Conversation = await createConversationThroughBrowser(cdp);
       const a = await uploadConversationAttachment(apiBase, tokenA, case56Conversation, "policy-a.txt", "Retention is 30 days. Export requires manager approval.");
       const b = await uploadConversationAttachment(apiBase, tokenA, case56Conversation, "policy-b.txt", "Retention is 90 days. Export requires manager approval.");
       const attachmentsBefore = await apiRequest(apiBase, tokenA, "GET", `/api/conversations/${case56Conversation}/attachments`);
       const modelCallsBefore56 = (await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json()).requestCount;
-      const case56 = await browserSubmitP23(
+      const case56 = await browserSubmitExecutionRoute(
         cdp,
         tokenA,
         case56Conversation,
@@ -1664,7 +2104,7 @@ async function runV41() {
       const modelBeforeDeleteSelection = await (await fetch(`http://${loopback}:${modelPort}/control/state`)).json();
       const deletePrompt = "请删除刚才授权测试目录里的那个文件";
       await setValue(cdp, '[data-testid="workspace-composer"]', deletePrompt);
-      await clickSelector(cdp, '[data-testid="workspace-submit"]', "P23 delete submit");
+      await clickSelector(cdp, '[data-testid="workspace-submit"]', "Execution Routing delete submit");
 
       // Prove capability exposure before waiting on the UI. If Approval never
       // appears, the failure now reports the exact post-submit model tool set
@@ -1737,17 +2177,17 @@ async function runV41() {
       assert.ok(afterTasks.some((task) => task.taskText === deletePrompt && task.status === "COMPLETED"), `rejected delete task did not settle on the original task: ${JSON.stringify(newest)}`);
 
       // G12 real restart/rollback: persist a Durable submission under ENABLED,
-      // restart the Go control plane on the same isolated database with P23 OFF,
+      // restart the Go control plane on the same isolated database with Execution Routing OFF,
       // then replay the exact clientRequestId. The existing task must be
       // returned without a second Runtime/model execution or second Task.
       const rollbackConversation = await createConversationThroughBrowser(cdp);
-      const rollbackRequestId = `p23-g12-${stamp}`;
+      const rollbackRequestId = `routing-g12-${stamp}`;
       const rollbackPrompt = "请可靠地执行一次测试任务并保留原任务结果";
       const rollbackBodyOptions = {
         clientRequestId: rollbackRequestId,
         constraints: { maxLatencyMs: 30000, maxCost: 0.15, minQuality: 0.8, retryOnWorkerLoss: true },
       };
-      const rollbackFirst = await browserSubmitP23(cdp, tokenA, rollbackConversation, rollbackPrompt, [], rollbackBodyOptions);
+      const rollbackFirst = await browserSubmitExecutionRoute(cdp, tokenA, rollbackConversation, rollbackPrompt, [], rollbackBodyOptions);
       assert.equal(rollbackFirst.ok, true, `G12 initial durable submit failed: ${JSON.stringify(rollbackFirst)}`);
       const rollbackRoute = rollbackFirst.events.find((event) => event.type === "route");
       assert.equal(rollbackRoute?.mode, "durable", `G12 setup was not Durable: ${JSON.stringify(rollbackRoute)}`);
@@ -1764,7 +2204,7 @@ async function runV41() {
       goServer = spawnGoServer("OFF");
       await waitForUrl(`http://${loopback}:${backendPort}/health`, 45000);
 
-      const rollbackReplay = await browserSubmitP23(cdp, tokenA, rollbackConversation, rollbackPrompt, [], rollbackBodyOptions);
+      const rollbackReplay = await browserSubmitExecutionRoute(cdp, tokenA, rollbackConversation, rollbackPrompt, [], rollbackBodyOptions);
       assert.equal(rollbackReplay.ok, true, `G12 OFF replay failed: ${JSON.stringify(rollbackReplay)}`);
       const replayRoute = rollbackReplay.events.find((event) => event.type === "route");
       const replayTaskId = rollbackReplay.events.find((event) => event.type === "result")?.result?.task?.id;
@@ -1776,7 +2216,7 @@ async function runV41() {
       assert.equal(modelAfterRestartReplay, modelBeforeRestartReplay, "G12 OFF replay re-executed model/runtime work");
 
       console.log(JSON.stringify({
-        p23RealStack: "PASS",
+        routingRealStack: "PASS",
         case56: { route: route56?.strategy, delivery: route56?.mode, conflict: true, modelCalls: case56ModelCalls, toolCallsObserved: false, attachmentsUnchanged: true },
         case72: { rejected: true, newTaskForRejection: false, filePreserved: true },
         case82: { readAllowed: true, deleteApprovalRequired: true, sameConversation: governedConversation },
@@ -1847,7 +2287,7 @@ async function runV41() {
       return;
     }
 
-    // P20 light-theme regression: project management controls must stay on the
+    // Conversation Reliability light-theme regression: project management controls must stay on the
     // light surface even if legacy/global form rules still exist elsewhere.
     await openCreateProjectWhenReady(cdp);
     await waitFor(cdp, `document.querySelector('[data-testid="project-name-input"]')`, "create-project name input");
@@ -1861,59 +2301,59 @@ async function runV41() {
     assert.ok(projectControlTheme.textareaBg.length === 3 && projectControlTheme.textareaBg.every((value) => value >= 220), `project description textarea is not a light surface: ${JSON.stringify(projectControlTheme)}`);
     await clickText(cdp, "取消");
 
-    // P20 Conversation Memory Reliability: one real-stack scenario closes the
+    // Conversation Reliability Conversation Memory Reliability: one real-stack scenario closes the
     // durability loop end-to-end while the canonical stack is still alive.
     // It deliberately combines browser pagination, Runtime compaction, bounded
     // Redis working memory, Redis namespace loss, internal-token authorization,
     // cross-user isolation and durable MySQL capsule/history recovery.
-    const p20History = await runP20MemoryFixture("seed-history", [
+    const conversationReliabilityHistory = await runConversationMemoryFixture("seed-history", [
       "--database", fixture.database,
       "--email", ownerA.email,
       "--count", "125",
-      "--marker-prefix", `P20_HISTORY_${stamp}`,
+      "--marker-prefix", `CONVERSATION_HISTORY_${stamp}`,
     ]);
     await cdp.send("Page.reload", { ignoreCache: true });
-    await waitFor(cdp, `document.querySelector('.app-shell')`, "P20 durable-history reload", 20000);
-    await openConversation(cdp, p20History.conversationId);
-    await assertConversationAtBottom(cdp, "P20 durable-history open");
+    await waitFor(cdp, `document.querySelector('.app-shell')`, "Conversation Reliability durable-history reload", 20000);
+    await openConversation(cdp, conversationReliabilityHistory.conversationId);
+    await assertConversationAtBottom(cdp, "Conversation Reliability durable-history open");
     await loadOneOlderPagePreservingViewport(cdp);
     await loadAllConversationHistory(cdp, 125);
-    let p20HistorySnapshot = await durableMessageSnapshot(cdp);
-    const initialHistoryEvidence = p20HistoryEvidence(
+    let conversationReliabilityHistorySnapshot = await durableMessageSnapshot(cdp);
+    const initialHistoryEvidence = conversationReliabilityHistoryEvidence(
       "rendered-history",
-      p20HistorySnapshot,
-      p20History.firstMarker,
-      p20History.lastMarker,
+      conversationReliabilityHistorySnapshot,
+      conversationReliabilityHistory.firstMarker,
+      conversationReliabilityHistory.lastMarker,
     );
     assert.ok(
       initialHistoryEvidence.count >= 125,
-      `browser rendered fewer than 125 durable P20 messages: ${JSON.stringify(initialHistoryEvidence)}`,
+      `browser rendered fewer than 125 durable Conversation Reliability messages: ${JSON.stringify(initialHistoryEvidence)}`,
     );
     assert.ok(
       initialHistoryEvidence.firstMarker,
-      `browser could not reach first durable P20 message: ${JSON.stringify(initialHistoryEvidence)}`,
+      `browser could not reach first durable Conversation Reliability message: ${JSON.stringify(initialHistoryEvidence)}`,
     );
     assert.ok(
       initialHistoryEvidence.lastMarker,
-      `browser could not reach last durable P20 message: ${JSON.stringify(initialHistoryEvidence)}`,
+      `browser could not reach last durable Conversation Reliability message: ${JSON.stringify(initialHistoryEvidence)}`,
     );
 
-    const capsuleRoute = `/internal/v1/users/${p20History.userId}/conversations/${p20History.conversationId}/memory-capsules?limit=20`;
+    const capsuleRoute = `/internal/v1/users/${conversationReliabilityHistory.userId}/conversations/${conversationReliabilityHistory.conversationId}/memory-capsules?limit=20`;
     assert.equal((await internalMemoryRequest(apiBase, "", "GET", capsuleRoute)).response.status, 401, "missing internal token must be rejected");
-    assert.equal((await internalMemoryRequest(apiBase, "wrong-p20-internal-token", "GET", capsuleRoute)).response.status, 401, "wrong internal token must be rejected");
+    assert.equal((await internalMemoryRequest(apiBase, "wrong-conversation-reliability-internal-token", "GET", capsuleRoute)).response.status, 401, "wrong internal token must be rejected");
 
-    const beforeCompactionRefresh = p20HistorySnapshot;
-    const compactionPrompt = `P20_MEMORY_COMPACTION_TRIGGER_${stamp}`;
+    const beforeCompactionRefresh = conversationReliabilityHistorySnapshot;
+    const compactionPrompt = `MEMORY_COMPACTION_TRIGGER_${stamp}`;
     await sendPrompt(cdp, compactionPrompt);
     const afterSameConversationRefresh = await durableMessageSnapshot(cdp);
-    const sameConversationEvidence = p20HistoryEvidence(
+    const sameConversationEvidence = conversationReliabilityHistoryEvidence(
       "same-conversation-refresh",
       afterSameConversationRefresh,
-      p20History.firstMarker,
-      p20History.lastMarker,
+      conversationReliabilityHistory.firstMarker,
+      conversationReliabilityHistory.lastMarker,
     );
     console.log(
-      `[P20] same-conversation-refresh counts ${JSON.stringify({
+      `[Conversation Reliability] same-conversation-refresh counts ${JSON.stringify({
         before: beforeCompactionRefresh.count,
         after: afterSameConversationRefresh.count,
         compactionPromptPresent: afterSameConversationRefresh.texts.some((value) => value.includes(compactionPrompt)),
@@ -1932,14 +2372,14 @@ async function runV41() {
       `same-conversation refresh lost the compaction-trigger prompt: ${JSON.stringify(sameConversationEvidence)}`,
     );
     const capsules = await waitForConversationCapsules(
-      apiBase, runtimeToken, p20History.userId, p20History.conversationId, 30000,
+      apiBase, runtimeToken, conversationReliabilityHistory.userId, conversationReliabilityHistory.conversationId, 30000,
     );
     const capsule = capsules[0];
     assert.ok(Number(capsule?.id) > 0, "Runtime did not persist a real conversation memory capsule");
     console.log(
-      `[P20] memory-capsule ${JSON.stringify({
+      `[Conversation Reliability] memory-capsule ${JSON.stringify({
         capsuleId: Number(capsule.id),
-        conversationId: Number(p20History.conversationId),
+        conversationId: Number(conversationReliabilityHistory.conversationId),
         startMessageId: Number(capsule.startMessageId),
         endMessageId: Number(capsule.endMessageId),
       })}`,
@@ -1947,7 +2387,7 @@ async function runV41() {
 
     const crossUser = await internalMemoryRequest(
       apiBase, runtimeToken, "GET",
-      `/internal/v1/users/${Number(p20History.userId) + 1000000}/conversations/${p20History.conversationId}/memory-capsules?limit=20`,
+      `/internal/v1/users/${Number(conversationReliabilityHistory.userId) + 1000000}/conversations/${conversationReliabilityHistory.conversationId}/memory-capsules?limit=20`,
     );
     assert.equal(crossUser.response.status, 404, "cross-user capsule access must fail closed");
 
@@ -1971,7 +2411,7 @@ async function runV41() {
     for (let index = 0; index < 2; index += 1) {
       const upserted = await internalMemoryRequest(
         apiBase, runtimeToken, "POST",
-        `/internal/v1/users/${p20History.userId}/conversations/${p20History.conversationId}/memory-capsules`,
+        `/internal/v1/users/${conversationReliabilityHistory.userId}/conversations/${conversationReliabilityHistory.conversationId}/memory-capsules`,
         capsuleWrite,
       );
       assert.equal(upserted.response.ok, true, `idempotent capsule upsert ${index + 1} failed: ${JSON.stringify(upserted.payload)}`);
@@ -1982,7 +2422,7 @@ async function runV41() {
 
     const redisBeforeClear = await inspectRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
     console.log(
-      `[P20] redis-working-memory ${JSON.stringify({
+      `[Conversation Reliability] redis-working-memory ${JSON.stringify({
         maxListLength: redisBeforeClear.maxListLength,
         keyCount: redisBeforeClear.items.length,
       })}`,
@@ -1990,19 +2430,19 @@ async function runV41() {
     assert.ok(redisBeforeClear.maxListLength <= 20, `Runtime Redis working list exceeded 20 messages: ${JSON.stringify(redisBeforeClear)}`);
     await cleanupRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
     const redisAfterClear = await inspectRuntimeMemory(runtimePython, runtimeRoot, runtimeRedisUrl, runtimeMemoryPrefix);
-    assert.equal(redisAfterClear.items.length, 0, "isolated P20 Runtime Redis namespace was not cleared");
+    assert.equal(redisAfterClear.items.length, 0, "isolated Conversation Reliability Runtime Redis namespace was not cleared");
 
     await cdp.send("Page.reload", { ignoreCache: true });
-    await waitFor(cdp, `document.querySelector('.app-shell')`, "P20 post-Redis-clear reload", 20000);
-    await openConversation(cdp, p20History.conversationId);
-    await assertConversationAtBottom(cdp, "P20 post-Redis-clear conversation restore");
+    await waitFor(cdp, `document.querySelector('.app-shell')`, "Conversation Reliability post-Redis-clear reload", 20000);
+    await openConversation(cdp, conversationReliabilityHistory.conversationId);
+    await assertConversationAtBottom(cdp, "Conversation Reliability post-Redis-clear conversation restore");
     await loadAllConversationHistory(cdp, 125);
-    p20HistorySnapshot = await durableMessageSnapshot(cdp);
-    const postRedisHistoryEvidence = p20HistoryEvidence(
+    conversationReliabilityHistorySnapshot = await durableMessageSnapshot(cdp);
+    const postRedisHistoryEvidence = conversationReliabilityHistoryEvidence(
       "post-redis-clear-history",
-      p20HistorySnapshot,
-      p20History.firstMarker,
-      p20History.lastMarker,
+      conversationReliabilityHistorySnapshot,
+      conversationReliabilityHistory.firstMarker,
+      conversationReliabilityHistory.lastMarker,
     );
     assert.ok(
       postRedisHistoryEvidence.count >= 125,
@@ -2020,7 +2460,7 @@ async function runV41() {
     assert.equal(capsulesAfterRedisClear.response.ok, true);
     assert.ok(Array.isArray(capsulesAfterRedisClear.data) && capsulesAfterRedisClear.data.length >= 1, "MySQL capsule disappeared after Redis clear");
     console.log(
-      `[P20] redis-loss-recovery ${JSON.stringify({
+      `[Conversation Reliability] redis-loss-recovery ${JSON.stringify({
         recoveredCount: postRedisHistoryEvidence.count,
         firstMarker: postRedisHistoryEvidence.firstMarker,
         lastMarker: postRedisHistoryEvidence.lastMarker,
@@ -2030,15 +2470,15 @@ async function runV41() {
 
     // 1) New-conversation isolation, including late-response ownership.
     const convA = await createConversationThroughBrowser(cdp);
-    const aMarker = `FIX4_A_${stamp}`;
-    await sendPrompt(cdp, aMarker, `FIX4_REPLY_${aMarker}`);
+    const aMarker = `CONVERSATION_A_${stamp}`;
+    await sendPrompt(cdp, aMarker, `CONVERSATION_REPLY_${aMarker}`);
     const draftA = `UNSENT_A_${stamp}`;
     await setValue(cdp, '[data-testid="workspace-composer"]', draftA);
     const convB = await createConversationThroughBrowser(cdp);
     assert.equal(await composerValue(cdp), "", "conversation B must not inherit A draft");
     assert.ok(!(await workspaceText(cdp)).includes(aMarker), "conversation B leaked A message");
 
-    const delayedMarker = `FIX4_DELAY_${stamp}`;
+    const delayedMarker = `DELAYED_CONVERSATION_${stamp}`;
     await setValue(cdp, '[data-testid="workspace-composer"]', delayedMarker);
     // sendPrompt() returns as soon as assistant text is visible, while the prior
     // request can still be inside its final reload/finally path. Workspace
@@ -2078,14 +2518,25 @@ async function runV41() {
     );
     await openConversation(cdp, convA);
     await fetch(`http://${loopback}:${modelPort}/control/release`, { method: "POST" });
+    // Synchronize on the authoritative durable message before asserting UI ownership.
+    // This keeps the test strict (the reply must really persist) while avoiding a
+    // race between model release, Go finalization and the React projection.
+    await waitForRecentConversationMessagePersistence(
+      apiBase,
+      tokenA,
+      convB,
+      "assistant",
+      `DELAYED_CONVERSATION_REPLY_${delayedMarker}`,
+      60000,
+    );
     await sleep(1200);
-    assert.ok(!(await workspaceText(cdp)).includes(`FIX4_DELAY_REPLY_${delayedMarker}`), "late B response overwrote active conversation A");
+    assert.ok(!(await workspaceText(cdp)).includes(`DELAYED_CONVERSATION_REPLY_${delayedMarker}`), "late B response overwrote active conversation A");
     await openConversation(cdp, convB);
-    await waitFor(cdp, `[...document.querySelectorAll('[data-testid="message-assistant"]')].some((el)=>el.textContent?.includes(${q(`FIX4_DELAY_REPLY_${delayedMarker}`)}))`, "B delayed persisted response", 30000);
+    await waitFor(cdp, `[...document.querySelectorAll('[data-testid="message-assistant"]')].some((el)=>el.textContent?.includes(${q(`DELAYED_CONVERSATION_REPLY_${delayedMarker}`)}))`, "B delayed persisted response", 30000);
     await cdp.send("Page.reload", { ignoreCache: true });
     await waitFor(cdp, `document.querySelector('.app-shell')`, "session after conversation isolation reload", 20000);
     await openConversation(cdp, convB);
-    assert.ok((await workspaceText(cdp)).includes(`FIX4_DELAY_REPLY_${delayedMarker}`), "B history missing after reload");
+    assert.ok((await workspaceText(cdp)).includes(`DELAYED_CONVERSATION_REPLY_${delayedMarker}`), "B history missing after reload");
 
     // Close the reload-isolation loop in both directions. B surviving reload
     // is not enough: switch back to A and re-read authoritative history so a
@@ -2100,13 +2551,13 @@ async function runV41() {
     );
     await waitFor(
       cdp,
-      `[...document.querySelectorAll('[data-testid="message-assistant"]')].some((el)=>el.textContent?.includes(${q(`FIX4_REPLY_${aMarker}`)}))`,
+      `[...document.querySelectorAll('[data-testid="message-assistant"]')].some((el)=>el.textContent?.includes(${q(`CONVERSATION_REPLY_${aMarker}`)}))`,
       "A authoritative assistant history after reload",
       20000,
     );
     const reloadedAText = await workspaceText(cdp);
     assert.ok(!reloadedAText.includes(delayedMarker), "B delayed user message leaked into A after reload");
-    assert.ok(!reloadedAText.includes(`FIX4_DELAY_REPLY_${delayedMarker}`), "B delayed assistant response leaked into A after reload");
+    assert.ok(!reloadedAText.includes(`DELAYED_CONVERSATION_REPLY_${delayedMarker}`), "B delayed assistant response leaked into A after reload");
 
     // 2) Natural Desktop read-only success through the real Desktop Bridge.
     await createConversationThroughBrowser(cdp);
@@ -2159,7 +2610,7 @@ async function runV41() {
       // Preserve the real failure. Output only boolean/count/policy metadata so
       // a future no-recall failure can be localized without dumping private
       // knowledge, prompt bodies, tokens or the fixture's secret sentinel.
-      await reportFailurePreservingPrimary(error, "[P22 GLOBAL]", async () => {
+      await reportFailurePreservingPrimary(error, "[Knowledge Runtime GLOBAL]", async () => {
         const state = await fetch(`http://${loopback}:${modelPort}/control/state`)
           .then((response) => response.json()).catch(() => null);
         return {
@@ -2194,7 +2645,7 @@ async function runV41() {
     const retrievalHits = await cdp.evaluate(`Number(document.querySelectorAll('[data-testid="run-details-drawer"] .rag-summary-grid > div strong')[2]?.textContent?.trim() ?? 0)`);
     assert.ok(retrievalHits > 0, `Global Knowledge had no actual retrieval hits (Run Details hits=${retrievalHits})`);
     await closeRunDetails(cdp);
-    console.log("[P22 E2E] GLOBAL positive retrieval gate PASS");
+    console.log("[Knowledge Runtime E2E] GLOBAL positive retrieval gate PASS");
 
     // Negative routing: generic résumé writing must not force private retrieval.
     await createConversationThroughBrowser(cdp);
@@ -2215,7 +2666,7 @@ async function runV41() {
       name: `V41 Project KB ${stamp}`, scope: "PROJECT", projectId: project.id, filename: `project-${stamp}.txt`,
       content: `当前项目的测试标记是 ${projectMarker}。`,
     });
-    console.log("[P22 E2E] PROJECT knowledge fixture indexed");
+    console.log("[Knowledge Runtime E2E] PROJECT knowledge fixture indexed");
     const projectConv = await createConversationThroughBrowser(cdp);
     await apiRequest(apiBase, tokenA, "PUT", `/api/projects/${project.id}/conversations/${projectConv}`);
     await openConversation(cdp, projectConv);
@@ -2228,12 +2679,12 @@ async function runV41() {
         projectProofs.some(item => item.project.reason === "valid_evidence" && item.replyKind === "project_grounded"),
         "PROJECT marker in model request is not proof of a citation-grounded fixture response",
       );
-      console.log("[P22 E2E] PROJECT grounded answer marker received");
+      console.log("[Knowledge Runtime E2E] PROJECT grounded answer marker received");
     } catch (error) {
       // Preserve the original failure and emit only metadata. A future real
       // retrieval/projection defect must not be misclassified as this fixture
       // regression, and private knowledge must never be printed to QA logs.
-      await reportFailurePreservingPrimary(error, "[P22 PROJECT]", async () => {
+      await reportFailurePreservingPrimary(error, "[Knowledge Runtime PROJECT]", async () => {
         const state = await fetch(`http://${loopback}:${modelPort}/control/state`)
           .then(response => response.json()).catch(() => null);
         let citation = null;
@@ -2278,7 +2729,7 @@ async function runV41() {
         30000,
       );
     } catch (error) {
-      await reportFailurePreservingPrimary(error, "[P22 PROJECT CITATION DOM]", async () =>
+      await reportFailurePreservingPrimary(error, "[Knowledge Runtime PROJECT CITATION DOM]", async () =>
         cdp.evaluate(projectCitationDiagnosticExpression(projectMarker, `project-${stamp}.txt`)),
       );
     }
@@ -2297,7 +2748,7 @@ async function runV41() {
     assert.ok(projectCitationEvidence.used > 0, `PROJECT Knowledge had no projected used citations: ${JSON.stringify(projectCitationEvidence)}`);
     assert.equal(projectCitationEvidence.guardPassed, true, `PROJECT citation guard must pass: ${JSON.stringify(projectCitationEvidence)}`);
     assert.equal(projectCitationEvidence.guardAction, 'allow', `PROJECT citation guard must allow: ${JSON.stringify(projectCitationEvidence)}`);
-    console.log("[P22 E2E] PROJECT citation and provenance gate PASS");
+    console.log("[Knowledge Runtime E2E] PROJECT citation and provenance gate PASS");
     await closeRunDetails(cdp);
     const projectText = await workspaceText(cdp);
     assert.ok(!projectText.includes(globalMarker), "unbound GLOBAL Knowledge leaked into PROJECT conversation");
@@ -2325,7 +2776,7 @@ async function runV41() {
     assertObservedGlobalKnowledgeSubmission(globalKnowledgeSubmissions, true, "B own global opt-in");
     const bText = await workspaceText(cdp);
     assert.ok(!bText.includes(globalMarker), "User B retrieved User A GLOBAL Knowledge marker");
-    console.log("[P22 E2E] cross-user Global Knowledge isolation gate PASS");
+    console.log("[Knowledge Runtime E2E] cross-user Global Knowledge isolation gate PASS");
 
     // Now that cross-user isolation has been proven with A's data present,
     // clean up A's GLOBAL fixture using the still-valid owner-A access token.
@@ -2374,13 +2825,16 @@ async function runV41() {
     // Enforce this also after focused-mode early return and on failures.
     if (desktopStarted && !desktopShutdownVerified) {
       try {
-        await withTimeout(stopDesktopBridge(desktop, desktopPort, desktopLog), 18000, "V4.1 Desktop Bridge cleanup");
+        // stopDesktopBridge is internally bounded. Do not wrap it in a shorter
+        // outer timeout that can declare failure while owned-listener recovery
+        // is still executing.
+        await stopDesktopBridge(desktop, desktopPort, desktopLog);
         desktopShutdownVerified = true;
         desktop = undefined;
       } catch (error) { cleanupError ??= error; }
     }
 
-    // FIX19: remove only this canonical run's short-term memory namespace.
+    // Runtime Redis Isolation: remove only this canonical run's short-term memory namespace.
     // A failed cleanup cannot cause cross-run contamination because the next
     // run receives a different prefix; recording the cleanup error still keeps
     // acceptance hygiene strict.

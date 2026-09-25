@@ -79,7 +79,7 @@ class KnowledgeIndexer:
         request: KnowledgeIndexInput,
         content: bytes,
     ) -> int:
-        """Backward-compatible P1 contract: return total indexed evidence count."""
+        """Backward-compatible knowledge contract: return total indexed evidence count."""
         result = await self.index_detailed(request, content)
         return result.stats.total_documents
 

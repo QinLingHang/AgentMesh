@@ -1,0 +1,406 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"example.com/agentmesh-control-plane/internal/model"
+	"example.com/agentmesh-control-plane/internal/repository"
+	runtimeclient "example.com/agentmesh-control-plane/internal/runtime"
+)
+
+type routingFrozenHandlingCase struct {
+	CaseID           string `json:"caseId"`
+	Query            string `json:"query"`
+	ExpectedHandling string `json:"expectedHandling"`
+	FixtureID        string `json:"fixtureId"`
+}
+
+type routingFrozenHandlingFixtureCatalog struct {
+	Fixtures []routingFrozenHandlingFixture `json:"fixtures"`
+}
+
+type routingFrozenHandlingFixture struct {
+	FixtureID string `json:"fixtureId"`
+	CaseID    string `json:"caseId"`
+	Tasks     []struct {
+		State string `json:"state"`
+	} `json:"tasks"`
+	ExpectedInvariants map[string]any `json:"expectedInvariants"`
+}
+
+type routingAuthoritativeHandlingEvidence struct {
+	CaseID           string         `json:"caseId"`
+	ExpectedHandling string         `json:"expectedHandling"`
+	ActualHandling   string         `json:"actualHandling"`
+	Passed           bool           `json:"passed"`
+	Evidence         map[string]any `json:"evidence,omitempty"`
+}
+
+type routingAuthoritativeHandlingReport struct {
+	SchemaVersion string                                 `json:"schemaVersion"`
+	Scope         string                                 `json:"scope"`
+	Cases         []routingAuthoritativeHandlingEvidence `json:"cases"`
+}
+
+func routingRepositoryRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve Execution Routing handling test source path")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+}
+
+func routingLoadFrozenHandlingAssets(t *testing.T) ([]routingFrozenHandlingCase, map[string]routingFrozenHandlingFixture) {
+	t.Helper()
+	root := routingRepositoryRoot(t)
+	datasetPath := filepath.Join(root, "runtime-python", "tests", "fixtures", "execution_routing_human_eval_v1.jsonl")
+	fixturePath := filepath.Join(root, "runtime-python", "tests", "fixtures", "execution_routing_eval_fixtures_v1.json")
+
+	datasetRaw, err := os.ReadFile(datasetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []routingFrozenHandlingCase
+	for _, line := range strings.Split(string(datasetRaw), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row routingFrozenHandlingCase
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		switch row.ExpectedHandling {
+		case "TASK_STATUS", "RESUME", "CANCEL", "APPROVAL_REJECT":
+			cases = append(cases, row)
+		}
+	}
+
+	fixtureRaw, err := os.ReadFile(fixturePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var catalog routingFrozenHandlingFixtureCatalog
+	if err := json.Unmarshal(fixtureRaw, &catalog); err != nil {
+		t.Fatal(err)
+	}
+	fixtures := make(map[string]routingFrozenHandlingFixture, len(catalog.Fixtures))
+	for _, fixture := range catalog.Fixtures {
+		fixtures[fixture.FixtureID] = fixture
+	}
+	if len(cases) == 0 {
+		t.Fatal("frozen dataset contains no Go-owned Execution Routing handling cases")
+	}
+	return cases, fixtures
+}
+
+func routingExpectedTaskOperation(handling string) string {
+	switch handling {
+	case "TASK_STATUS":
+		return "GET_TASK_STATUS"
+	case "RESUME":
+		return "RESUME_TASK"
+	case "CANCEL":
+		return "CANCEL_TASK"
+	case "APPROVAL_REJECT":
+		return "APPROVAL_REJECT"
+	default:
+		return ""
+	}
+}
+
+func routingCreateDirectTaskFixture(t *testing.T, state string) (*TaskService, *repository.MySQL, int64, int64, *model.Task) {
+	t.Helper()
+	database, _ := p2Database(t)
+	ctx := context.Background()
+	repo := repository.NewMySQL(database)
+	insert := func(query string, args ...any) int64 {
+		t.Helper()
+		result, err := database.Exec(query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	uid := insert("INSERT INTO users(email,password_hash,display_name) VALUES(?,?,?)",
+		fmt.Sprintf("routing-handling-%d@example.test", time.Now().UnixNano()), "fixture", "Execution Routing Handling")
+	conversationID := insert("INSERT INTO conversations(user_id,title) VALUES(?,'Execution Routing handling fixture')", uid)
+	runtimeHTTP := runtimeclient.NewClient("http://127.0.0.1:1", "fixture", time.Second)
+	service := NewTaskService(repo, repo, repo, runtimeHTTP, repo, repo)
+	created, err := repo.CreateTask(ctx, model.Task{
+		UserID: uid, ConversationID: &conversationID, RequestID: fmt.Sprintf("routing-handling-%d", time.Now().UnixNano()),
+		TaskText: "frozen handling fixture", Scheduler: "adaptive", Planner: "multi_objective",
+		ExecutionMode: "auto", SynthesisMode: "auto",
+	}, model.TaskConstraints{MaxLatencyMS: 8000, MaxCost: .15, MinQuality: .8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state == "INPUT_REQUIRED" {
+		continuation := &model.TaskContinuation{Protocol: "a2a", State: "INPUT_REQUIRED", Kind: "input_required", Summary: "fixture input required"}
+		if err := repo.SuspendTask(ctx, uid, created.ID, "INPUT_REQUIRED", "needs input", continuation, nil, nil, map[string]any{}, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		created, err = repo.TaskByID(ctx, uid, created.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return service, repo, uid, conversationID, created
+}
+
+func routingTaskCount(t *testing.T, repo *repository.MySQL, uid int64) int {
+	t.Helper()
+	items, err := repo.ListTasks(context.Background(), uid, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(items)
+}
+
+func routingVerifyStatusHandling(t *testing.T) map[string]any {
+	t.Helper()
+	service, repo, uid, conversationID, created := routingCreateDirectTaskFixture(t, "RUNNING")
+	before := routingTaskCount(t, repo, uid)
+	resolved, err := service.StatusTask(context.Background(), uid, RunTaskInput{ConversationID: &conversationID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ID != created.ID || resolved.Status != "RUNNING" {
+		t.Fatalf("status resolved wrong task: %+v", resolved)
+	}
+	after := routingTaskCount(t, repo, uid)
+	if before != after {
+		t.Fatalf("TASK_STATUS created a new task: before=%d after=%d", before, after)
+	}
+	return map[string]any{"taskIdReused": true, "createNewTask": false, "status": resolved.Status}
+}
+
+func routingVerifyResumeHandling(t *testing.T) map[string]any {
+	t.Helper()
+	service, repo, uid, conversationID, created := routingCreateDirectTaskFixture(t, "INPUT_REQUIRED")
+	before := routingTaskCount(t, repo, uid)
+	result, err := service.ResumeCurrentTask(context.Background(), uid, RunTaskInput{ConversationID: &conversationID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task == nil || result.Task.ID != created.ID || result.Task.Status != "INPUT_REQUIRED" {
+		t.Fatalf("resume must reference the original suspended task only: %+v", result)
+	}
+	after := routingTaskCount(t, repo, uid)
+	if before != after {
+		t.Fatalf("RESUME created a new task: before=%d after=%d", before, after)
+	}
+	return map[string]any{"taskIdReused": true, "createNewTask": false, "status": result.Task.Status, "automaticReplay": false}
+}
+
+func routingVerifyCancelHandling(t *testing.T) map[string]any {
+	t.Helper()
+	service, repo, uid := p8Fixture(t)
+	ctx := context.Background()
+	conversation, err := repo.CreateConversation(ctx, uid, "Execution Routing cancel fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Run(ctx, uid, RunTaskInput{
+		ConversationID: &conversation.ID, Task: "durable cancel fixture", Scheduler: "adaptive", Planner: "multi_objective",
+		ExecutionMode: "auto", SynthesisMode: "auto",
+		Constraints: model.TaskConstraints{MaxLatencyMS: 8000, MaxCost: .15, MinQuality: .8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := routingTaskCount(t, repo, uid)
+	pending, err := service.taskService.PendingTask(ctx, uid, RunTaskInput{ConversationID: &conversation.ID})
+	if err != nil || pending.ID != result.Task.ID {
+		t.Fatalf("cancel did not resolve original task: task=%+v err=%v", pending, err)
+	}
+	cancelled, err := service.Cancel(ctx, uid, pending.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cancelled.Status != "CANCELED" {
+		t.Fatalf("cancelled status=%s", cancelled.Status)
+	}
+	after := routingTaskCount(t, repo, uid)
+	if before != after {
+		t.Fatalf("CANCEL created a new task: before=%d after=%d", before, after)
+	}
+	return map[string]any{"taskIdReused": true, "createNewTask": false, "status": cancelled.Status}
+}
+
+func routingVerifyApprovalRejectHandling(t *testing.T) map[string]any {
+	t.Helper()
+	database, _ := p2Database(t)
+	ctx := context.Background()
+	repo := repository.NewMySQL(database)
+	insert := func(query string, args ...any) int64 {
+		t.Helper()
+		result, err := database.Exec(query, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	uid := insert("INSERT INTO users(email,password_hash,display_name) VALUES(?,?,?)",
+		fmt.Sprintf("routing-approval-%d@example.test", time.Now().UnixNano()), "fixture", "Execution Routing Approval")
+	conversationID := insert("INSERT INTO conversations(user_id,title) VALUES(?,'Execution Routing approval fixture')", uid)
+	agentID := insert("INSERT INTO agents(user_id,name,endpoint,protocol,capabilities_json,status) VALUES(?,'Execution Routing Agent','internal://general','internal','[\"general\"]','ACTIVE')", uid)
+	insert("INSERT INTO tools(user_id,name,description,protocol,endpoint,input_schema,risk_level,requires_confirmation,enabled) VALUES(?,'record.write','write fixture','http','http://fixture/write','{\"type\":\"object\"}','high',1,1)", uid)
+
+	var runtimeCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		runtimeCalls++
+		var request runtimeclient.ExecuteRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if request.Task != "reject" {
+			http.Error(w, "unexpected approval decision", http.StatusConflict)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"request_id": request.RequestID, "status": "COMPLETED", "answer": "approval rejected",
+			"selected_agents": []string{"Execution Routing Agent"}, "trace": []any{}, "dag": map[string]any{},
+			"elapsed_ms": 1, "estimated_cost": 0, "agent_feedback": []any{}, "citations": []any{},
+		})
+	}))
+	defer server.Close()
+
+	service := NewTaskService(repo, repo, repo, runtimeclient.NewClient(server.URL, "fixture", 5*time.Second), repo, repo)
+	created, err := repo.CreateTask(ctx, model.Task{
+		UserID: uid, ConversationID: &conversationID, RequestID: "routing-approval-reject", TaskText: "write fixture",
+		Scheduler: "adaptive", Planner: "multi_objective", ExecutionMode: "auto", SynthesisMode: "auto",
+	}, model.TaskConstraints{MaxLatencyMS: 8000, MaxCost: .15, MinQuality: .8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateMessage(ctx, uid, conversationID, "user", "write fixture", "COMPLETED", "routing-approval-reject", map[string]any{"taskId": created.ID}); err != nil {
+		t.Fatal(err)
+	}
+	continuation := &model.TaskContinuation{
+		Protocol: "tool_approval", AgentID: agentID, Capability: "general", TaskID: "approval-routing", ContextID: "fixture",
+		State: "AUTH_REQUIRED", Kind: "tool_approval", ApprovalID: "approval-routing", ToolName: "record.write", ToolProtocol: "http",
+		RiskLevel: "high", RequiresConfirmation: true, Arguments: map[string]any{"record": "fixture"}, Fingerprint: "fixture", Summary: "fixture write",
+	}
+	if err := repo.SuspendTask(ctx, uid, created.ID, "AUTH_REQUIRED", "needs approval", continuation, []string{"Execution Routing Agent"}, nil, map[string]any{}, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	before := routingTaskCount(t, repo, uid)
+	result, err := service.RejectCurrentApproval(ctx, uid, RunTaskInput{ConversationID: &conversationID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task == nil || result.Task.ID != created.ID || result.Status != "COMPLETED" {
+		t.Fatalf("approval rejection did not complete original task: %+v", result)
+	}
+	after := routingTaskCount(t, repo, uid)
+	if before != after {
+		t.Fatalf("APPROVAL_REJECT created a new task: before=%d after=%d", before, after)
+	}
+	if runtimeCalls != 1 {
+		t.Fatalf("approval rejection runtime calls=%d, want 1 authoritative rejection", runtimeCalls)
+	}
+	if _, err := service.RejectCurrentApproval(ctx, uid, RunTaskInput{ConversationID: &conversationID}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("replayed approval rejection must not execute again: %v", err)
+	}
+	if runtimeCalls != 1 {
+		t.Fatal("replayed approval rejection reached Runtime")
+	}
+	return map[string]any{"taskIdReused": true, "createNewTask": false, "writeCount": 0, "replaySideEffect": false}
+}
+
+func TestExecutionRoutingFrozenAuthoritativeHandlingIntegration(t *testing.T) {
+	if strings.TrimSpace(os.Getenv("QA_TEST_MYSQL_DSN")) == "" {
+		t.Skip("set QA_TEST_MYSQL_DSN to run isolated Execution Routing authoritative Handling acceptance")
+	}
+	cases, fixtures := routingLoadFrozenHandlingAssets(t)
+	report := routingAuthoritativeHandlingReport{
+		SchemaVersion: "execution-routing.handling.authoritative.v1",
+		Scope:         "GO_TASK_OPERATION_AND_DB_STATE",
+		Cases:         make([]routingAuthoritativeHandlingEvidence, 0, len(cases)),
+	}
+
+	for _, row := range cases {
+		row := row
+		fixture, ok := fixtures[row.FixtureID]
+		if !ok {
+			t.Fatalf("%s fixture %s missing", row.CaseID, row.FixtureID)
+		}
+		actual := ""
+		var evidence map[string]any
+		ok = t.Run(row.CaseID, func(t *testing.T) {
+			operation := TaskControlOperation(row.Query)
+			expectedOperation := routingExpectedTaskOperation(row.ExpectedHandling)
+			if operation != expectedOperation {
+				t.Fatalf("task operation=%q, want %q", operation, expectedOperation)
+			}
+			if len(fixture.Tasks) != 1 {
+				t.Fatalf("authoritative task operation fixture must contain exactly one task, got %d", len(fixture.Tasks))
+			}
+			switch row.ExpectedHandling {
+			case "TASK_STATUS":
+				if fixture.Tasks[0].State != "RUNNING" {
+					t.Fatalf("TASK_STATUS fixture state=%s", fixture.Tasks[0].State)
+				}
+				evidence = routingVerifyStatusHandling(t)
+			case "RESUME":
+				if fixture.Tasks[0].State != "INPUT_REQUIRED" {
+					t.Fatalf("RESUME fixture state=%s", fixture.Tasks[0].State)
+				}
+				evidence = routingVerifyResumeHandling(t)
+			case "CANCEL":
+				evidence = routingVerifyCancelHandling(t)
+			case "APPROVAL_REJECT":
+				if fixture.Tasks[0].State != "AUTH_REQUIRED" {
+					t.Fatalf("APPROVAL_REJECT fixture state=%s", fixture.Tasks[0].State)
+				}
+				evidence = routingVerifyApprovalRejectHandling(t)
+			default:
+				t.Fatalf("unexpected Go-owned handling %s", row.ExpectedHandling)
+			}
+			actual = row.ExpectedHandling
+		})
+		report.Cases = append(report.Cases, routingAuthoritativeHandlingEvidence{
+			CaseID: row.CaseID, ExpectedHandling: row.ExpectedHandling, ActualHandling: actual, Passed: ok, Evidence: evidence,
+		})
+	}
+
+	if path := strings.TrimSpace(os.Getenv("EXECUTION_ROUTING_HANDLING_REPORT")); path != "" {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := json.MarshalIndent(report, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, append(raw, '\n'), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range report.Cases {
+		if !row.Passed {
+			t.Fatalf("authoritative Handling failed for %s", row.CaseID)
+		}
+	}
+}

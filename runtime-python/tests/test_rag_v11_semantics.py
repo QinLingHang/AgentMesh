@@ -80,3 +80,22 @@ def test_metadata_is_advisory_for_required_knowledge():
     assert result.needed is True
     assert result.selected_knowledge_base_ids
     assert len(result.selected_knowledge_base_ids) <= 4
+
+
+def test_explicit_no_knowledge_retrieval_is_not_positive_knowledge_intent():
+    semantic = analyze_task_semantics(
+        "这是纯文本分析，不需要知识检索。内容：企业级 Agent Runtime 需要协调模型调用。",
+        enable_implicit_business=True,
+    )
+    assert semantic.rag_preference == RagPreference.DISABLE
+    assert semantic.knowledge_dependency == KnowledgeDependency.NONE
+    assert "knowledge" not in {item.casefold() for item in semantic.required_capabilities}
+
+
+def test_runtime_word_does_not_match_english_run_action():
+    semantic = analyze_task_semantics(
+        "解释 Agent Runtime 的职责，不需要 MCP，也不需要工具。",
+        enable_implicit_business=True,
+    )
+    assert semantic.requires_external is False
+    assert semantic.requires_tool is False

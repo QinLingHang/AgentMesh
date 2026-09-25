@@ -125,7 +125,7 @@ export function RunDetailsTabs({
     },
     {
       id: "rag",
-      label: "知识检索",
+      label: "知识检索 · 事件",
       count: ragEventCount(
         result,
       ),
@@ -139,14 +139,14 @@ export function RunDetailsTabs({
     },
     {
       id: "memory",
-      label: "长期记忆",
+      label: "长期记忆 · 事件",
       count: memoryEventCount(
         result,
       ),
     },
     {
       id: "tool-mcp",
-      label: "工具与外部服务",
+      label: "工具/MCP · 事件",
       count: toolMcpEventCount(
         result,
       ),

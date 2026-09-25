@@ -38,7 +38,8 @@ from app.models.runtime import resolve_project_model_runtime
 from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse, TraceEvent
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
-from app.semantics.intent_understanding import TaskUnderstandingRequest, TaskUnderstandingResult, understand
+from app.services.dag_executor import DAGExecutionError
+from app.semantics.execution_routing import ExecutionRoutingRequest, ExecutionRoutingResult, decide_execution_route
 
 registry = None
 engine = None
@@ -118,7 +119,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="AgentMesh Runtime",
-    version="0.4.0-p1-knowledge",
+    version="0.4.0-knowledge",
     lifespan=lifespan,
 )
 
@@ -260,16 +261,15 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
     candidate_token = set_candidate_knowledge_ids(None)
     try:
         response = await engine.run(req, event_sink=event_sink, delta_sink=delta_sink)
-        # P23 metadata comes only from the internal Go-signed execution request.
+        # Execution-routing metadata comes only from the internal Go-signed execution request.
         # Persist the same privacy-safe decision trace for direct and durable
         # runs, including the no-DAG Knowledge executor, without re-routing.
-        if req.p23_strategy in {"SINGLE_CAPABILITY", "WORKFLOW", "RUNTIME"}:
+        if req.execution_route == "RUNTIME":
             response.trace.insert(0, TraceEvent(**{
-                "kind": "routing", "title": "P23 Execution Decision",
+                "kind": "routing", "title": "Execution Route Decision",
                 "status": "completed", "elapsedMs": 0,
                 "detail": json.dumps({
-                    "decisionVersion": "p23.v2" if req.p23_strategy == "RUNTIME" else "p23.v1", "strategy": req.p23_strategy,
-                    "capabilityKind": req.p23_capability_kind,
+                    "decisionVersion": "execution-routing.v1", "strategy": req.execution_route,
                 }, ensure_ascii=False),
             }))
         return response
@@ -278,22 +278,32 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
         reset_knowledge_scope(token)
 
 
-@app.post("/internal/v1/p23/understand", response_model=TaskUnderstandingResult)
-async def p23_understand(
-    req: TaskUnderstandingRequest,
+@app.post("/internal/v1/routing/understand", response_model=ExecutionRoutingResult)
+async def decide_execution_route_execution_route(
+    req: ExecutionRoutingRequest,
     x_internal_token: str = Header(default=""),
 ):
     """Trusted, read-only preflight. A suggestion is never execution permission."""
     verify_internal(x_internal_token)
-    baseline = understand(req)
-    from app.semantics.semantic_intent_model import should_use_semantic_model, describe_with_model
-    if not should_use_semantic_model(req, baseline):
+    baseline = decide_execution_route(req)
+    from app.semantics.execution_routing_model import should_use_semantic_routing_model, describe_routing_with_model
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+
+    # High-confidence continuation of an already-completed, capability-free
+    # FAST_PATH answer is resolved from trusted execution state first.  This is
+    # a narrow latency/safety guard, not the general semantic router: ambiguous
+    # follow-ups still go to the LLM classifier below.
+    trusted_chat = trusted_fast_path_continuation_fallback(req, baseline)
+    if trusted_chat.execution_route == "FAST_PATH" and baseline.execution_route != "FAST_PATH":
+        return trusted_chat
+
+    if not should_use_semantic_routing_model(req, baseline):
         return baseline
-    described = await describe_with_model(engine, req)
+    described = await describe_routing_with_model(engine, req)
     if described is None:
-        return baseline  # conservative RUNTIME; never silently downgrade to chat
+        return baseline  # ambiguous model outage stays fail-closed on Runtime
     descriptor, usage = described
-    refined = understand(req, descriptor=descriptor)
+    refined = decide_execution_route(req, descriptor=descriptor)
     return refined.model_copy(update={
         "model_calls": int(usage["model_calls"]),
         "model_tokens": int(usage["model_tokens"]),
@@ -379,10 +389,30 @@ async def execute_stream(
                     "result": response.model_dump(mode="json", by_alias=True),
                 })
             except Exception as exc:
-                await queue.put({
+                payload = {
                     "type": "error",
                     "message": str(exc)[:500] or "runtime execution failed",
-                })
+                }
+                if isinstance(exc, DAGExecutionError):
+                    payload["nodeId"] = exc.node_id
+                    cause = exc.__cause__
+                    if cause is not None:
+                        # Preserve only a bounded structural category, never
+                        # provider payloads or prompts. Walk the exception chain
+                        # because Runtime reschedule wraps a provider ModelError
+                        # in RuntimeError before DAGExecutor receives it.
+                        root = cause
+                        seen: set[int] = set()
+                        while getattr(root, "__cause__", None) is not None and id(root) not in seen:
+                            seen.add(id(root))
+                            root = root.__cause__
+                        category = type(root).__name__
+                        error_type = getattr(root, "error_type", None)
+                        error_value = getattr(error_type, "value", None)
+                        if error_value:
+                            category = f"{category}:{error_value}"
+                        payload["causeCategory"] = category[:120]
+                await queue.put(payload)
             finally:
                 await queue.put({"type": "_end"})
 
