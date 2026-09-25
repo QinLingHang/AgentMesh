@@ -271,6 +271,13 @@ func TestExecutionRoutingDetectsPriorAssistantAnswerReferences(t *testing.T) {
 	}
 }
 
+func TestTaskControlOperationDoesNotCaptureRuntimeAnalysisSourceText(t *testing.T) {
+	prompt := "这是一个纯文本分析任务，不需要 MCP、不需要工具、不需要知识检索。请从当前已注册的 Agent 中选择合适的 Agent，把下面内容分成 5 个要点逐条解释，最后给出总结，回答不少于 400 字。内容：企业级 Agent Runtime 需要协调模型调用、任务状态、执行计划、故障恢复与可观测性。"
+	if got := TaskControlOperation(prompt); got != "" {
+		t.Fatalf("analysis source text captured as task control: %q", got)
+	}
+}
+
 func TestTaskControlOperationRecognizesFrozenAuthoritativeVariantsWithoutCapturingBusinessRequests(t *testing.T) {
 	positive := map[string]string{
 		"把上一步没做完的测试继续跑完。":            "RESUME_TASK",

@@ -15,6 +15,16 @@ import (
 // The binary router carries only intent and approved request-local model
 // configuration; complete capability catalogs, schemas and private Knowledge
 // never cross the preflight boundary. Actual discovery stays inside Runtime.
+type PreviousTurnContext struct {
+	Exists         bool   `json:"exists"`
+	ExecutionRoute string `json:"executionRoute"`
+	Status         string `json:"status"`
+	RuntimePhase   string `json:"runtimePhase"`
+	KnowledgeUsed  bool   `json:"knowledgeUsed"`
+	ToolUsed       bool   `json:"toolUsed"`
+	MCPUsed        bool   `json:"mcpUsed"`
+}
+
 type ExecutionRoutingRequest struct {
 	SchemaVersion            string                `json:"schemaVersion"`
 	Task                     string                `json:"task"`
@@ -22,6 +32,7 @@ type ExecutionRoutingRequest struct {
 	HasAttachments           bool                  `json:"hasAttachments"`
 	ModelReadableAttachments bool                  `json:"modelReadableAttachments"`
 	ContinuationState        string                `json:"continuationState"`
+	PreviousTurn             PreviousTurnContext   `json:"previousTurn"`
 	AllowModel               bool                  `json:"allowModel"`
 	ProjectModel             *ProjectModelRuntime  `json:"projectModel,omitempty"`
 	ModelPool                []ProjectModelRuntime `json:"modelPool,omitempty"`
@@ -50,7 +61,7 @@ func (c *Client) UnderstandExecutionRoute(ctx context.Context, in ExecutionRouti
 	if c == nil {
 		return nil, errors.New("runtime unavailable")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2800*time.Millisecond)
+	ctx, cancel := context.WithTimeout(ctx, 3200*time.Millisecond)
 	defer cancel()
 	raw, err := json.Marshal(in)
 	if err != nil {

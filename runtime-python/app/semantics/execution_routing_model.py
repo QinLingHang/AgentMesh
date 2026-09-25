@@ -33,6 +33,13 @@ class SemanticIntentDescriptor(BaseModel):
     requested_effects: list[Literal["READ", "WRITE", "EXECUTE", "EXTERNAL_SEND"]] = Field(
         default_factory=list, max_length=4, alias="requestedEffects"
     )
+    continuation_intent: Literal[
+        "NONE", "EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS", "NEW_FACT_FOLLOWUP",
+        "REFRESH_DATA", "CONFIRM_ACTION", "RESUME_TASK", "AMBIGUOUS"
+    ] = Field(default="NONE", alias="continuationIntent")
+    references_previous: bool = Field(default=False, alias="referencesPrevious")
+    needs_fresh_data: bool = Field(default=False, alias="needsFreshData")
+    external_action_required: bool = Field(default=False, alias="externalActionRequired")
     unknowns: list[str] = Field(default_factory=list, max_length=4)
     reason_codes: list[str] = Field(default_factory=list, max_length=8, alias="reasonCodes")
 
@@ -99,11 +106,19 @@ async def describe_routing_with_model(engine, req) -> tuple[SemanticIntentDescri
         "KNOWLEDGE, TOOL, MCP, AGENT. KNOWLEDGE means tenant/project-specific policy or factual "
         "content; TOOL means live personal/business data or an operation; MCP means explicitly "
         "requested MCP; AGENT means explicit delegation to an Agent. General explanations need none. "
-        "requestedEffects can only contain READ, WRITE, EXECUTE, EXTERNAL_SEND.\n"
+        "requestedEffects can only contain READ, WRITE, EXECUTE, EXTERNAL_SEND. "
+        "Use continuationIntent only to describe how the current message relates to the prior answer: "
+        "EXPLAIN_PREVIOUS or TRANSFORM_PREVIOUS for explanation/rephrasing only; NEW_FACT_FOLLOWUP "
+        "for a new factual question; REFRESH_DATA for a request to fetch current/live data again; "
+        "CONFIRM_ACTION only when the user confirms an action; RESUME_TASK only for unfinished work. "
+        "Set referencesPrevious=true only when the current utterance semantically depends on the prior turn. "
+        "Set needsFreshData=true for current/live/re-query facts and externalActionRequired=true for side effects.\n"
         "Schema: {\"objective\":\"...\",\"capabilityKinds\":[],\"knowledgeDependency\":"
         "\"NONE|OPTIONAL|REQUIRED\",\"multiStep\":false,\"hasDependencies\":false,"
-        "\"hasConditionalEffects\":false,\"requestedEffects\":[],\"unknowns\":[],"
-        "\"reasonCodes\":[]}\n"
+        "\"hasConditionalEffects\":false,\"requestedEffects\":[],\"continuationIntent\":\"NONE\","
+        "\"referencesPrevious\":false,\"needsFreshData\":false,\"externalActionRequired\":false,"
+        "\"unknowns\":[],\"reasonCodes\":[]}\n"
+        f"TRUSTED_PREVIOUS_TURN_METADATA:\n{json.dumps(req.previous_turn.model_dump(by_alias=True), ensure_ascii=False)}\n"
         f"USER_REQUEST:\n{req.task[:12000]}"
     )
     try:

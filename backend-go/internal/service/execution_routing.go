@@ -17,6 +17,63 @@ import (
 
 const executionRoutingVersion = "execution-routing.v1"
 
+func retryRoutingNotFound[T any](ctx context.Context, fn func() (T, error)) (T, error) {
+	var zero T
+	value, err := fn()
+	if !errors.Is(err, ErrNotFound) {
+		return value, err
+	}
+	select {
+	case <-ctx.Done():
+		return zero, ctx.Err()
+	case <-time.After(15 * time.Millisecond):
+	}
+	return fn()
+}
+
+type projectRuntimeDiagnosticResolver interface {
+	ResolveForConversationWithDiagnostics(
+		context.Context,
+		int64,
+		int64,
+	) (*model.ProjectRuntimeContext, []projectRuntimeLookupDiagnostic, error)
+}
+
+func (s *TaskService) resolveProjectRuntimeForRoutingDetailed(
+	ctx context.Context, uid, conversationID int64,
+) (*model.ProjectRuntimeContext, []projectRuntimeLookupDiagnostic, error) {
+	if s.projectRuntime == nil {
+		return nil, nil, nil
+	}
+	resolve := func() (*model.ProjectRuntimeContext, []projectRuntimeLookupDiagnostic, error) {
+		if detailed, ok := s.projectRuntime.(projectRuntimeDiagnosticResolver); ok {
+			return detailed.ResolveForConversationWithDiagnostics(ctx, uid, conversationID)
+		}
+		resolved, err := s.projectRuntime.ResolveForConversation(ctx, uid, conversationID)
+		return resolved, nil, err
+	}
+
+	resolved, diagnostics, err := resolve()
+	if !errors.Is(err, ErrNotFound) {
+		return resolved, diagnostics, err
+	}
+	select {
+	case <-ctx.Done():
+		return nil, diagnostics, ctx.Err()
+	case <-time.After(15 * time.Millisecond):
+	}
+	// Only persist the final lookup attempt. The short retry exists to absorb
+	// commit-visibility races and should not create a false failure diagnosis.
+	return resolve()
+}
+
+func (s *TaskService) resolveProjectRuntimeForRouting(
+	ctx context.Context, uid, conversationID int64,
+) (*model.ProjectRuntimeContext, error) {
+	resolved, _, err := s.resolveProjectRuntimeForRoutingDetailed(ctx, uid, conversationID)
+	return resolved, err
+}
+
 // Delivery (direct/durable) is independent of execution strategy.
 type ExecutionRouteDecision struct {
 	SchemaVersion               string   `json:"schemaVersion"`
@@ -80,6 +137,14 @@ func (s *TaskService) ResolveExistingSubmission(ctx context.Context, uid int64, 
 		return nil, errors.New("execution routing submission ledger unavailable")
 	}
 	prior, recorded, err := store.LookupDurableSubmission(ctx, uid, key)
+	ledgerOutcome := "MISS"
+	if prior != nil {
+		ledgerOutcome = "FOUND"
+	}
+	if err != nil {
+		ledgerOutcome = "ERROR"
+	}
+	s.recordExecutionRoutingLookup(ctx, uid, in, "SUBMISSION_LEDGER", ledgerOutcome, err)
 	if errors.Is(err, repository.ErrSubmissionConflict) {
 		return nil, ErrIdempotencyConflict
 	}
@@ -96,8 +161,18 @@ func (s *TaskService) ResolveExistingSubmission(ctx context.Context, uid int64, 
 		return nil, ErrIdempotencyConflict
 	}
 	if s.projectRuntime != nil && prior.ConversationID != nil {
-		if _, err = s.projectRuntime.ResolveForConversation(ctx, uid, *prior.ConversationID); err != nil {
-			return nil, err
+		resolved, lookupDiagnostics, resolveErr := s.resolveProjectRuntimeForRoutingDetailed(ctx, uid, *prior.ConversationID)
+		s.recordProjectRuntimeLookupDiagnostics(ctx, uid, in, "PRIOR_", lookupDiagnostics)
+		outcome := "MISS"
+		if resolved != nil {
+			outcome = "FOUND"
+		}
+		if resolveErr != nil {
+			outcome = "ERROR"
+		}
+		s.recordExecutionRoutingLookup(ctx, uid, in, "PRIOR_CONVERSATION_REVALIDATION", outcome, resolveErr)
+		if resolveErr != nil {
+			return nil, resolveErr
 		}
 	}
 	return prior, nil
@@ -130,6 +205,7 @@ func (s *TaskService) resolveContinuationState(ctx context.Context, uid int64, i
 		return "NONE", errors.New("trusted continuation repository unavailable")
 	}
 	tasks, err := s.tasks.ListTasks(ctx, uid, 50)
+	s.recordExecutionRoutingLookup(ctx, uid, in, "CONTINUATION_TASKS", executionRoutingOutcome(err), err)
 	if err != nil {
 		return "NONE", err
 	}
@@ -150,6 +226,7 @@ func (s *TaskService) resolveContinuationState(ctx context.Context, uid int64, i
 		return "ONE_PENDING", nil
 	}
 	messages, err := s.messages.ListMessages(ctx, uid, *in.ConversationID, 8)
+	s.recordExecutionRoutingLookup(ctx, uid, in, "CONTINUATION_HISTORY", executionRoutingOutcome(err), err)
 	if err != nil {
 		return "NONE", err
 	}
@@ -159,6 +236,115 @@ func (s *TaskService) resolveContinuationState(ctx context.Context, uid int64, i
 		}
 	}
 	return "NONE", nil
+}
+
+func metadataString(metadata map[string]any, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return strings.TrimSpace(value)
+}
+
+func metadataNumber(metadata map[string]any, key string) float64 {
+	if metadata == nil {
+		return 0
+	}
+	switch value := metadata[key].(type) {
+	case float64:
+		return value
+	case float32:
+		return float64(value)
+	case int:
+		return float64(value)
+	case int64:
+		return float64(value)
+	case json.Number:
+		parsed, _ := value.Float64()
+		return parsed
+	}
+	return 0
+}
+
+func metadataSliceNonEmpty(metadata map[string]any, key string) bool {
+	if metadata == nil {
+		return false
+	}
+	switch value := metadata[key].(type) {
+	case []any:
+		return len(value) > 0
+	case []map[string]any:
+		return len(value) > 0
+	case []string:
+		return len(value) > 0
+	}
+	return false
+}
+
+func previousTurnFromAssistant(message model.Message) runtimeclient.PreviousTurnContext {
+	context := runtimeclient.PreviousTurnContext{
+		Exists: true, Status: strings.TrimSpace(message.Status), ExecutionRoute: "NONE",
+	}
+	metadata := message.Metadata
+	context.RuntimePhase = metadataString(metadata, "runtimePhase")
+	if route := metadataString(metadata, "executionRoute"); route == "FAST_PATH" || route == "RUNTIME" {
+		context.ExecutionRoute = route
+	}
+
+	// Assistant messages intentionally contain only sanitized execution
+	// metadata. InteractiveFastPath is authoritative for a completed fast-path
+	// answer; all other persisted runtime phases are treated as Runtime.
+	if context.ExecutionRoute == "NONE" {
+		if selected, ok := metadata["selectedAgents"].([]any); ok {
+			for _, item := range selected {
+				if name, ok := item.(string); ok && name == "InteractiveFastPath" {
+					context.ExecutionRoute = "FAST_PATH"
+					break
+				}
+			}
+		}
+	}
+	if context.ExecutionRoute == "NONE" {
+		if selected, ok := metadata["selectedAgents"].([]string); ok {
+			for _, name := range selected {
+				if name == "InteractiveFastPath" {
+					context.ExecutionRoute = "FAST_PATH"
+					break
+				}
+			}
+		}
+	}
+	if context.ExecutionRoute == "NONE" && context.RuntimePhase != "" {
+		context.ExecutionRoute = "RUNTIME"
+	}
+
+	context.KnowledgeUsed = metadataSliceNonEmpty(metadata, "citations")
+	if observability, ok := metadata["observability"].(map[string]any); ok {
+		context.KnowledgeUsed = context.KnowledgeUsed || metadataNumber(observability, "ragHits") > 0
+		context.ToolUsed = metadataNumber(observability, "toolCalls") > 0
+		context.MCPUsed = metadataNumber(observability, "mcpEvents") > 0
+	}
+	return context
+}
+
+// resolvePreviousTurnContext returns privacy-safe execution metadata only. The
+// assistant text itself never crosses the preflight boundary; normal execution
+// receives bounded history separately after routing.
+func (s *TaskService) resolvePreviousTurnContext(ctx context.Context, uid int64, in RunTaskInput) (runtimeclient.PreviousTurnContext, error) {
+	if in.ConversationID == nil || s.messages == nil {
+		return runtimeclient.PreviousTurnContext{ExecutionRoute: "NONE"}, nil
+	}
+	messages, err := s.messages.ListMessages(ctx, uid, *in.ConversationID, 8)
+	s.recordExecutionRoutingLookup(ctx, uid, in, "PREVIOUS_TURN_HISTORY", executionRoutingOutcome(err), err)
+	if err != nil {
+		return runtimeclient.PreviousTurnContext{}, err
+	}
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && strings.TrimSpace(messages[i].Content) != "" {
+			return previousTurnFromAssistant(messages[i]), nil
+		}
+	}
+	return runtimeclient.PreviousTurnContext{ExecutionRoute: "NONE"}, nil
 }
 
 // DecideExecutionRoute decides only the execution boundary. Python Runtime owns all
@@ -181,7 +367,17 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 	var project *model.ProjectRuntimeContext
 	var err error
 	if s.projectRuntime != nil && in.ConversationID != nil {
-		project, err = s.projectRuntime.ResolveForConversation(ctx, uid, *in.ConversationID)
+		var lookupDiagnostics []projectRuntimeLookupDiagnostic
+		project, lookupDiagnostics, err = s.resolveProjectRuntimeForRoutingDetailed(ctx, uid, *in.ConversationID)
+		s.recordProjectRuntimeLookupDiagnostics(ctx, uid, in, "", lookupDiagnostics)
+		projectOutcome := "MISS"
+		if project != nil {
+			projectOutcome = "FOUND"
+		}
+		if err != nil {
+			projectOutcome = "ERROR"
+		}
+		s.recordExecutionRoutingLookup(ctx, uid, in, "CONVERSATION_PROJECT_RUNTIME", projectOutcome, err)
 		if err != nil {
 			return nil, err
 		}
@@ -193,10 +389,15 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 	}
 	delivery := s.DecideDeliveryMode(in)
 	policy, _, _, err := s.resolveEffectiveRagPolicy(ctx, uid, in.ConversationID, in.RagPolicy)
+	s.recordExecutionRoutingLookup(ctx, uid, in, "RAG_POLICY", executionRoutingOutcome(err), err)
 	if err != nil {
 		return nil, err
 	}
 	continuation, err := s.resolveContinuationState(ctx, uid, in)
+	if err != nil {
+		return nil, err
+	}
+	previousTurn, err := s.resolvePreviousTurnContext(ctx, uid, in)
 	if err != nil {
 		return nil, err
 	}
@@ -220,6 +421,7 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 		}
 		if allowModel {
 			pool, configured, normalized, modelErr := s.resolveRequestModelRuntimePool(ctx, uid, project, selection)
+			s.recordExecutionRoutingLookup(ctx, uid, in, "MODEL_POOL", executionRoutingOutcome(modelErr), modelErr)
 			if modelErr == nil {
 				modelPool, projectModel, selection = pool, configured, normalized
 			} else {
@@ -235,6 +437,7 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 		SchemaVersion: executionRoutingVersion, Task: in.Task, RagMode: string(policy.Mode),
 		HasAttachments:           len(in.AttachmentIDs) != 0,
 		ModelReadableAttachments: s.modelReadableAttachments(ctx, uid, in), ContinuationState: continuation,
+		PreviousTurn: previousTurn,
 		AllowModel:   allowModel && (len(modelPool) != 0 || projectModel != nil),
 		ProjectModel: projectModel, ModelPool: modelPool,
 		ModelSelection: runtimeclient.ModelSelection{Mode: selection.Mode, ServiceID: selection.ServiceID},

@@ -55,7 +55,9 @@ test("V2 usage and cost API plus UI are wired without secret reads", () => {
   assert.match(api, /getRunCost/);
   assert.match(api, /provider/);
   assert.match(api, /model/);
-  assert.match(overview, /Model Cost/);
+  assert.match(overview, /Token Model Cost/);
+  assert.match(overview, /价格未配置/);
+  assert.match(overview, /工具调用 \/ MCP 事件/);
   assert.match(overview, /RAG Latency/);
   assert.match(governance, /V2 Runtime 成本分析/);
   assert.doesNotMatch(api, /decrypt.*cost|secret.*cost/i);

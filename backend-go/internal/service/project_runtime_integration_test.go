@@ -6,17 +6,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
-	"example.com/agentmesh-control-plane/internal/config"
 	dbschema "example.com/agentmesh-control-plane/internal/db"
 	"example.com/agentmesh-control-plane/internal/model"
 	"example.com/agentmesh-control-plane/internal/repository"
@@ -25,69 +24,234 @@ import (
 )
 
 // Uses the production schema, repositories, TaskService and HTTP runtime client.
-// Only the external Python execution response is a fixture. Every run creates
-// and drops its own database; the DSN's database is deliberately never used.
+//
+// The service package contains many integration tests that all need the same
+// production schema. Rebuilding and migrating a brand-new schema for every
+// test made the package spend almost the entire 10 minute Go test timeout on
+// repeated DDL. The package-level fixture below creates and migrates one
+// isolated schema once, while p2Database gives every test a fresh connection
+// pool and clears all rows before use. A mutex keeps database-backed tests
+// isolated even if a future test opts into t.Parallel().
+var p2SharedFixture struct {
+	sync.Mutex
+	once      sync.Once
+	admin     *sql.DB
+	database  string
+	dsn       string
+	sourceDSN string
+	err       error
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	p2CleanupSharedDatabase()
+	os.Exit(code)
+}
+
 func p2Database(t *testing.T) (*sql.DB, string) {
 	t.Helper()
-	dsn := os.Getenv("QA_TEST_MYSQL_DSN")
+	dsn := strings.TrimSpace(os.Getenv("QA_TEST_MYSQL_DSN"))
 	if dsn == "" {
 		t.Skip("set QA_TEST_MYSQL_DSN to run isolated MySQL acceptance tests")
 	}
-	cfg, err := mysql.ParseDSN(dsn)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.DBName = ""
-	cfg.ParseTime = true
-	admin, err := sql.Open("mysql", cfg.FormatDSN())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { admin.Close() })
-	name := fmt.Sprintf("agentmesh_project_runtime_test_%d", time.Now().UnixNano())
-	if _, err = admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec("DROP DATABASE `" + name + "`"); err != nil {
-			t.Errorf("test database cleanup: %v", err)
+
+	p2SharedFixture.Lock()
+	locked := true
+	defer func() {
+		if locked {
+			p2SharedFixture.Unlock()
 		}
+	}()
+
+	if err := p2EnsureSharedDatabase(dsn); err != nil {
+		t.Fatal(err)
+	}
+	if p2SharedFixture.sourceDSN != dsn {
+		t.Fatalf("QA_TEST_MYSQL_DSN changed during service test process")
+	}
+
+	database, err := sql.Open("mysql", p2SharedFixture.dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Ping(); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if err := p2ResetSharedDatabase(database); err != nil {
+		database.Close()
+		t.Fatalf("reset isolated service database: %v", err)
+	}
+
+	// Hold the package fixture lock until this test has fully cleaned up. This
+	// prevents data leakage if a database-backed test becomes parallel later.
+	locked = false
+	t.Cleanup(func() {
+		if err := database.Close(); err != nil {
+			t.Errorf("close isolated service database: %v", err)
+		}
+		p2SharedFixture.Unlock()
 	})
-	cfg.DBName = name
-	cfg.MultiStatements = true
-	database, err := sql.Open("mysql", cfg.FormatDSN())
+	t.Logf("isolated shared database: %s", p2SharedFixture.database)
+	return database, p2SharedFixture.dsn
+}
+
+func p2EnsureSharedDatabase(dsn string) error {
+	p2SharedFixture.once.Do(func() {
+		p2SharedFixture.sourceDSN = dsn
+		cfg, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			p2SharedFixture.err = err
+			return
+		}
+		cfg.DBName = ""
+		cfg.ParseTime = true
+		admin, err := sql.Open("mysql", cfg.FormatDSN())
+		if err != nil {
+			p2SharedFixture.err = err
+			return
+		}
+		if err = admin.Ping(); err != nil {
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+
+		name := fmt.Sprintf("agentmesh_service_test_%d_%d", os.Getpid(), time.Now().UnixNano())
+		if _, err = admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+
+		dbCfg := *cfg
+		dbCfg.DBName = name
+		dbCfg.MultiStatements = true
+		database, err := sql.Open("mysql", dbCfg.FormatDSN())
+		if err != nil {
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+
+		raw, err := os.ReadFile(filepath.Join("..", "..", "..", "infra", "mysql", "init", "001_schema.sql"))
+		if err != nil {
+			database.Close()
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+		schema := string(raw)
+		pos := strings.Index(schema, "CREATE TABLE")
+		if pos < 0 {
+			database.Close()
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = errors.New("base schema has no tables")
+			return
+		}
+		if _, err = database.Exec(schema[pos:]); err != nil {
+			database.Close()
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+
+		migrationCtx, cancelMigration := context.WithTimeout(context.Background(), 60*time.Second)
+		err = dbschema.Migrate(migrationCtx, database)
+		cancelMigration()
+		if err != nil {
+			database.Close()
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = fmt.Errorf("initialize isolated service database: %w", err)
+			return
+		}
+		if err = database.Close(); err != nil {
+			_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
+			admin.Close()
+			p2SharedFixture.err = err
+			return
+		}
+
+		p2SharedFixture.admin = admin
+		p2SharedFixture.database = name
+		p2SharedFixture.dsn = dbCfg.FormatDSN()
+	})
+	return p2SharedFixture.err
+}
+
+func p2ResetSharedDatabase(database *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := database.Conn(ctx)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	t.Cleanup(func() { database.Close() })
-	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "infra", "mysql", "init", "001_schema.sql"))
+	defer conn.Close()
+
+	rows, err := conn.QueryContext(ctx, `
+		SELECT TABLE_NAME
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = DATABASE()
+		  AND TABLE_TYPE = 'BASE TABLE'
+		ORDER BY TABLE_NAME`)
 	if err != nil {
-		t.Fatal(err)
+		return err
 	}
-	// Omit the two production database selection statements, keeping all table DDL.
-	schema := string(raw)
-	pos := strings.Index(schema, "CREATE TABLE")
-	if pos < 0 {
-		t.Fatal("base schema has no tables")
+	var tables []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			rows.Close()
+			return err
+		}
+		tables = append(tables, table)
 	}
-	if _, err = database.Exec(schema[pos:]); err != nil {
-		t.Fatal(err)
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
 	}
-	host, port, err := net.SplitHostPort(cfg.Addr)
-	if err != nil {
-		t.Fatal(err)
+	if err := rows.Close(); err != nil {
+		return err
 	}
-	migrated, err := dbschema.Open(config.MySQL{Host: host, Port: port, User: cfg.User, Password: cfg.Passwd, Database: name})
-	if err != nil {
-		t.Fatal(err)
+
+	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=0"); err != nil {
+		return err
 	}
-	if err = dbschema.Migrate(context.Background(), migrated); err != nil {
-		migrated.Close()
-		t.Fatal(err)
+	reenable := true
+	defer func() {
+		if reenable {
+			_, _ = conn.ExecContext(context.Background(), "SET FOREIGN_KEY_CHECKS=1")
+		}
+	}()
+	for _, table := range tables {
+		quoted := "`" + strings.ReplaceAll(table, "`", "``") + "`"
+		if _, err := conn.ExecContext(ctx, "DELETE FROM "+quoted); err != nil {
+			return fmt.Errorf("clear %s: %w", table, err)
+		}
 	}
-	migrated.Close()
-	t.Logf("isolated database: %s", name)
-	return database, cfg.FormatDSN()
+	if _, err := conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS=1"); err != nil {
+		return err
+	}
+	reenable = false
+	return nil
+}
+
+func p2CleanupSharedDatabase() {
+	p2SharedFixture.Lock()
+	defer p2SharedFixture.Unlock()
+	if p2SharedFixture.admin == nil || p2SharedFixture.database == "" {
+		return
+	}
+	_, _ = p2SharedFixture.admin.Exec("DROP DATABASE IF EXISTS `" + p2SharedFixture.database + "`")
+	_ = p2SharedFixture.admin.Close()
+	p2SharedFixture.admin = nil
+	p2SharedFixture.database = ""
+	p2SharedFixture.dsn = ""
 }
 
 func TestProjectRuntimeDatabaseAcceptance(t *testing.T) {

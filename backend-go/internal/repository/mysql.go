@@ -2485,6 +2485,54 @@ func (r *MySQL) FailTask(
 	return nil
 }
 
+// FailTaskWithDiagnostics persists a bounded, privacy-safe diagnostic trace
+// together with the ERROR transition. It is used only when the streaming
+// transport has already emitted progress but cannot produce a terminal result.
+func (r *MySQL) FailTaskWithDiagnostics(
+	ctx context.Context,
+	uid int64,
+	id int64,
+	message string,
+	latency int64,
+	trace []map[string]any,
+) error {
+	traceJSON, err := json.Marshal(trace)
+	if err != nil {
+		return err
+	}
+	res, err := r.db.ExecContext(
+		ctx,
+		`
+		UPDATE tasks
+		SET
+			status = 'ERROR',
+			error_message = ?,
+			latency_ms = ?,
+			trace_json = ?,
+			continuation_json = NULL
+		WHERE id = ?
+		  AND user_id = ?
+		  AND status = 'RUNNING'
+		`,
+		message,
+		latency,
+		string(traceJSON),
+		id,
+		uid,
+	)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return ErrInvalidTaskState
+	}
+	return nil
+}
+
 // =========================================================
 // List Tasks
 // =========================================================

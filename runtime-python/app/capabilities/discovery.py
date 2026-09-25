@@ -1046,7 +1046,10 @@ def _skill_candidates(task: str, agents: Iterable[AgentProfile]) -> list[Capabil
                             if part
                         )
                     ),
-                    "skill 技能 agent capability 智能体能力",
+                    # Do not add generic words such as "agent/capability/智能体能力"
+                    # to every skill descriptor. A request that merely mentions
+                    # Agent Runtime would otherwise make every advertised skill
+                    # look relevant and explode a simple task into a large DAG.
                 )
                 if part
             )
@@ -1201,6 +1204,18 @@ def discover_capabilities(
     enabled_tools = [tool for tool in tools if bool(tool.enabled)]
     enabled_mcp = [server for server in mcp_servers if bool(server.enabled)]
 
+    if semantic_intent is None:
+        # Standalone V4.1 callers do not pass a semantic result. Derive the same
+        # descriptive intent before Tool/MCP ranking so explicit prohibitions are
+        # honored consistently. This signal never authorizes a capability.
+        from app.semantics import analyze_task_semantics
+
+        semantic_intent = analyze_task_semantics(task, has_attachments=has_attachments)
+
+    forbidden_capabilities = {
+        value.casefold() for value in semantic_intent.forbidden_capabilities
+    }
+
     tool_candidates = [
         _rank_tool(task, tool, kind=CapabilityKind.TOOL)
         for tool in enabled_tools
@@ -1210,10 +1225,14 @@ def discover_capabilities(
     selected_tool_names: set[str] = {
         item.name
         for item in tool_candidates[: max(1, max_tools)]
-        if item.score >= 0.30 and not _tool_is_forbidden(item.name, semantic_intent)
+        if (
+            "tool" not in forbidden_capabilities
+            and item.score >= 0.30
+            and not _tool_is_forbidden(item.name, semantic_intent)
+        )
     }
 
-    if not selected_tool_names and tool_candidates:
+    if "tool" not in forbidden_capabilities and not selected_tool_names and tool_candidates:
         best = tool_candidates[0]
         if best.name.startswith("local.") and best.score >= 0.24 and not _tool_is_forbidden(best.name, semantic_intent):
             selected_tool_names.add(best.name)
@@ -1226,7 +1245,7 @@ def discover_capabilities(
     selected_mcp_ids = [
         int(item.identifier)
         for item in mcp_candidates[: max(1, max_mcp_servers)]
-        if item.score >= 0.28
+        if "mcp" not in forbidden_capabilities and item.score >= 0.28
     ]
 
     skill_candidates = _skill_candidates(task, agents)
@@ -1245,13 +1264,6 @@ def discover_capabilities(
             break
 
     knowledge = _knowledge_candidate(task, has_attachments=has_attachments)
-    if semantic_intent is None:
-        # Standalone V4.1 callers do not pass a semantic result. Derive it from
-        # the same V1.1 analyzer; never make omission mean "knowledge disabled".
-        # This signal is descriptive only and MUST NOT authorize retrieval.
-        from app.semantics import analyze_task_semantics
-
-        semantic_intent = analyze_task_semantics(task, has_attachments=has_attachments)
     # A named project's implementation or a concrete personal document may
     # need scoped knowledge without explicitly saying "knowledge base". The
     # score is NOT an authorization: Engine selects ONLY Go-authorized catalog
@@ -1287,6 +1299,8 @@ def discover_capabilities(
     confidence = max(selected_scores, default=0.0)
     if selected_tool_names or selected_mcp_ids or selected_skill_names or use_project_knowledge:
         reason = "request semantics suggest relevant capabilities; execution and retrieval require separate authorization"
+    elif forbidden_capabilities:
+        reason = "explicit capability prohibition removed otherwise available capability families"
     else:
         reason = "no request-scoped capability exceeded the relevance threshold; use base model"
 

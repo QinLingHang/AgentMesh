@@ -59,3 +59,78 @@ async def test_timeout_is_normalized_and_bounded():
     with pytest.raises(ModelError) as raised:
         await ModelGateway(provider, timeout=0.001, max_retries=0).generate(request())
     assert raised.value.error_type == ModelErrorType.TIMEOUT and provider.calls == 1
+
+class StreamingProvider:
+    name = "streaming-fake"
+
+    def __init__(self, scripts):
+        self.scripts = list(scripts)
+        self.calls = 0
+
+    async def stream(self, req):
+        self.calls += 1
+        script = self.scripts[min(self.calls - 1, len(self.scripts) - 1)]
+        parts = []
+        for delay, text in script:
+            await asyncio.sleep(delay)
+            if text is None:
+                continue
+            parts.append(text)
+            yield {"type": "delta", "delta": text}
+        content = "".join(parts)
+        yield {
+            "type": "done",
+            "content": content,
+            "provider": self.name,
+            "model": req.model,
+            "input_tokens": 1,
+            "output_tokens": max(1, len(content)),
+            "total_tokens": 1 + max(1, len(content)),
+            "latency_ms": 1,
+            "finish_reason": "stop",
+        }
+
+
+@pytest.mark.asyncio
+async def test_stream_timeout_is_progress_idle_deadline_not_whole_response_deadline():
+    # Keep each progress gap comfortably below the idle deadline while
+    # making the total response duration exceed it.  The larger margins
+    # avoid Windows event-loop/timer-granularity flakes.
+    provider = StreamingProvider([
+        [(0.05, "a"), (0.05, "b"), (0.05, "c"), (0.05, "d")],
+    ])
+    gateway = ModelGateway(provider, timeout=0.15, max_retries=0)
+    response = await gateway.generate_stream(request())
+    assert response.content == "abcd"
+    assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_only_before_first_delta_on_progress_timeout():
+    provider = StreamingProvider([
+        [(0.25, "late")],
+        [(0.02, "ok")],
+    ])
+    events = []
+
+    gateway = ModelGateway(provider, timeout=0.10, max_retries=1)
+    response = await gateway.generate_stream(request(), events.append)
+    assert response.content == "ok"
+    assert provider.calls == 2
+    assert any(event["kind"] == "model_call_retry" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_stream_does_not_retry_after_real_delta_then_idle_timeout():
+    provider = StreamingProvider([
+        [(0.02, "first"), (0.25, "late")],
+        [(0.02, "must-not-run")],
+    ])
+    events = []
+
+    gateway = ModelGateway(provider, timeout=0.10, max_retries=2)
+    with pytest.raises(ModelError) as raised:
+        await gateway.generate_stream(request(), events.append)
+    assert raised.value.error_type == ModelErrorType.TIMEOUT
+    assert provider.calls == 1
+    assert not any(event["kind"] == "model_call_retry" for event in events)

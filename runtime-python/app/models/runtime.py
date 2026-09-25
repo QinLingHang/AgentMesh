@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.config import settings
 from app.kernel import RuntimeContext
 from app.models import ModelInputAttachment, ModelMessage, ModelRequest, ModelResponse
 from app.models.gateway import ModelEventHandler, ModelGateway
@@ -131,6 +132,13 @@ def _request_local_provider(item: ProjectModelRuntime):
         api_key=item.api_key.get_secret_value(),
         base_url=item.base_url,
         trust_env=False,
+        # Request-local BYOK previously bypassed the runtime pricing settings,
+        # so browser-selected qwen-plus calls always reported cost as unknown
+        # even when operators configured pricing. Pricing remains opt-in and
+        # account-specific; zero still means unknown rather than a fabricated
+        # zero-cost call.
+        input_cost_per_million=settings.model_input_cost_per_million,
+        output_cost_per_million=settings.model_output_cost_per_million,
     )
 
 

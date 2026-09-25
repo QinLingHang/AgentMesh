@@ -1736,14 +1736,15 @@ func (s *TaskService) recordRunCost(
 	taskID int64,
 	projectID *int64,
 	observability runtimeclient.ObservabilitySummary,
-	estimatedCost float64,
 ) {
 	if s.governance == nil || taskID <= 0 || uid <= 0 {
 		return
 	}
 	status := "unavailable"
+	modelCost := 0.0
 	if observability.ModelCostKnown {
 		status = "estimated"
+		modelCost = observability.ModelEstimatedCost
 	}
 	s.governance.RecordRunCost(ctx, model.RunCostRecord{
 		TaskID: taskID, UserID: uid, ProjectID: projectID,
@@ -1751,7 +1752,7 @@ func (s *TaskService) recordRunCost(
 		InputTokens:   int64(observability.ModelInputTokens),
 		OutputTokens:  int64(observability.ModelOutputTokens),
 		TotalTokens:   int64(observability.ModelTotalTokens),
-		EstimatedCost: estimatedCost, CostStatus: status,
+		EstimatedCost: modelCost, CostStatus: status,
 	})
 }
 
@@ -2250,6 +2251,12 @@ func (s *TaskService) RunInteractiveStream(
 		"serviceId":   modelRoute.ServiceID,
 		"serviceName": modelRoute.ServiceName,
 	})
+	streamDetail, _ := json.Marshal(map[string]any{
+		"provider":  modelRoute.Provider,
+		"model":     modelRoute.Model,
+		"streaming": true,
+		"transport": "go_direct",
+	})
 	trace := []map[string]any{
 		{
 			"kind": "model_route", "title": "Model Route", "status": "completed",
@@ -2257,7 +2264,7 @@ func (s *TaskService) RunInteractiveStream(
 		},
 		{
 			"kind": "model", "title": "Interactive Stream", "status": "completed",
-			"detail": "direct token streaming", "elapsedMs": elapsed,
+			"detail": string(streamDetail), "elapsedMs": elapsed,
 		},
 	}
 	trace = append(executionRoutingTrace(in, "direct"), trace...)
@@ -2288,13 +2295,13 @@ func (s *TaskService) RunInteractiveStream(
 	if in.ConversationID != nil {
 		assistantMessage = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: finalAnswer, Status: "COMPLETED", RequestID: requestID,
-			Metadata: map[string]any{
+			Metadata: executionRoutingMetadata(in, map[string]any{
 				"taskId": task.ID, "runtimePhase": "interactive_stream", "status": "COMPLETED",
 				"selectedAgents": selectedAgents, "trace": trace, "dag": dag,
 				"scheduler": in.Scheduler, "planner": in.Planner,
 				"executionMode": in.ExecutionMode, "synthesisMode": in.SynthesisMode,
 				"observability": observability, "citations": []runtimeclient.RuntimeCitation{},
-			},
+			}),
 		}
 	}
 
@@ -2313,7 +2320,7 @@ func (s *TaskService) RunInteractiveStream(
 		pid := projectRuntimeContext.ProjectID
 		costProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, costProjectID, observability, cost)
+	s.recordRunCost(ctx, uid, task.ID, costProjectID, observability)
 
 	task.Status = "COMPLETED"
 	task.ResultText = &finalAnswer
@@ -2966,13 +2973,7 @@ func (s *TaskService) Run(
 			started,
 		).Milliseconds()
 
-		_ = s.tasks.FailTask(
-			ctx,
-			uid,
-			task.ID,
-			err.Error(),
-			elapsed,
-		)
+		s.failTaskAfterRuntimeError(ctx, uid, task.ID, err, elapsed)
 
 		return nil, err
 	}
@@ -2995,7 +2996,7 @@ func (s *TaskService) Run(
 		pid := projectRuntimeContext.ProjectID
 		runCostProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(
@@ -3128,7 +3129,7 @@ func (s *TaskService) Run(
 	if in.ConversationID != nil {
 		assistantMessage = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: conversationIDValue(in.ConversationID), Content: response.Answer, Status: "COMPLETED", RequestID: requestID,
-			Metadata: map[string]any{
+			Metadata: executionRoutingMetadata(in, map[string]any{
 				"taskId":         task.ID,
 				"runtimePhase":   "completed",
 				"trace":          response.Trace,
@@ -3143,7 +3144,7 @@ func (s *TaskService) Run(
 				"scorecard":      response.Scorecard,
 				"agentFeedback":  response.AgentFeedback,
 				"citations":      normalizeRuntimeCitations(response.Citations),
-			},
+			}),
 		}
 	}
 
@@ -3626,7 +3627,7 @@ func (s *TaskService) Resume(
 		pid := projectRuntimeContext.ProjectID
 		runCostProjectID = &pid
 	}
-	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability, response.EstimatedCost)
+	s.recordRunCost(ctx, uid, task.ID, runCostProjectID, response.Observability)
 
 	runtimeStatus :=
 		normalizeRuntimeStatus(

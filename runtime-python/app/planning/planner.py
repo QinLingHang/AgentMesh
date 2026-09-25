@@ -139,6 +139,7 @@ class SemanticTaskPlanner:
                     available_capabilities=available,
                     baseline_capabilities=list(profile.required_capabilities),
                 )
+                validated = self._reconcile_source_bounded_knowledge(validated, semantic, task)
                 return SemanticPlanningOutcome(plan=validated, used_model=True)
             except Exception as exc:
                 fallback = self._deterministic_fallback(task, profile, available, semantic)
@@ -155,6 +156,60 @@ class SemanticTaskPlanner:
             used_model=False,
             fallback_reason="planning model unavailable",
         )
+
+
+    @staticmethod
+    def _reconcile_source_bounded_knowledge(
+        plan: ExecutionPlan,
+        semantic: TaskSemanticIntent | None,
+        task: str = "",
+    ) -> ExecutionPlan:
+        """Prevent source-bounded transformations from inventing Knowledge.
+
+        Request-level semantics establish whether the user goal needs external
+        or tenant knowledge. When that contract is NONE and no Tool/external
+        dependency exists, a downstream step that consumes validated upstream
+        output is a transformation of already-available material; it cannot
+        independently upgrade itself to REQUIRED knowledge. This is a data-flow
+        rule, not a growing verb/format keyword table.
+
+        Root steps are deliberately left unchanged. That keeps genuinely
+        external evidence/retrieval work fail-closed if the planner and the
+        request-level analyzer disagree.
+        """
+        if semantic is None or semantic.knowledge_dependency.value != "NONE":
+            return plan
+        if semantic.requires_tool or semantic.requires_external:
+            return plan
+
+        # A user can supply the source material inline even when an untrusted
+        # planner forgets to label inputSource=REQUEST_INPUT. Detect the data
+        # boundary structurally (a colon/quoted payload with substantive text),
+        # not by maintaining a summarize/rewrite verb list. Request-level
+        # semantics remain authoritative: this inference is disabled whenever
+        # Tool/external/Knowledge is actually required.
+        normalized_task = " ".join(str(task or "").split())
+        inline_request_source = bool(
+            re.search(r"[：:]\s*[^\s：:]{2,}", normalized_task)
+            or re.search(r"[“\"‘][^”\"’]{2,}[”\"’]", normalized_task)
+        )
+
+        changed = False
+        steps: list[PlanStep] = []
+        for step in plan.steps:
+            consumes_bounded_source = (
+                bool(step.depends_on)
+                or step.condition == "has_upstream_output"
+                or step.input_source in {"REQUEST_INPUT", "UPSTREAM"}
+                or (inline_request_source and not step.depends_on and step.input_source != "EXTERNAL")
+            )
+            if step.knowledge_dependency == "REQUIRED" and consumes_bounded_source:
+                step = step.model_copy(update={"knowledge_dependency": "NONE"})
+                changed = True
+            steps.append(step)
+        if not changed:
+            return plan
+        return plan.model_copy(update={"steps": steps})
 
     @staticmethod
     def available_capabilities(
@@ -297,12 +352,12 @@ class SemanticTaskPlanner:
             "Schema:\n"
             '{"goal":"...","requiresSynthesis":true,"steps":['
             '{"id":"short_id","objective":"...","capability":"...",'
-            '"dependsOn":[],"optional":false,"condition":null,'
+            '"dependsOn":[],"optional":false,"condition":null,"inputSource":"UNSPECIFIED|REQUEST_INPUT|UPSTREAM|EXTERNAL",'
             '"knowledgeDependency":"NONE|OPTIONAL|REQUIRED","forbiddenActions":[]}]}\n'
             f"AVAILABLE_CAPABILITIES={json.dumps(catalog, ensure_ascii=False)}\n"
             f"BASELINE_PROFILE={profile.model_dump_json()}\n"
             f"SEMANTIC_CONSTRAINTS={(semantic.model_dump_json(by_alias=True) if semantic is not None else '{}')}\n"
-            "Never weaken forbiddenActions. Knowledge dependency describes evidence requirements; it does not grant access.\n"
+            "Never weaken forbiddenActions. Knowledge dependency describes evidence requirements; it does not grant access. If SEMANTIC_CONSTRAINTS.knowledgeDependency is NONE, then a step that only transforms user-provided material or a dependency's upstream output (summarize, rewrite, extract, synthesize, render, generate from that source) must keep knowledgeDependency=NONE. Do not invent retrieval merely because a transformation creates new wording. Only mark REQUIRED when the user goal itself needs external/tenant evidence.\n"
             "USER_GOAL_BEGIN\n"
             f"{task}\n"
             "USER_GOAL_END"

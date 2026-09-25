@@ -31,6 +31,18 @@ class RoutingTaskConstraints(TaskConstraints):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
 
+class PreviousTurnContext(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    exists: bool = False
+    execution_route: Literal["NONE", "FAST_PATH", "RUNTIME"] = Field(default="NONE", alias="executionRoute")
+    status: str = ""
+    runtime_phase: str = Field(default="", alias="runtimePhase")
+    knowledge_used: bool = Field(default=False, alias="knowledgeUsed")
+    tool_used: bool = Field(default=False, alias="toolUsed")
+    mcp_used: bool = Field(default=False, alias="mcpUsed")
+
+
 class ExecutionRoutingRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     schema_version: Literal["execution-routing.v1"] = Field(default="execution-routing.v1", alias="schemaVersion")
@@ -40,6 +52,7 @@ class ExecutionRoutingRequest(BaseModel):
     # Trusted Go metadata-only assessment. Never supplied by the browser.
     model_readable_attachments: bool = Field(default=False, alias="modelReadableAttachments")
     continuation_state: Literal["NONE", "CHAT", "ONE_PENDING", "AMBIGUOUS"] = Field(default="NONE", alias="continuationState")
+    previous_turn: PreviousTurnContext = Field(default_factory=PreviousTurnContext, alias="previousTurn")
     # Request-local BYOK; never included in the response, trace, or logs.
     project_model: RoutingModelRuntimeConfig | None = Field(default=None, alias="projectModel", exclude=True)
     model_pool: list[RoutingModelRuntimeConfig] = Field(default_factory=list, max_length=32, alias="modelPool", exclude=True)
@@ -171,6 +184,40 @@ def _chat_model_followup(text: str) -> bool:
         _any(text, _CHAT_ANSWER_REFERENCE)
         and (_any(text, _CHAT_MODEL_FOLLOWUP) or _chat_answer_fragment_reference(text))
     )
+
+
+_ANAPHORIC_OPENING_RE = re.compile(
+    r"^(?:(?:那(?:它|个|种|样|一|两)?|它|这些|那些|前者|后者|上述|前面那个|上面那个)"
+    r"(?:\b|和|与|跟|是|的|呢|吗|有|为|比|最|怎么|为什么|如何)|这个|那个)"
+)
+
+
+def _has_unresolved_anaphora(text: str) -> bool:
+    """Return True only for a clearly context-dependent opening reference.
+
+    This is a grammar-level guard, not a technical keyword allowlist. A prior
+    turn existing must not force a fully self-contained conceptual question
+    into Runtime, while short deictic/anaphoric follow-ups still need the
+    semantic routing model to resolve what they refer to.
+    """
+    compact = _clean(text)
+    if not compact or _inline_material(compact):
+        return False
+    return bool(_ANAPHORIC_OPENING_RE.search(compact))
+
+
+def _self_contained_explanation(text: str) -> bool:
+    """Require an explicit subject/object, not only an interrogative shell."""
+    compact = _clean(text)
+    if not compact or _has_unresolved_anaphora(compact):
+        return False
+    residual = re.sub(
+        r"^(?:请|麻烦)?(?:解释一下|解释下|解释|介绍一下|介绍|说一下|说说|什么是|为什么|为何|怎么|如何|区别(?:是)?什么|差别(?:是)?什么)\s*",
+        "",
+        compact,
+    )
+    residual = re.sub(r"[\s。.!！?？,，;；:：]+", "", residual)
+    return len(residual) >= 2
 
 
 def _multi_step_instruction(text: str) -> bool:
@@ -309,16 +356,32 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
     if inline_without_rag:
         knowledge = KnowledgeDependency.NONE
     document_only = _attachment_comparison(req, text)
+    semantic_model_only = (
+        knowledge == KnowledgeDependency.NONE
+        and not semantic.requires_tool
+        and not semantic.requires_external
+        and not has_live_personal_data_need(req.task)
+    )
+    # Treat inline prose as data, not as executable instructions. Words such as
+    # "Runtime", "tool call", "execute" or "finally" inside supplied source
+    # material must not upgrade a summary/translation/rewrite request to the
+    # governed Runtime path when the semantic contract is model-only.
+    inline_model_transform = (
+        semantic_model_only
+        and _inline_material(text)
+        and _model_only_request(text)
+    )
     must_use_runtime = (
         (req.has_attachments and not document_only)
         or req.rag_mode == "ON"
         or (knowledge != KnowledgeDependency.NONE and not document_only)
         or (semantic.requires_tool and not document_only)
+        or ("agent" in {item.casefold() for item in semantic.required_capabilities} and not document_only)
         or has_live_personal_data_need(req.task)
-        or (_any(text, _OPERATION) and not document_only)
-        or (_multi_step_instruction(text) and not document_only)
+        or (_any(text, _OPERATION) and not document_only and not inline_model_transform)
+        or (_multi_step_instruction(text) and not document_only and not inline_model_transform)
         or req.continuation_state in {"ONE_PENDING", "AMBIGUOUS"}
-        or _any(text, _TASK_OP)
+        or (_any(text, _TASK_OP) and not inline_model_transform)
     )
     if document_only:
         # Request-local attachments are not tenant Knowledge. Go has already
@@ -401,25 +464,103 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
             capabilityRequired=not chat_only, reasonCodes=["MISSING_CHAT_CONTEXT" if chat_only else "MISSING_CONTINUATION_CONTEXT"],
             unresolvedRequirements=["请提供需要继续解释或修改的上一条内容" if chat_only else "请说明要继续的具体内容"],
         )
-    # A model can add dependencies but cannot remove deterministic requirements,
-    # assert permissions, select capability refs or override a user RAG setting.
+    # The model describes semantic facts only. It may resolve conversational
+    # uncertainty when Go supplied trusted previous-turn metadata, but it never
+    # removes an already-established deterministic dependency or grants access.
+    model_resolved_chat_only = False
     if descriptor is not None:
         kinds = tuple(getattr(descriptor, "capability_kinds", ()) or ())
         model_knowledge = getattr(descriptor, "knowledge_dependency", "NONE")
+        continuation_intent = getattr(descriptor, "continuation_intent", "NONE")
+        references_previous = bool(getattr(descriptor, "references_previous", False))
+        needs_fresh_data = bool(getattr(descriptor, "needs_fresh_data", False))
+        external_action_required = bool(getattr(descriptor, "external_action_required", False))
+
+        # A semantic continuation intent already expresses the relation to the
+        # authoritative previous turn. Requiring a second independent
+        # referencesPrevious=true bit made implicit conceptual follow-ups brittle:
+        # a model could correctly classify NEW_FACT_FOLLOWUP while omitting that
+        # redundant boolean and accidentally restart Runtime. Keep hard governed
+        # dependencies authoritative, but allow capability-free conversational
+        # continuity to inherit from trusted previous-turn provenance.
+        continuation_is_model_only = continuation_intent in {"EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS"}
+        previous_provenance_allows_model_only = True
+        semantic_links_previous = references_previous or continuation_intent in {
+            "EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS", "NEW_FACT_FOLLOWUP",
+        }
+        if continuation_intent == "NEW_FACT_FOLLOWUP":
+            # A new conceptual fact can remain conversational only when it
+            # continues a completed capability-free FAST_PATH answer. A prior
+            # Tool/Knowledge/MCP result needs Runtime for any new factual claim.
+            continuation_is_model_only = (
+                req.previous_turn.execution_route == "FAST_PATH"
+                and req.previous_turn.status.strip().upper() == "COMPLETED"
+            )
+            previous_provenance_allows_model_only = (
+                not req.previous_turn.knowledge_used
+                and not req.previous_turn.tool_used
+                and not req.previous_turn.mcp_used
+            )
+        requested_effects = tuple(getattr(descriptor, "requested_effects", ()) or ())
+        hard_capability_kinds = {str(kind).upper() for kind in kinds} & {"KNOWLEDGE", "TOOL", "MCP"}
+        descriptor_is_capability_free = (
+            not needs_fresh_data
+            and not external_action_required
+            and model_knowledge == "NONE"
+            and not hard_capability_kinds
+            and not requested_effects
+        )
+        model_resolved_chat_only = (
+            req.previous_turn.exists
+            and previous_provenance_allows_model_only
+            and descriptor_is_capability_free
+            and not req.previous_turn.knowledge_used
+            and req.continuation_state not in {"ONE_PENDING", "AMBIGUOUS"}
+            and (
+                (semantic_links_previous and continuation_is_model_only)
+                # An explicit deictic/anaphoric opening is already grammar-level
+                # evidence that the utterance depends on the trusted previous turn.
+                # The routing model still MUST be called; when its validated
+                # descriptor reports no governed dependency/effect/fresh-data need,
+                # do not make FAST_PATH depend on a second brittle continuation bit.
+                or _has_unresolved_anaphora(text)
+            )
+        )
         if model_knowledge == "REQUIRED":
             knowledge = KnowledgeDependency.REQUIRED
             must_use_runtime = True
         elif model_knowledge == "OPTIONAL" and knowledge == KnowledgeDependency.NONE:
             knowledge = KnowledgeDependency.OPTIONAL
             must_use_runtime = True
-        must_use_runtime = must_use_runtime or bool(kinds) or bool(getattr(descriptor, "multi_step", False)) or bool(getattr(descriptor, "requested_effects", ()))
+        descriptor_requires_runtime = (
+            bool(kinds)
+            or bool(getattr(descriptor, "multi_step", False))
+            or bool(requested_effects)
+        )
+        # Once the semantic model has explicitly linked a conceptual follow-up
+        # to a completed capability-free FAST_PATH answer, descriptive AGENT or
+        # multi-step noise must not restart Runtime. Tool/MCP/Knowledge/fresh-data
+        # signals above remain authoritative and keep this false.
+        if model_resolved_chat_only:
+            descriptor_requires_runtime = False
+        must_use_runtime = must_use_runtime or descriptor_requires_runtime
         unknowns = list(getattr(descriptor, "unknowns", ()) or ())
         if unknowns:
-            return ExecutionRoutingResult(
-                executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
-                capabilityRequired=True, reasonCodes=["MODEL_UNRESOLVED_REQUIREMENT"],
-                unresolvedRequirements=[str(item)[:160] for item in unknowns[:4]], analysisSource="MODEL",
-            )
+            # The model can describe the same conversational referent as
+            # ``it``, ``subject``, ``referenced concept``, or another free-form
+            # label. Routing must not depend on that unstable wording. Once the
+            # guarded predicate above has established a trusted, completed,
+            # capability-free FAST_PATH continuation, normal chat history owns
+            # resolution of the referent. Real missing runtime targets still
+            # fail closed: deterministic action/target checks run earlier, and
+            # any Knowledge/Tool/MCP/fresh-data/effect signal prevents
+            # model_resolved_chat_only from becoming true.
+            if not (model_resolved_chat_only and _has_unresolved_anaphora(text)):
+                return ExecutionRoutingResult(
+                    executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
+                    capabilityRequired=True, reasonCodes=["MODEL_UNRESOLVED_REQUIREMENT"],
+                    unresolvedRequirements=[str(item)[:160] for item in unknowns[:4]], analysisSource="MODEL",
+                )
         if (req.rag_mode == "OFF" or semantic.rag_preference is RagPreference.DISABLE) and knowledge != KnowledgeDependency.NONE:
             return ExecutionRoutingResult(
                 executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
@@ -431,6 +572,13 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
             text in _SAFE_GREETING
             or bool(re.fullmatch(r"(?:谢谢|感谢)[，, ]?(?:已经|已)?(?:解决了?|搞定了?|明白了?|知道了?)", text))
             or document_only or _model_only_request(text)
+            or (
+                semantic.explanation_only
+                and semantic_model_only
+                and not req.has_attachments
+                and _self_contained_explanation(text)
+            )
+            or model_resolved_chat_only
             or (req.continuation_state == "CHAT" and _chat_model_followup(text))
             or (inline_without_rag and _inline_material(text))
             or (bool(_any(text, _GENERIC)) and not req.has_attachments and req.continuation_state == "NONE"
@@ -447,6 +595,77 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
     )
 
 
+def trusted_fast_path_continuation_fallback(
+    req: ExecutionRoutingRequest, baseline: ExecutionRoutingResult,
+) -> ExecutionRoutingResult:
+    """Conservative fallback when semantic-model refinement is unavailable.
+
+    The LLM remains the primary interpreter for implicit or anaphoric
+    continuation. This fallback is intentionally narrower: it only keeps a
+    deterministic CHAT continuation on FAST_PATH when Go has already resolved
+    the reference from trusted conversation state and the immediately preceding
+    authoritative turn was a completed, capability-free FAST_PATH answer.
+    Implicit/ambiguous references stay on the semantic-model path; this guard
+    never upgrades permissions or resumes work.
+    """
+    if baseline.disposition != "EXECUTE" or baseline.execution_route != "RUNTIME":
+        return baseline
+    previous = req.previous_turn
+    if not (
+        previous.exists
+        and previous.execution_route == "FAST_PATH"
+        and previous.status.strip().upper() == "COMPLETED"
+        and not previous.knowledge_used
+        and not previous.tool_used
+        and not previous.mcp_used
+        and req.continuation_state == "CHAT"
+        and not req.has_attachments
+        and req.rag_mode != "ON"
+    ):
+        return baseline
+
+    text = _clean(req.task)
+    if not text or len(text) > 120:
+        return baseline
+    if _any(text, _TASK_OP + _OPERATION + _MULTISTEP):
+        return baseline
+    if _any(text, (
+        "现在", "目前", "当前", "最新", "实时", "再查", "重新查", "刷新",
+        "today", "now", "latest", "refresh", "recheck",
+    )):
+        return baseline
+
+    # The fallback is intentionally semantic rather than a growing phrase table.
+    # It only accepts a request that the deterministic analyzer itself classifies
+    # as capability-free explanation/model work. Ambiguous anaphora remains on
+    # Runtime unless the semantic model successfully resolves it above.
+    semantic = analyze_task_semantics(
+        req.task, has_attachments=req.has_attachments, enable_implicit_business=True,
+    )
+    capability_free_model_work = (
+        semantic.knowledge_dependency == KnowledgeDependency.NONE
+        and not semantic.requires_tool
+        and not semantic.requires_external
+        and not has_live_personal_data_need(req.task)
+        and (
+            semantic.explanation_only
+            or _model_only_request(text)
+            or _chat_model_followup(text)
+            or _any(text, _CONTINUATION)
+        )
+    )
+    if not capability_free_model_work:
+        return baseline
+
+    return baseline.model_copy(update={
+        "execution_route": "FAST_PATH",
+        "knowledge_dependency": KnowledgeDependency.NONE,
+        "capability_required": False,
+        "reason_codes": ["TRUSTED_FAST_PATH_CONTINUATION_FALLBACK"],
+        "analysis_source": "RULE",
+    })
+
+
 def needs_semantic_routing_model(req: ExecutionRoutingRequest, baseline: ExecutionRoutingResult) -> bool:
     """Only ambiguous, potentially model-only text needs extra LLM judgment."""
     if not req.allow_model or baseline.disposition != "EXECUTE":
@@ -458,4 +677,9 @@ def needs_semantic_routing_model(req: ExecutionRoutingRequest, baseline: Executi
         return False
     if req.continuation_state in ("AMBIGUOUS", "ONE_PENDING") or _any(text, _OPERATION + _MULTISTEP):
         return False
+    # Trusted prior-turn metadata makes short natural follow-ups worth a bounded
+    # semantic-model call. This is deliberately not a keyword allowlist: the
+    # model decides whether the new utterance actually refers to the prior answer.
+    if req.previous_turn.exists and len(text) <= 120:
+        return True
     return (_any(text, _UNCERTAIN) and len(text) >= 5) or len(text) >= 48

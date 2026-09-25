@@ -30,6 +30,7 @@ class TaskSemanticIntent(BaseModel):
     intents: list[str] = Field(default_factory=list)
     entities: list[str] = Field(default_factory=list)
     required_capabilities: list[str] = Field(default_factory=list, alias="requiredCapabilities")
+    forbidden_capabilities: list[str] = Field(default_factory=list, alias="forbiddenCapabilities")
     forbidden_actions: list[str] = Field(default_factory=list, alias="forbiddenActions")
     knowledge_dependency: KnowledgeDependency = Field(
         default=KnowledgeDependency.NONE,

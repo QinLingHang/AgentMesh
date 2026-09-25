@@ -87,7 +87,7 @@ class Settings(
     # ExecutionPlan. Invalid/unavailable model output fails safely to the
     # existing deterministic profiler/scheduler path.
     execution_routing_semantic_model_enabled: bool = True
-    execution_routing_semantic_model_timeout_seconds: float = 1.2
+    execution_routing_semantic_model_timeout_seconds: float = 6.0
 
     semantic_planner_enabled: bool = True
     semantic_planner_timeout_seconds: float = 12.0

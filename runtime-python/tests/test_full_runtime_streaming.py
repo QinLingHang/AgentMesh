@@ -90,3 +90,47 @@ def test_mismatched_final_stream_is_not_accepted():
         with pytest.raises(RuntimeError, match="did not match"):
             await ModelGateway(Mismatch(), timeout=10, max_retries=0).generate_stream(_request())
     asyncio.run(go())
+
+
+def test_recent_control_plane_chat_history_does_not_disable_native_runtime_streaming():
+    from app.runtime_streaming_policy import recent_conversation_context_allows_stream
+    history = [object(), object()]
+    assert recent_conversation_context_allows_stream(history, 'control_plane_history')
+    assert not recent_conversation_context_allows_stream(history, 'runtime_memory')
+    assert recent_conversation_context_allows_stream([], 'runtime_memory')
+
+
+def test_same_turn_automatic_memory_write_does_not_disable_runtime_native_streaming():
+    """Regression for Interview Release: Memory writer always returns an outcome.
+
+    A completed/skipped automatic write is an auxiliary side effect based only on
+    direct user text. It is not injected into the same answer and same-turn
+    re-retrieval is forbidden, so it must not be a native-streaming blocker.
+    """
+    from pathlib import Path
+
+    engine_source = (
+        Path(__file__).resolve().parents[1] / "app" / "services" / "engine.py"
+    ).read_text(encoding="utf-8")
+    assert "and memory_write_outcome is None" not in engine_source
+    assert "Same-turn automatic Memory writes" in engine_source or "Automatic same-turn Memory write" in engine_source
+
+def test_agentmesh_topic_name_never_disables_native_runtime_streaming():
+    """Streaming eligibility must depend on evidence/state, never topic words."""
+    from pathlib import Path
+
+    engine_source = (
+        Path(__file__).resolve().parents[1] / "app" / "services" / "engine.py"
+    ).read_text(encoding="utf-8")
+    assert '"agentmesh" not in req.task.casefold()' not in engine_source
+
+
+def test_mcp_selection_skip_is_not_counted_as_mcp_activity():
+    from pathlib import Path
+
+    engine_source = (
+        Path(__file__).resolve().parents[1] / "app" / "services" / "engine.py"
+    ).read_text(encoding="utf-8")
+    assert '"capability_discovery",\n                "MCP Selection Skipped"' in engine_source
+    assert '"mcp",\n                "MCP Discovery Skipped"' not in engine_source
+

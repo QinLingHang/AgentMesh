@@ -3,8 +3,10 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -757,5 +759,92 @@ func TestP9ExecuteRequestMapsProjectModelWithoutPublicProjection(t *testing.T) {
 	_, err := client.Execute(context.Background(), ExecuteRequest{UserID: 1, RequestID: "governance", Task: "hello", Scheduler: "greedy", Agents: []model.Agent{{ID: 1, Name: "General", Endpoint: "internal://general", Protocol: "internal", Capabilities: []string{"general"}}}, ProjectModel: &ProjectModelRuntime{Provider: "openai-compatible", BaseURL: "https://api.example.test/v1", ModelName: "tenant-model", APIKey: "tenant-secret"}})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestExecuteStreamIsNotBoundedByWholeResponseClientTimeout(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/v1/runtime/execute-stream" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, _ := w.(http.Flusher)
+		for i := 0; i < 5; i++ {
+			_, _ = w.Write([]byte(`{"type":"trace","trace":{"kind":"agent","status":"running","elapsedMs":1}}` + "\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		_, _ = w.Write([]byte(`{"type":"result","result":{"status":"COMPLETED","answer":"ok"}}` + "\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "internal", 35*time.Millisecond)
+	ctx := WithStreamEventSink(context.Background(), func(map[string]any) {})
+	started := time.Now()
+	response, err := client.Execute(ctx, ExecuteRequest{})
+	if err != nil {
+		t.Fatalf("healthy long-lived stream was aborted: %v", err)
+	}
+	if response == nil || response.Status != "COMPLETED" || response.Answer != "ok" {
+		t.Fatalf("unexpected response: %+v", response)
+	}
+	if elapsed := time.Since(started); elapsed < 80*time.Millisecond {
+		t.Fatalf("test did not exceed ordinary client timeout: %s", elapsed)
+	}
+}
+
+func TestExecuteStreamUsesIdleTimeoutAndReturnsBoundedPartialSummary(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		flusher, _ := w.(http.Flusher)
+		_, _ = w.Write([]byte(`{"type":"trace","trace":{"kind":"planner","status":"running","elapsedMs":12,"detail":"PRIVATE"}}` + "\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		time.Sleep(100 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "internal", 25*time.Millisecond)
+	ctx := WithStreamEventSink(context.Background(), func(map[string]any) {})
+	_, err := client.Execute(ctx, ExecuteRequest{})
+	if err == nil || !strings.Contains(err.Error(), "runtime stream idle timeout") {
+		t.Fatalf("expected idle timeout, got %v", err)
+	}
+	var streamErr *RuntimeStreamError
+	if !errors.As(err, &streamErr) {
+		t.Fatalf("expected RuntimeStreamError, got %T", err)
+	}
+	if streamErr.Partial.EventCount != 1 || streamErr.Partial.TraceEventCount != 1 {
+		t.Fatalf("unexpected partial counters: %+v", streamErr.Partial)
+	}
+	traceJSON, marshalErr := json.Marshal(streamErr.PartialTrace())
+	if marshalErr != nil {
+		t.Fatal(marshalErr)
+	}
+	if strings.Contains(string(traceJSON), "PRIVATE") {
+		t.Fatalf("partial summary leaked trace detail: %s", traceJSON)
+	}
+}
+
+func TestWithStreamEventSinkDetachesBrowserCancellationFromAuthoritativeExecution(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	ctx := WithStreamEventSink(parent, func(map[string]any) {})
+	<-parent.Done()
+	if err := ctx.Err(); err != nil {
+		t.Fatalf("authoritative stream context inherited browser cancellation: %v", err)
+	}
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("authoritative stream context inherited browser deadline")
+	}
+	if streamEventSinkFromContext(ctx) == nil {
+		t.Fatal("stream sink was lost while detaching cancellation")
 	}
 }

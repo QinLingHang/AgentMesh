@@ -29,6 +29,7 @@ from app.agents.capability import (
     effective_capability_profile,
 )
 from app.config import settings
+from app.runtime_streaming_policy import recent_conversation_context_allows_stream
 from app.capabilities import (
     contextualize_discovery_task,
     continuation_subject_task,
@@ -157,6 +158,7 @@ from app.planning import (
 from app.services.plan_compiler import (
     PlanCompiler,
 )
+from app.services.upstream_context import build_bounded_upstream_context
 from app.services.quality_gate import (
     QualityGate,
     QualityGateError,
@@ -195,6 +197,7 @@ from app.tools.loop import safe as safe_tool_payload
 # ============================================================
 # Runtime Control-flow Signal
 # ============================================================
+
 
 
 class RuntimeTaskInterrupted(
@@ -3077,12 +3080,19 @@ class RuntimeEngine:
 
         if req.mcp_servers and not selected_mcp_server_ids:
             event(
-                "mcp",
-                "MCP Discovery Skipped",
+                "capability_discovery",
+                "MCP Selection Skipped",
                 "completed",
                 json.dumps(
                     {
-                        "reason": "capability discovery found no relevant MCP connector",
+                        "reason": (
+                            "user explicitly prohibited MCP"
+                            if "mcp" in {
+                                item.casefold()
+                                for item in semantic_intent.forbidden_capabilities
+                            }
+                            else "capability discovery found no relevant MCP connector"
+                        ),
                         "configuredServers": len(req.mcp_servers),
                     },
                     ensure_ascii=False,
@@ -3491,6 +3501,7 @@ class RuntimeEngine:
             memory_messages: list[
                 MemoryMessage
             ] = []
+            history_source = "none"
 
             if (
                 req.conversation_id
@@ -5326,12 +5337,14 @@ class RuntimeEngine:
                 and not memory_forget_requested
                 and not long_term_memories
                 and not conversation_memories
-                and not memory_messages
-                and memory_write_outcome is None
+                and recent_conversation_context_allows_stream(memory_messages, history_source)
+                # Automatic same-turn Memory write is an auxiliary side effect,
+                # never answer context, and is forbidden from being re-retrieved
+                # in this turn. Its completed/skipped outcome must therefore not
+                # turn a native provider stream into one-shot generation.
                 and not model_attachments
                 and req.synthesis_mode != "always"
                 and not collaboration_plan.requires_synthesis
-                and "agentmesh" not in req.task.casefold()
             )
             stream_single_agent_claimed = False
 
@@ -5690,7 +5703,28 @@ class RuntimeEngine:
                         on_model_event=(
                             model_event
                         ),
-                        on_delta=(delta_sink if stream_this_agent else None),
+                        # Runtime DAG internal/model-only nodes consume the
+                        # provider's native stream even when their tokens are
+                        # not browser-facing. The silent sink selects the
+                        # streaming model path without exposing intermediate
+                        # node text. This turns MODEL_TIMEOUT into a progress
+                        # (idle) deadline instead of a whole-generation
+                        # deadline, while the one browser-owned node still
+                        # receives the real delta sink. Tools/attachments keep
+                        # their existing execution semantics.
+                        on_delta=(
+                            delta_sink
+                            if stream_this_agent
+                            else (
+                                (lambda _chunk: None)
+                                if (
+                                    agent.protocol.strip().lower() == "internal"
+                                    and not tool_execution_enabled
+                                    and not model_attachments
+                                )
+                                else None
+                            )
+                        ),
 
                         tool_registry=(
                             tool_registry
@@ -6640,44 +6674,31 @@ class RuntimeEngine:
 
                 if upstream_outputs:
 
-                    upstream_parts: list[
-                        str
-                    ] = []
+                    bounded_upstream = build_bounded_upstream_context(
+                        upstream_outputs,
+                    )
 
-                    for (
-                        upstream_node_id,
-                        upstream_result,
-                    ) in (
-                        upstream_outputs
-                        .items()
-                    ):
-
-                        upstream_text = (
-                            upstream_result[
-                                1
-                            ]
-                        )
-
-                        upstream_parts.append(
-                            (
-                                "[Upstream "
-                                f"{upstream_node_id}]"
-                                "\n"
-                                f"{upstream_text}"
-                            )
-                        )
+                    event(
+                        "context",
+                        "Upstream Context Bounded",
+                        "completed",
+                        json.dumps(
+                            {
+                                "itemCount": bounded_upstream.item_count,
+                                "originalChars": bounded_upstream.original_chars,
+                                "includedChars": bounded_upstream.included_chars,
+                                "truncatedItems": bounded_upstream.truncated_items,
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
 
                     task_input = (
                         task_input
                         + "\n\n"
-                        + (
-                            "Upstream Agent "
-                            "Results:"
-                        )
+                        + "Upstream Agent Results:"
                         + "\n\n"
-                        + "\n\n".join(
-                            upstream_parts
-                        )
+                        + bounded_upstream.text
                         + "\n\n"
                         + (
                             "Use the upstream "
@@ -7747,12 +7768,42 @@ class RuntimeEngine:
 
                 try:
 
-                    synthesis_model = (
-                        self.registry
-                        .context
-                        .get(
-                            "model.default"
-                        )
+                    # Synthesis is a real request model call and must honor
+                    # the same request-local BYOK/model-selection contract as
+                    # Agent execution. ``model.default`` is only a registry
+                    # plugin and does not expose native ``generate_stream``;
+                    # using it here silently disabled Full Runtime streaming.
+                    synthesis_agent = AgentProfile(
+                        id=0,
+                        name="ResultSynthesizer",
+                        endpoint="internal://result-synthesis",
+                        protocol="internal",
+                        capabilities=["synthesis"],
+                        modelRuntime="adaptive",
+                    )
+                    synthesis_model = self.model_runtime_resolver.resolve(
+                        synthesis_agent,
+                        adaptive=(
+                            settings.model_router_enabled
+                            and req.scheduler == "adaptive"
+                        ),
+                        constraints=req.constraints,
+                        profile=profile,
+                        project_model=req.project_model,
+                        model_pool=req.model_pool,
+                        model_selection=req.model_selection,
+                    )
+                    event(
+                        "model_route",
+                        "Synthesis Model Runtime Resolved",
+                        "completed",
+                        json.dumps({
+                            "runtime_id": synthesis_model.runtime_id,
+                            "declared_provider": synthesis_model.declared_provider,
+                            "gateway_provider": synthesis_model.gateway_provider,
+                            "model": synthesis_model.model,
+                            "selection_mode": synthesis_model.selection_mode,
+                        }, ensure_ascii=False),
                     )
 
                     # Agent outputs are untrusted intermediate prose. The
@@ -7813,12 +7864,48 @@ class RuntimeEngine:
                         and not blocked_step_reasons
                         and not memory_overview_query
                         and not memory_forget_requested
-                        and memory_write_outcome is None
+                        # Same-turn automatic Memory writes are not injected into
+                        # this answer and cannot be recalled until a later turn.
+                        # They do not invalidate final-answer token streaming.
                         and not long_term_memories
                         and not conversation_memories
-                        and not memory_messages
+                        and recent_conversation_context_allows_stream(memory_messages, history_source)
                         and not required_knowledge
-                        and "agentmesh" not in req.task.casefold()
+                    )
+                    stream_blockers = []
+                    if delta_sink is None:
+                        stream_blockers.append("NO_DELTA_SINK")
+                    if rag_context_hits:
+                        stream_blockers.append("RAG_CONTEXT")
+                    if rag_decision.retrieve:
+                        stream_blockers.append("RAG_RETRIEVAL")
+                    if blocked_step_reasons:
+                        stream_blockers.append("BLOCKED_STEPS")
+                    if memory_overview_query:
+                        stream_blockers.append("MEMORY_OVERVIEW")
+                    if memory_forget_requested:
+                        stream_blockers.append("MEMORY_FORGET")
+                    if long_term_memories:
+                        stream_blockers.append("LONG_TERM_MEMORY")
+                    if conversation_memories:
+                        stream_blockers.append("CONVERSATION_MEMORY")
+                    if not recent_conversation_context_allows_stream(memory_messages, history_source):
+                        stream_blockers.append("RECENT_CONTEXT")
+                    if required_knowledge:
+                        stream_blockers.append("REQUIRED_KNOWLEDGE")
+                    if not callable(getattr(synthesis_model, "generate_stream", None)):
+                        stream_blockers.append("MODEL_STREAM_UNAVAILABLE")
+                    event(
+                        "synthesis", "Synthesis Streaming Decision", "completed",
+                        json.dumps({
+                            "allowDelta": bool(allow_delta and "MODEL_STREAM_UNAVAILABLE" not in stream_blockers),
+                            "blockers": stream_blockers,
+                            "ragHitCount": len(rag_context_hits),
+                            "blockedStepCount": len(blocked_step_reasons),
+                            "longTermMemoryCount": len(long_term_memories),
+                            "conversationMemoryCount": len(conversation_memories),
+                            "historySource": history_source,
+                        }, ensure_ascii=False),
                     )
                     if allow_delta and callable(getattr(synthesis_model, "generate_stream", None)):
                         answer = await synthesis_model.generate_stream(

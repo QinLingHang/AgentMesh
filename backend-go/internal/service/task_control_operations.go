@@ -133,8 +133,7 @@ func TaskControlOperation(text string) string {
 	statusCheck := taskCommandContainsAny(command,
 		"确认是不是已经", "确认是否成功", "核实任务状态", "返回上一次的结果",
 		"先查原单号", "是否已经创建", "运行到哪", "排队的是哪个任务")
-	if (priorExecution && statusCheck) ||
-		(taskCommandContainsAny(command, "任务", "工单") && taskCommandContainsAny(command, "进度", "任务状态", "运行到哪", "排队")) {
+	if priorExecution && statusCheck {
 		return "GET_TASK_STATUS"
 	}
 

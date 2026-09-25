@@ -198,3 +198,317 @@ def test_go_python_binary_contract_fixture():
     incoming = ExecutionRoutingRequest.model_validate(data['request'])
     assert decide_execution_route(incoming).model_dump(by_alias=True) == data['response']
     assert ExecutionRoutingResult.model_validate(data['response']).execution_route == 'RUNTIME'
+
+
+def _continuation_descriptor(intent: str, *, references=True, fresh=False, action=False, kinds=None, knowledge='NONE'):
+    return SemanticIntentDescriptor.model_validate({
+        'objective': 'continue the prior answer',
+        'capabilityKinds': kinds or [],
+        'knowledgeDependency': knowledge,
+        'continuationIntent': intent,
+        'referencesPrevious': references,
+        'needsFreshData': fresh,
+        'externalActionRequired': action,
+    })
+
+
+def test_contextual_continuation_model_can_keep_explanation_on_fast_path():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '继续说，不太懂',
+        'continuationState': 'CHAT',
+        'previousTurn': {'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED', 'runtimePhase': 'interactive_stream'},
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    refined = decide_execution_route(req, descriptor=_continuation_descriptor('EXPLAIN_PREVIOUS'))
+    assert refined.execution_route == 'FAST_PATH'
+    assert refined.analysis_source == 'MODEL'
+
+
+def test_contextual_continuation_does_not_reuse_knowledge_as_unverified_chat():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '简单点说，我还是没懂',
+        'continuationState': 'CHAT',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'RUNTIME', 'status': 'COMPLETED',
+            'runtimePhase': 'completed', 'knowledgeUsed': True,
+        },
+    })
+    refined = decide_execution_route(req, descriptor=_continuation_descriptor('EXPLAIN_PREVIOUS'))
+    assert refined.execution_route == 'RUNTIME'
+
+
+def test_tool_result_explanation_can_be_fast_but_refresh_stays_runtime():
+    base = {
+        'continuationState': 'CHAT',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'RUNTIME', 'status': 'COMPLETED',
+            'runtimePhase': 'completed', 'toolUsed': True,
+        },
+    }
+    explain = ExecutionRoutingRequest.model_validate({'task': '这个状态是什么意思？', **base})
+    explained = decide_execution_route(explain, descriptor=_continuation_descriptor('EXPLAIN_PREVIOUS'))
+    assert explained.execution_route == 'FAST_PATH'
+
+    refresh = ExecutionRoutingRequest.model_validate({'task': '现在呢，再查一下', **base})
+    refreshed = decide_execution_route(
+        refresh,
+        descriptor=_continuation_descriptor('REFRESH_DATA', fresh=True, kinds=['TOOL']),
+    )
+    assert refreshed.execution_route == 'RUNTIME'
+
+
+def test_previous_turn_metadata_triggers_bounded_semantic_understanding_for_short_followup():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '为什么？',
+        'allowModel': True,
+        'previousTurn': {'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED'},
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    assert needs_semantic_routing_model(req, baseline)
+
+
+def test_general_new_fact_followup_can_stay_fast_after_fast_path_answer():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '为什么 append 有时候会影响原来的 slice？',
+        'previousTurn': {'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED'},
+    })
+    refined = decide_execution_route(req, descriptor=_continuation_descriptor('NEW_FACT_FOLLOWUP'))
+    assert refined.execution_route == 'FAST_PATH'
+
+
+def test_new_fact_followup_after_knowledge_answer_stays_runtime():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '那韩国呢？',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'RUNTIME', 'status': 'COMPLETED',
+            'knowledgeUsed': True,
+        },
+    })
+    refined = decide_execution_route(req, descriptor=_continuation_descriptor('NEW_FACT_FOLLOWUP'))
+    assert refined.execution_route == 'RUNTIME'
+
+
+def test_semantic_model_unavailable_uses_only_trusted_fast_path_continuation_fallback():
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '继续说，不太懂',
+        'continuationState': 'CHAT',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'runtimePhase': 'interactive_stream', 'knowledgeUsed': False,
+            'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    fallback = trusted_fast_path_continuation_fallback(req, baseline)
+    assert fallback.execution_route == 'FAST_PATH'
+    assert fallback.analysis_source == 'RULE'
+    assert fallback.reason_codes == ['TRUSTED_FAST_PATH_CONTINUATION_FALLBACK']
+
+
+def test_trusted_fast_path_continuation_fallback_never_handles_new_action_or_fresh_data():
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+    common = {
+        'continuationState': 'CHAT',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'runtimePhase': 'interactive_stream', 'knowledgeUsed': False,
+            'toolUsed': False, 'mcpUsed': False,
+        },
+    }
+    for task in ('继续执行代码', '现在呢，再查一下', '刷新一下最新状态'):
+        req = ExecutionRoutingRequest.model_validate({'task': task, **common})
+        baseline = decide_execution_route(req)
+        assert trusted_fast_path_continuation_fallback(req, baseline).execution_route == 'RUNTIME'
+
+
+def test_trusted_fast_path_continuation_fallback_never_reuses_knowledge_or_tool_turn():
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+    for field in ('knowledgeUsed', 'toolUsed', 'mcpUsed'):
+        previous = {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'runtimePhase': 'interactive_stream', 'knowledgeUsed': False,
+            'toolUsed': False, 'mcpUsed': False, field: True,
+        }
+        req = ExecutionRoutingRequest.model_validate({
+            'task': '继续说，不太懂', 'continuationState': 'CHAT', 'previousTurn': previous,
+        })
+        baseline = decide_execution_route(req)
+        assert trusted_fast_path_continuation_fallback(req, baseline).execution_route == 'RUNTIME'
+
+def test_explicit_capability_prohibition_is_structured_policy_not_permission():
+    from app.semantics import analyze_task_semantics
+
+    semantic = analyze_task_semantics("请分析这个请求，但不需要 MCP，也不要使用工具。")
+    assert set(semantic.forbidden_capabilities) == {"mcp", "tool"}
+    assert "mcp" not in {item.casefold() for item in semantic.required_capabilities}
+    assert "tool" not in {item.casefold() for item in semantic.required_capabilities}
+
+
+
+def test_inline_summary_does_not_execute_source_material_keywords():
+    d = route('总结这段话：Agent Runtime 负责承载智能体执行，并协调模型调用、工具调用、状态管理与任务流程。')
+    assert d.execution_route == 'FAST_PATH'
+
+
+def test_explanation_only_programming_question_stays_fast_path():
+    d = route('说一下 Go map 和 slice 的一个核心区别。')
+    assert d.execution_route == 'FAST_PATH'
+
+
+def test_new_fact_followup_ignores_non_governed_descriptor_noise_after_fast_path():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '为什么 append 有时候会影响原来的 slice？',
+        'continuationState': 'CHAT',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    descriptor = _continuation_descriptor('NEW_FACT_FOLLOWUP')
+    descriptor.capability_kinds = ['AGENT']
+    descriptor.multi_step = True
+    refined = decide_execution_route(req, descriptor=descriptor)
+    assert refined.execution_route == 'FAST_PATH'
+
+
+
+def test_implicit_conceptual_followup_inherits_capability_free_fast_path_without_lexical_chat_state():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '为什么 append 有时候会影响原来的 slice？',
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    descriptor = _continuation_descriptor('NEW_FACT_FOLLOWUP', references=False)
+    descriptor.capability_kinds = ['AGENT']
+    descriptor.multi_step = True
+    refined = decide_execution_route(req, descriptor=descriptor)
+    assert refined.execution_route == 'FAST_PATH'
+    assert refined.capability_required is False
+
+
+def test_self_contained_concept_question_stays_fast_even_when_previous_turn_exists():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '为什么 append 有时候会影响原来的 slice？',
+        'allowModel': True,
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'FAST_PATH'
+    assert baseline.capability_required is False
+    assert not needs_semantic_routing_model(req, baseline)
+
+
+
+
+def test_anaphoric_followup_uses_model_but_does_not_require_model_to_repeat_reference_bit():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '那它和数组最大的本质区别呢？',
+        'allowModel': True,
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    assert needs_semantic_routing_model(req, baseline)
+
+    descriptor = SemanticIntentDescriptor.model_validate({
+        'objective': 'compare the referenced concept with arrays',
+        'capabilityKinds': [],
+        'knowledgeDependency': 'NONE',
+        'multiStep': False,
+        'hasDependencies': False,
+        'hasConditionalEffects': False,
+        'requestedEffects': [],
+        'continuationIntent': 'NONE',
+        'referencesPrevious': False,
+        'needsFreshData': False,
+        'externalActionRequired': False,
+        'unknowns': [],
+        'reasonCodes': [],
+    })
+    refined = decide_execution_route(req, descriptor=descriptor)
+    assert refined.execution_route == 'FAST_PATH'
+    assert refined.analysis_source == 'MODEL'
+
+
+
+@pytest.mark.parametrize('task, model_unknown', [
+    ('那它呢？', 'subject'),
+    ('这个具体是什么意思？', 'referenced concept'),
+    ('它为什么会这样？', 'it'),
+])
+def test_safe_anaphoric_followup_resolves_free_form_referent_from_trusted_chat(task, model_unknown):
+    req = ExecutionRoutingRequest.model_validate({
+        'task': task,
+        'allowModel': True,
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    descriptor = SemanticIntentDescriptor.model_validate({
+        'objective': 'compare the referenced concept with arrays',
+        'capabilityKinds': [],
+        'knowledgeDependency': 'NONE',
+        'multiStep': False,
+        'hasDependencies': False,
+        'hasConditionalEffects': False,
+        'requestedEffects': [],
+        'continuationIntent': 'NONE',
+        'referencesPrevious': False,
+        'needsFreshData': False,
+        'externalActionRequired': False,
+        'unknowns': [model_unknown],
+        'reasonCodes': [],
+    })
+    refined = decide_execution_route(req, descriptor=descriptor)
+    assert refined.execution_route == 'FAST_PATH'
+    assert refined.disposition == 'EXECUTE'
+    assert refined.analysis_source == 'MODEL'
+
+
+def test_anaphoric_external_delete_with_unknown_target_still_requires_clarification():
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '把它删掉',
+        'allowModel': True,
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    assert baseline.disposition == 'CLARIFY'
+    assert baseline.reason_codes == ['AMBIGUOUS_RUNTIME_TARGET']
+
+def test_anaphoric_continuation_cannot_be_short_circuited_before_semantic_model():
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+    req = ExecutionRoutingRequest.model_validate({
+        'task': '那它和数组最大的本质区别呢？',
+        'allowModel': True,
+        'continuationState': 'NONE',
+        'previousTurn': {
+            'exists': True, 'executionRoute': 'FAST_PATH', 'status': 'COMPLETED',
+            'knowledgeUsed': False, 'toolUsed': False, 'mcpUsed': False,
+        },
+    })
+    baseline = decide_execution_route(req)
+    assert baseline.execution_route == 'RUNTIME'
+    assert needs_semantic_routing_model(req, baseline)
+    assert trusted_fast_path_continuation_fallback(req, baseline).execution_route == 'RUNTIME'

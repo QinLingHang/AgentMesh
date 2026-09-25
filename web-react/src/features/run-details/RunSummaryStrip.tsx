@@ -68,11 +68,11 @@ export function RunSummaryStrip({
       />
 
       <SummaryItem
-        label="预估成本"
+        label="Agent 执行成本估算"
         value={formatMoney(
           result.estimatedCost,
         )}
-        hint="本次执行"
+        hint="基于 Agent 能力画像，不等于模型 Token 费用"
       />
 
       <SummaryItem

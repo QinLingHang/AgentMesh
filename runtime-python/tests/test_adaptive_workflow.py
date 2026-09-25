@@ -314,3 +314,78 @@ async def test_mixed_protocol_semantic_dag_routes_through_resolver_once_each():
     assert "step-internal" in seen["http"]["task"]
     assert "step-langgraph" in seen["http"]["task"]
     assert "step-http" in seen["a2a"]["task"]
+
+
+def test_source_bounded_transform_step_cannot_invent_required_knowledge():
+    from app.planning.contracts import ExecutionPlan, PlanStep
+    from app.semantics.contracts import TaskSemanticIntent, KnowledgeDependency
+    plan = ExecutionPlan(
+        goal='summarize inline text',
+        steps=[
+            PlanStep(id='extract_points', objective='Extract three points from supplied text', capability='general'),
+            PlanStep(id='format_output', objective='Generate the final summary from the extracted points', capability='general', dependsOn=['extract_points'], knowledgeDependency='REQUIRED'),
+        ],
+        requiresSynthesis=True,
+    )
+    semantic = TaskSemanticIntent(knowledgeDependency=KnowledgeDependency.NONE)
+    reconciled = SemanticTaskPlanner._reconcile_source_bounded_knowledge(plan, semantic)
+    assert reconciled.steps[1].knowledge_dependency == 'NONE'
+
+
+def test_request_input_transform_root_cannot_invent_required_knowledge():
+    from app.planning.contracts import ExecutionPlan, PlanStep
+    from app.semantics.contracts import TaskSemanticIntent, KnowledgeDependency
+    plan = ExecutionPlan(
+        goal='summarize supplied text',
+        steps=[
+            PlanStep(
+                id='summarize',
+                objective='Summarize the material already supplied in the request',
+                capability='general',
+                knowledgeDependency='REQUIRED',
+                inputSource='REQUEST_INPUT',
+            ),
+        ],
+    )
+    semantic = TaskSemanticIntent(knowledgeDependency=KnowledgeDependency.NONE)
+    reconciled = SemanticTaskPlanner._reconcile_source_bounded_knowledge(plan, semantic)
+    assert reconciled.steps[0].knowledge_dependency == 'NONE'
+
+
+def test_inline_request_payload_downgrades_unlabeled_root_required_knowledge():
+    from app.semantics import analyze_task_semantics
+
+    task = (
+        "请提炼下面文本的三个核心要点，然后生成一句不超过30字的摘要，最后以 JSON 输出。"
+        "文本：Agent Runtime 负责承载智能体执行，并协调模型调用、工具调用、状态管理与任务流程。"
+    )
+    semantic = analyze_task_semantics(task)
+    plan = ExecutionPlan(
+        goal=task,
+        steps=[
+            PlanStep(
+                id="extract", objective="提炼用户给出的文本", capability="general",
+                inputSource="UNSPECIFIED", knowledgeDependency="REQUIRED",
+            ),
+            PlanStep(
+                id="summary", objective="基于要点生成摘要", capability="general",
+                dependsOn=["extract"], knowledgeDependency="REQUIRED",
+            ),
+        ],
+    )
+    reconciled = SemanticTaskPlanner._reconcile_source_bounded_knowledge(plan, semantic, task)
+    assert [step.knowledge_dependency for step in reconciled.steps] == ["NONE", "NONE"]
+
+
+def test_genuine_required_knowledge_step_is_not_downgraded():
+    from app.planning.contracts import ExecutionPlan, PlanStep
+    from app.semantics.contracts import TaskSemanticIntent, KnowledgeDependency
+    plan = ExecutionPlan(
+        goal='check company warranty policy',
+        steps=[
+            PlanStep(id='retrieve_policy', objective='Retrieve current company warranty policy', capability='general', knowledgeDependency='REQUIRED', inputSource='EXTERNAL'),
+        ],
+    )
+    semantic = TaskSemanticIntent(knowledgeDependency=KnowledgeDependency.NONE)
+    reconciled = SemanticTaskPlanner._reconcile_source_bounded_knowledge(plan, semantic)
+    assert reconciled.steps[0].knowledge_dependency == 'REQUIRED'

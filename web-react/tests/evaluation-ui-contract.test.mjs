@@ -46,3 +46,17 @@ test("Evaluation exposes model cost and tool outcome telemetry", () => {
   assert.match(overview, /Model Cost/);
   assert.match(overview, /Model Tokens/);
 });
+
+test("Run Details separates agent execution estimate from token-priced model cost", () => {
+  const summary = read("src/features/run-details/RunSummaryStrip.tsx");
+  const overview = read("src/features/run-details/OverviewMetricGrid.tsx");
+  const tabs = read("src/features/run-details/RunDetailsTabs.tsx");
+
+  assert.match(summary, /Agent 执行成本估算/);
+  assert.match(summary, /不等于模型 Token 费用/);
+  assert.match(overview, /Token Model Cost/);
+  assert.match(tabs, /知识检索 · 事件/);
+  assert.match(tabs, /长期记忆 · 事件/);
+  assert.match(tabs, /工具\/MCP · 事件/);
+});
+

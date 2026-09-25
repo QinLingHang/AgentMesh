@@ -83,6 +83,24 @@ def test_project_knowledge_is_discovered_without_explicit_knowledge_base_phrase(
     assert general.use_project_knowledge is False
 
 
+
+
+def test_explicit_no_mcp_constraint_blocks_mcp_discovery_even_when_server_matches():
+    github = MCPServerDefinition(
+        id=77,
+        name="GitHub",
+        endpoint="https://mcp.example/github",
+        enabled=True,
+    )
+
+    result = discover_capabilities(
+        "请分析这个 GitHub PR，但不需要 MCP，只做文字分析。",
+        mcp_servers=[github],
+    )
+
+    assert result.selected_mcp_server_ids == []
+    assert "prohibition" in result.reason
+
 def test_mcp_server_and_tool_discovery_use_task_semantics():
     github = MCPServerDefinition(
         id=7,

@@ -38,6 +38,7 @@ from app.models.runtime import resolve_project_model_runtime
 from app.schemas import InteractiveStreamRequest, ProjectModelRuntime, RuntimeRequest, RuntimeResponse, TraceEvent
 from app.services import RuntimeEngine, create_registry
 from app.services.interactive_stream import encode_ndjson, stream_interactive_answer
+from app.services.dag_executor import DAGExecutionError
 from app.semantics.execution_routing import ExecutionRoutingRequest, ExecutionRoutingResult, decide_execution_route
 
 registry = None
@@ -286,11 +287,21 @@ async def decide_execution_route_execution_route(
     verify_internal(x_internal_token)
     baseline = decide_execution_route(req)
     from app.semantics.execution_routing_model import should_use_semantic_routing_model, describe_routing_with_model
+    from app.semantics.execution_routing import trusted_fast_path_continuation_fallback
+
+    # High-confidence continuation of an already-completed, capability-free
+    # FAST_PATH answer is resolved from trusted execution state first.  This is
+    # a narrow latency/safety guard, not the general semantic router: ambiguous
+    # follow-ups still go to the LLM classifier below.
+    trusted_chat = trusted_fast_path_continuation_fallback(req, baseline)
+    if trusted_chat.execution_route == "FAST_PATH" and baseline.execution_route != "FAST_PATH":
+        return trusted_chat
+
     if not should_use_semantic_routing_model(req, baseline):
         return baseline
     described = await describe_routing_with_model(engine, req)
     if described is None:
-        return baseline  # conservative RUNTIME; never silently downgrade to chat
+        return baseline  # ambiguous model outage stays fail-closed on Runtime
     descriptor, usage = described
     refined = decide_execution_route(req, descriptor=descriptor)
     return refined.model_copy(update={
@@ -378,10 +389,30 @@ async def execute_stream(
                     "result": response.model_dump(mode="json", by_alias=True),
                 })
             except Exception as exc:
-                await queue.put({
+                payload = {
                     "type": "error",
                     "message": str(exc)[:500] or "runtime execution failed",
-                })
+                }
+                if isinstance(exc, DAGExecutionError):
+                    payload["nodeId"] = exc.node_id
+                    cause = exc.__cause__
+                    if cause is not None:
+                        # Preserve only a bounded structural category, never
+                        # provider payloads or prompts. Walk the exception chain
+                        # because Runtime reschedule wraps a provider ModelError
+                        # in RuntimeError before DAGExecutor receives it.
+                        root = cause
+                        seen: set[int] = set()
+                        while getattr(root, "__cause__", None) is not None and id(root) not in seen:
+                            seen.add(id(root))
+                            root = root.__cause__
+                        category = type(root).__name__
+                        error_type = getattr(root, "error_type", None)
+                        error_value = getattr(error_type, "value", None)
+                        if error_value:
+                            category = f"{category}:{error_value}"
+                        payload["causeCategory"] = category[:120]
+                await queue.put(payload)
             finally:
                 await queue.put({"type": "_end"})
 

@@ -835,7 +835,7 @@ func (s *DurableRuntimeService) CallbackWithOutcome(ctx context.Context, jobID i
 			}
 		}
 	}
-	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability, response.EstimatedCost)
+	s.taskService.recordRunCost(ctx, job.UserID, job.TaskID, projectID, response.Observability)
 
 	if runtimeStatus == "INPUT_REQUIRED" || runtimeStatus == "AUTH_REQUIRED" {
 		if response.Continuation == nil {

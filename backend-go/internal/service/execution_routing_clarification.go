@@ -53,7 +53,7 @@ func (s *TaskService) PersistRoutingClarification(
 	}
 	var project *model.ProjectRuntimeContext
 	if s.projectRuntime != nil && in.ConversationID != nil {
-		project, err = s.projectRuntime.ResolveForConversation(ctx, uid, *in.ConversationID)
+		project, err = s.resolveProjectRuntimeForRouting(ctx, uid, *in.ConversationID)
 		if err != nil {
 			return nil, err
 		}
