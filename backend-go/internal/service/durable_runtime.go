@@ -357,7 +357,7 @@ func (s *DurableRuntimeService) Run(ctx context.Context, uid int64, in RunTaskIn
 	// resurrected by a queued payload.
 	req := runtimeclient.ExecuteRequest{
 		UserID: uid, RequestID: requestID, ConversationID: in.ConversationID,
-		ExecutionRoute: in.ExecutionRoute, Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
+		ExecutionRoute: in.ExecutionRoute, ExecutionIntent: in.ExecutionIntent, Task: in.Task, Scheduler: in.Scheduler, Planner: in.Planner,
 		ExecutionMode: in.ExecutionMode, SynthesisMode: in.SynthesisMode,
 		ModelSelection:     runtimeclient.ModelSelection{Mode: in.ModelSelection.Mode, ServiceID: in.ModelSelection.ServiceID},
 		RagPolicy:          in.RagPolicy,

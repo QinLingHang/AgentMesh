@@ -76,19 +76,20 @@ func (s *TaskService) resolveProjectRuntimeForRouting(
 
 // Delivery (direct/durable) is independent of execution strategy.
 type ExecutionRouteDecision struct {
-	SchemaVersion               string   `json:"schemaVersion"`
-	Strategy                    string   `json:"strategy"`
-	Disposition                 string   `json:"disposition"`
-	RuntimePath                 string   `json:"runtimePath"`
-	DeliveryMode                string   `json:"deliveryMode"`
-	ReasonCodes                 []string `json:"reasonCodes"`
-	UnresolvedRequirements      []string `json:"unresolvedRequirements"`
-	AnalysisSource              string   `json:"analysisSource"`
-	AnalysisLatencyMS           int64    `json:"analysisLatencyMs"`
-	PreflightModelCalls         int      `json:"preflightModelCalls"`
-	PreflightModelTokens        int      `json:"preflightModelTokens"`
-	PreflightModelEstimatedCost float64  `json:"preflightModelEstimatedCost"`
-	PreflightModelCostKnown     bool     `json:"preflightModelCostKnown"`
+	SchemaVersion               string                         `json:"schemaVersion"`
+	Strategy                    string                         `json:"strategy"`
+	Disposition                 string                         `json:"disposition"`
+	RuntimePath                 string                         `json:"runtimePath"`
+	DeliveryMode                string                         `json:"deliveryMode"`
+	ReasonCodes                 []string                       `json:"reasonCodes"`
+	UnresolvedRequirements      []string                       `json:"unresolvedRequirements"`
+	AnalysisSource              string                         `json:"analysisSource"`
+	AnalysisLatencyMS           int64                          `json:"analysisLatencyMs"`
+	PreflightModelCalls         int                            `json:"preflightModelCalls"`
+	PreflightModelTokens        int                            `json:"preflightModelTokens"`
+	PreflightModelEstimatedCost float64                        `json:"preflightModelEstimatedCost"`
+	PreflightModelCostKnown     bool                           `json:"preflightModelCostKnown"`
+	ExecutionIntent             *runtimeclient.ExecutionIntent `json:"executionIntent,omitempty"`
 }
 
 func ExecutionRoutingMode() string {
@@ -189,6 +190,58 @@ func referencesPriorContext(task string) bool {
 		}
 	}
 	return false
+}
+
+// settleReferencedPreviousTurnBeforeRouting closes the same-conversation
+// streaming/finalization race before semantic preflight derives continuation
+// and previous-turn facts. The trigger is only the user's explicit reference
+// to prior conversation context; it does not depend on any concrete Tool, MCP,
+// Agent or Knowledge identity and therefore cannot pre-authorize execution.
+//
+// When the latest durable user request has not yet acquired its paired
+// assistant message, wait boundedly on the authoritative MySQL conversation
+// history. On timeout nothing is fabricated: routing continues with the latest
+// durable state and the semantic/runtime layers remain fail-closed.
+func (s *TaskService) settleReferencedPreviousTurnBeforeRouting(
+	ctx context.Context,
+	uid int64,
+	in RunTaskInput,
+) error {
+	if !referencesPriorContext(in.Task) || in.ConversationID == nil {
+		return nil
+	}
+	if s.messages == nil {
+		return errors.New("trusted continuation repository unavailable")
+	}
+
+	initial, err := s.messages.ListMessages(ctx, uid, *in.ConversationID, 48)
+	if err != nil {
+		s.recordExecutionRoutingLookup(ctx, uid, in, "PREFLIGHT_HISTORY_SETTLEMENT", "ERROR", err)
+		return err
+	}
+	requestID := latestUserRequestID(initial)
+	if requestID == "" {
+		s.recordExecutionRoutingLookup(ctx, uid, in, "PREFLIGHT_HISTORY_SETTLEMENT", "NO_PRIOR_REQUEST", nil)
+		return nil
+	}
+	if historyHasAssistantRequest(initial, requestID) {
+		s.recordExecutionRoutingLookup(ctx, uid, in, "PREFLIGHT_HISTORY_SETTLEMENT", "ALREADY_SETTLED", nil)
+		return nil
+	}
+
+	settled, err := s.waitForTrustedHistoryAssistant(
+		ctx, uid, *in.ConversationID, initial, taskFinalizationTimeout,
+	)
+	if err != nil {
+		s.recordExecutionRoutingLookup(ctx, uid, in, "PREFLIGHT_HISTORY_SETTLEMENT", "ERROR", err)
+		return err
+	}
+	outcome := "TIMEOUT"
+	if historyHasAssistantRequest(settled, requestID) {
+		outcome = "SETTLED"
+	}
+	s.recordExecutionRoutingLookup(ctx, uid, in, "PREFLIGHT_HISTORY_SETTLEMENT", outcome, nil)
+	return nil
 }
 
 // Resolve conversation references from owned records only. Never forward
@@ -393,6 +446,9 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 	if err != nil {
 		return nil, err
 	}
+	if err := s.settleReferencedPreviousTurnBeforeRouting(ctx, uid, in); err != nil {
+		return nil, err
+	}
 	continuation, err := s.resolveContinuationState(ctx, uid, in)
 	if err != nil {
 		return nil, err
@@ -459,6 +515,7 @@ func (s *TaskService) decideExecutionRoute(ctx context.Context, uid int64, in Ru
 		AnalysisSource:         proposal.AnalysisSource, AnalysisLatencyMS: time.Since(analysisStarted).Milliseconds(), PreflightModelCalls: proposal.ModelCalls,
 		PreflightModelTokens: proposal.ModelTokens, PreflightModelEstimatedCost: proposal.ModelEstimatedCost,
 		PreflightModelCostKnown: proposal.ModelCostKnown,
+		ExecutionIntent:         proposal.ExecutionIntent,
 	}
 	switch proposal.Disposition {
 	case "EXECUTE":
@@ -497,6 +554,44 @@ func ValidateExecutionRouteDecision(decision ExecutionRouteDecision, proposal ru
 		proposal.ModelEstimatedCost < 0 || proposal.ModelEstimatedCost > 100000 ||
 		(decision.AnalysisSource != "RULE" && decision.AnalysisSource != "MODEL" && decision.AnalysisSource != "INDETERMINATE") {
 		return errors.New("invalid preflight source or budget metadata")
+	}
+	if proposal.ExecutionIntent == nil || proposal.ExecutionIntent.Version != "execution-intent.v1" {
+		return errors.New("missing or invalid execution intent")
+	}
+	if proposal.ExecutionIntent.Dependencies.Knowledge != proposal.KnowledgeDependency {
+		return errors.New("route knowledge dependency diverges from execution intent")
+	}
+	if proposal.ExecutionIntent.SemanticSource != "RULE" && proposal.ExecutionIntent.SemanticSource != "MODEL" {
+		return errors.New("invalid execution intent source")
+	}
+	if len(proposal.ExecutionIntent.Capabilities.RequiredCapabilities) > 32 || len(proposal.ExecutionIntent.Capabilities.ForbiddenCapabilities) > 32 || len(proposal.ExecutionIntent.RequestedEffects) > 4 {
+		return errors.New("execution intent contract size exceeded")
+	}
+	intentDeps := proposal.ExecutionIntent.Dependencies
+	intentRuntimeDependency := intentDeps.Knowledge != "NONE" || intentDeps.Memory || intentDeps.FreshData ||
+		intentDeps.ExternalSystem || intentDeps.Tool || intentDeps.MCP || intentDeps.Agent || intentDeps.MultiStep || intentDeps.SideEffect
+	if proposal.ExecutionIntent.Clarification.Required && proposal.Disposition != "CLARIFY" {
+		return errors.New("execution intent clarification diverges from route disposition")
+	}
+	if proposal.Disposition == "CLARIFY" && !proposal.ExecutionIntent.Clarification.Required {
+		return errors.New("route clarification missing from execution intent")
+	}
+	if proposal.ExecutionIntent.Reference.RequiresExternalResolution && proposal.ExecutionIntent.Reference.ResolvableFromTrustedHistory {
+		return errors.New("invalid execution intent reference resolution")
+	}
+	refResolution := proposal.ExecutionIntent.Reference.TrustedHistoryResolution
+	if refResolution != "NONE" && refResolution != "REQUIRED" && refResolution != "RESOLVED" {
+		return errors.New("invalid trusted history resolution state")
+	}
+	if refResolution == "REQUIRED" {
+		if proposal.ExecutionIntent.Reference.ResolvableFromTrustedHistory ||
+			proposal.ExecutionIntent.Reference.RequiresExternalResolution ||
+			proposal.ExecutionIntent.Reference.TargetScope != "HISTORY" {
+			return errors.New("invalid pending trusted history resolution")
+		}
+	}
+	if refResolution == "RESOLVED" && !proposal.ExecutionIntent.Reference.ResolvableFromTrustedHistory {
+		return errors.New("resolved trusted history reference is not marked resolvable")
 	}
 	if len(decision.ReasonCodes) > 8 || len(decision.UnresolvedRequirements) > 4 {
 		return errors.New("preflight diagnostic size exceeded")
@@ -538,7 +633,7 @@ func ValidateExecutionRouteDecision(decision ExecutionRouteDecision, proposal ru
 		return errors.New("invalid execution disposition")
 	}
 	if proposal.ExecutionRoute == "FAST_PATH" {
-		if decision.RuntimePath != "FAST_PATH" || proposal.CapabilityRequired || proposal.KnowledgeDependency != "NONE" || policy.Mode == model.RagModeOn {
+		if decision.RuntimePath != "FAST_PATH" || proposal.CapabilityRequired || proposal.KnowledgeDependency != "NONE" || intentRuntimeDependency || policy.Mode == model.RagModeOn {
 			return errors.New("capability-dependent request cannot bypass runtime")
 		}
 	} else if decision.RuntimePath != "FULL_RUNTIME" {
@@ -619,6 +714,18 @@ func executionRoutingTrace(in RunTaskInput, delivery string) []map[string]any {
 	}
 	if in.RoutingModelCostKnown {
 		details["preflightModelEstimatedCost"] = in.RoutingModelEstimatedCost
+	}
+	if in.ExecutionIntent != nil && in.ExecutionIntent.Version == "execution-intent.v1" {
+		details["intentVersion"] = in.ExecutionIntent.Version
+		details["taskType"] = in.ExecutionIntent.TaskType
+		details["continuation"] = in.ExecutionIntent.Continuation.Relation
+		details["reference"] = in.ExecutionIntent.Reference.Type
+		details["requiredCapabilities"] = append([]string(nil), in.ExecutionIntent.Capabilities.RequiredCapabilities...)
+		details["knowledgeDependency"] = in.ExecutionIntent.Dependencies.Knowledge
+		details["toolRequired"] = in.ExecutionIntent.Dependencies.Tool
+		details["mcpRequired"] = in.ExecutionIntent.Dependencies.MCP
+		details["sideEffect"] = in.ExecutionIntent.Dependencies.SideEffect
+		details["clarificationRequired"] = in.ExecutionIntent.Clarification.Required
 	}
 	detail, _ := json.Marshal(details)
 	return []map[string]any{{

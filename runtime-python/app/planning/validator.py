@@ -29,6 +29,9 @@ class PlanValidator:
         available_capabilities: set[str],
         baseline_capabilities: list[str],
         completed_steps: dict[str, PlanStep] | None = None,
+        authoritative_knowledge_dependency: str | None = None,
+        authoritative_forbidden_actions: list[str] | None = None,
+        enforce_baseline_capability_boundary: bool = False,
     ) -> ExecutionPlan:
         completed_steps = completed_steps or {}
 
@@ -38,6 +41,39 @@ class PlanValidator:
             if item and item.strip()
         }
         has_general = "general" in capability_map or "*" in capability_map
+
+        authoritative_capabilities: set[str] = set()
+        if enforce_baseline_capability_boundary:
+            for item in baseline_capabilities:
+                normalized = item.strip()
+                if not normalized:
+                    continue
+                canonical = capability_map.get(normalized.casefold())
+                if canonical is None and has_general:
+                    canonical = capability_map.get("general") or capability_map.get("*") or "general"
+                if canonical is None:
+                    canonical = normalized
+                authoritative_capabilities.add(canonical.casefold())
+            if not authoritative_capabilities and has_general:
+                canonical_general = capability_map.get("general") or capability_map.get("*") or "general"
+                authoritative_capabilities.add(canonical_general.casefold())
+
+        authoritative_forbidden = list(
+            dict.fromkeys(authoritative_forbidden_actions or [])
+        )
+        knowledge_rank = {"NONE": 0, "OPTIONAL": 1, "REQUIRED": 2}
+        authoritative_knowledge = (
+            str(authoritative_knowledge_dependency).upper()
+            if authoritative_knowledge_dependency is not None
+            else None
+        )
+        if (
+            authoritative_knowledge is not None
+            and authoritative_knowledge not in knowledge_rank
+        ):
+            raise PlanValidationError(
+                f"invalid authoritative knowledge dependency: {authoritative_knowledge}"
+            )
 
         normalized_steps: list[PlanStep] = []
         id_map: dict[str, str] = {}
@@ -89,6 +125,25 @@ class PlanValidator:
                         f"planner selected unsupported capability: {capability}"
                     )
 
+            if (
+                enforce_baseline_capability_boundary
+                and canonical.casefold() not in authoritative_capabilities
+            ):
+                raise PlanValidationError(
+                    "planner attempted to add a capability outside the authoritative "
+                    f"ExecutionIntent boundary: {canonical}"
+                )
+
+            step_knowledge = str(step.knowledge_dependency).upper()
+            if (
+                authoritative_knowledge is not None
+                and knowledge_rank[step_knowledge] > knowledge_rank[authoritative_knowledge]
+            ):
+                raise PlanValidationError(
+                    "planner attempted to upgrade knowledge dependency beyond the "
+                    f"authoritative ExecutionIntent boundary: {authoritative_knowledge} -> {step_knowledge}"
+                )
+
             dependencies: list[str] = []
             for dependency in step.depends_on:
                 mapped = id_map.get(dependency, dependency)
@@ -110,7 +165,9 @@ class PlanValidator:
                     condition=step.condition,
                     inputSource=step.input_source,
                     knowledgeDependency=step.knowledge_dependency,
-                    forbiddenActions=list(dict.fromkeys(step.forbidden_actions)),
+                    forbiddenActions=list(
+                        dict.fromkeys([*authoritative_forbidden, *step.forbidden_actions])
+                    ),
                 )
             )
 
@@ -153,6 +210,7 @@ class PlanValidator:
                     id=step_id,
                     objective=f"Handle the required capability '{normalized_capability}' for the user goal.",
                     capability=canonical,
+                    forbiddenActions=list(authoritative_forbidden),
                 )
             )
             present.add(canonical.casefold())

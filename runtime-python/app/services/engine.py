@@ -36,6 +36,7 @@ from app.capabilities import (
     discover_capabilities,
     discover_mcp_tools,
     discovery_context,
+    resolve_trusted_history_reference,
 )
 from app.eval import (
     EvaluationRequest,
@@ -116,6 +117,7 @@ from app.schemas import (
     RuntimeCitation,
     RuntimeContinuation,
     RuntimeRequest,
+    DynamicDAG,
     RuntimeResponse,
     TraceEvent,
 )
@@ -2736,9 +2738,9 @@ class RuntimeEngine:
         # If agents exist, the ordinary Runtime Discovery/Planner/ToolLoop owns
         # the request, regardless of whether one or many capabilities are used.
         if req.execution_route == "RUNTIME" and not req.agents:
-            semantic = analyze_task_semantics(
-                req.task, has_attachments=bool(req.attachments), enable_implicit_business=True,
-            )
+            if req.execution_intent is None:
+                raise RuntimeError("missing authoritative execution intent")
+            semantic = req.execution_intent.to_task_semantic_intent(objective=req.task)
             if (semantic.knowledge_dependency is KnowledgeDependency.REQUIRED
                 and not semantic.requires_tool and req.effective_rag_policy is not None
                 and req.effective_rag_policy.mode != "OFF"
@@ -2784,21 +2786,112 @@ class RuntimeEngine:
         # time (for example Tool + Knowledge). This contract is descriptive
         # only; it cannot grant access to any resource.
         # ====================================================
-        semantic_intent = analyze_task_semantics(
-            req.task,
-            has_attachments=bool(req.attachments),
-            profiler_capabilities=pre_profile.required_capabilities,
-            enable_implicit_business=req.execution_route is not None,
-        )
-        merged_capabilities = list(
-            dict.fromkeys(
-                [*pre_profile.required_capabilities, *semantic_intent.required_capabilities]
+        if req.execution_route == "RUNTIME":
+            if req.execution_intent is None:
+                raise RuntimeError("missing authoritative execution intent")
+            authoritative_intent = req.execution_intent
+            if authoritative_intent.reference.trusted_history_resolution == "REQUIRED":
+                resolved, _resolved_target = resolve_trusted_history_reference(
+                    req.task, req.history
+                )
+                if not resolved:
+                    event(
+                        "semantic",
+                        "Trusted History Reference Resolution",
+                        "completed",
+                        json.dumps(
+                            {
+                                "status": "UNRESOLVED",
+                                "reasonCode": "AMBIGUOUS_SIDE_EFFECT_TARGET",
+                                "targetScope": "HISTORY",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    event(
+                        "semantic",
+                        "Semantic Clarification",
+                        "completed",
+                        json.dumps(
+                            {
+                                "reasonCode": "AMBIGUOUS_SIDE_EFFECT_TARGET",
+                                "missingFields": ["TARGET"],
+                            },
+                            ensure_ascii=False,
+                        ),
+                    )
+                    empty_dag = DynamicDAG(nodes=[], edges=[])
+                    observability = build_observability_summary(
+                        trace=trace, feedback=feedback, dag=empty_dag
+                    )
+                    return RuntimeResponse(
+                        request_id=req.request_id,
+                        status="COMPLETED",
+                        answer="请明确要操作的唯一目标后再继续。",
+                        continuation=None,
+                        scheduler=req.scheduler,
+                        task_profile=pre_profile,
+                        selected_agents=[],
+                        estimated_cost=0.0,
+                        elapsed_ms=elapsed(),
+                        trace=trace,
+                        dag=empty_dag,
+                        agent_feedback=feedback,
+                        observability=observability,
+                    )
+                authoritative_intent = authoritative_intent.model_copy(
+                    update={
+                        "reference": authoritative_intent.reference.model_copy(
+                            update={
+                                "type": "TRUSTED_HISTORY",
+                                "resolvable_from_trusted_history": True,
+                                "requires_external_resolution": False,
+                                "target_scope": "HISTORY",
+                                "trusted_history_resolution": "RESOLVED",
+                            }
+                        )
+                    }
+                )
+                event(
+                    "semantic",
+                    "Trusted History Reference Resolution",
+                    "completed",
+                    json.dumps(
+                        {
+                            "status": "RESOLVED",
+                            "targetScope": "HISTORY",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            semantic_intent = authoritative_intent.to_task_semantic_intent(objective=req.task)
+        else:
+            # Legacy/internal callers without execution routing retain the old
+            # analyzer path. P24 routed requests must never re-interpret WHAT.
+            semantic_intent = analyze_task_semantics(
+                req.task,
+                has_attachments=bool(req.attachments),
+                profiler_capabilities=pre_profile.required_capabilities,
+                enable_implicit_business=False,
             )
-        )
-        if merged_capabilities != list(pre_profile.required_capabilities):
+        if req.execution_route == "RUNTIME":
+            # P24: ExecutionIntent is authoritative for WHAT/required abstract
+            # capabilities. Profiler contributes only scheduling shape; it may
+            # not add a second text-derived capability decision in Runtime.
+            intent_capabilities = list(semantic_intent.required_capabilities) or ["general"]
             pre_profile = pre_profile.model_copy(
-                update={"required_capabilities": merged_capabilities}
+                update={"required_capabilities": intent_capabilities}
             )
+        else:
+            merged_capabilities = list(
+                dict.fromkeys(
+                    [*pre_profile.required_capabilities, *semantic_intent.required_capabilities]
+                )
+            )
+            if merged_capabilities != list(pre_profile.required_capabilities):
+                pre_profile = pre_profile.model_copy(
+                    update={"required_capabilities": merged_capabilities}
+                )
 
         event(
             "semantic",
@@ -2818,6 +2911,7 @@ class RuntimeEngine:
             contextualize_discovery_task(
                 req.task,
                 req.history,
+                semantic_intent=semantic_intent,
             )
         )
 
@@ -4784,6 +4878,7 @@ class RuntimeEngine:
                 capability_query,
                 agents=req.agents,
                 has_attachments=bool(req.attachments),
+                semantic_intent=semantic_intent,
             )
             refreshed_skills = list(
                 dict.fromkeys(
@@ -4843,8 +4938,8 @@ class RuntimeEngine:
             # =================================================
             # 3. Semantic Planner + Scheduler
             #
-            # Planner decides WHAT work is required. Scheduler keeps its
-            # existing responsibility for WHO should execute each capability.
+            # ExecutionIntent already defines WHAT. Planner only decides HOW
+            # to order/decompose resolved capability work; Scheduler decides WHO.
             # Simple/explicit-topology requests stay on the legacy fast path.
             # =================================================
 
@@ -4978,16 +5073,16 @@ class RuntimeEngine:
                 # refusal can NEVER be overturned by a late Planner step.
                 if (
                     not evidence_ok
+                    and semantic_intent.knowledge_dependency is not KnowledgeDependency.NONE
                     and policy_mode != "OFF"
                     and not explicit_rag_off
                     and authorized_catalog
                 ):
-                    late_semantic = semantic_intent.model_copy(update={
-                        "knowledge_dependency": KnowledgeDependency.REQUIRED,
-                    })
+                    # A planner step may request a bounded second lookup, but it
+                    # cannot upgrade WHAT from no-knowledge to knowledge-required.
                     late_discovery = discover_knowledge_bases(
                         evidence_query,
-                        semantic=late_semantic,
+                        semantic=semantic_intent,
                         catalog=authorized_catalog,
                         explicitly_selected_ids=explicit_knowledge_ids,
                         max_candidates=2,
@@ -6838,6 +6933,7 @@ class RuntimeEngine:
                                 step.capability for step in semantic_plan.steps
                             ],
                             model=planning_model,
+                            semantic=semantic_intent,
                             on_model_event=model_event,
                         )
 

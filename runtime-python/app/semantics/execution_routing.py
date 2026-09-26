@@ -16,7 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from app.request_contracts import ModelSelection, ProjectModelRuntime, TaskConstraints
 
 from app.semantics.analyzer import analyze_task_semantics, has_live_personal_data_need
-from app.semantics.contracts import KnowledgeDependency, RagPreference
+from app.semantics.contracts import (
+    ClarificationIntent, ContinuationIntent, ExecutionCapabilities, ExecutionDependencies,
+    ExecutionIntent, KnowledgeDependency, RagPreference, ReferenceIntent,
+)
 
 
 class RoutingModelRuntimeConfig(ProjectModelRuntime):
@@ -75,6 +78,7 @@ class ExecutionRoutingResult(BaseModel):
     model_tokens: int = Field(default=0, ge=0, alias="modelTokens")
     model_estimated_cost: float = Field(default=0.0, ge=0, alias="modelEstimatedCost")
     model_cost_known: bool = Field(default=False, alias="modelCostKnown")
+    execution_intent: ExecutionIntent | None = Field(default=None, alias="executionIntent")
 
 
 _OPERATION = (
@@ -328,6 +332,24 @@ def _ambiguous_runtime_target(text: str, continuation_state: str) -> str | None:
     return None
 
 
+def _explicit_trusted_history_target_reference(text: str) -> bool:
+    """Require both a prior-turn anchor and a concrete resource class.
+
+    This is intentionally narrower than generic anaphora. A bare "把它删掉"
+    must remain fail-closed, while "删除刚才授权测试目录里的那个文件" may
+    defer target resolution to Runtime's bounded trusted history.
+    """
+    anchor = _any(text, (
+        "刚才", "刚刚", "上一轮", "上一条", "上一个", "之前列出的",
+        "previous", "just listed", "listed above",
+    ))
+    resource = _any(text, (
+        "文件", "目录", "路径", "file", "folder", "path",
+        "订单", "设备", "资源", "记录", "order", "device", "resource", "record",
+    ))
+    return bool(anchor and resource)
+
+
 def _pending_reference_clarification(text: str, continuation_state: str) -> str | None:
     """A pending task does not make an unrelated scheme/index reference unique."""
     if continuation_state != "ONE_PENDING":
@@ -339,11 +361,258 @@ def _pending_reference_clarification(text: str, continuation_state: str) -> str 
     return None
 
 
-def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> ExecutionRoutingResult:
-    """Never infer FAST_PATH from merely failing to recognize a capability."""
+def build_execution_intent(req: ExecutionRoutingRequest, *, descriptor=None) -> ExecutionIntent:
+    """Create the single request-level P24 semantic contract.
+
+    Deterministic analysis establishes a conservative baseline. A bounded model
+    descriptor may add semantic facts but can never remove an already detected
+    governed dependency, select concrete resources, or grant authorization.
+    """
     text = _clean(req.task)
-    semantic = analyze_task_semantics(req.task, has_attachments=req.has_attachments, enable_implicit_business=True)
+    semantic = analyze_task_semantics(
+        req.task,
+        has_attachments=req.has_attachments,
+        enable_implicit_business=True,
+    )
     knowledge = semantic.knowledge_dependency
+    required = list(semantic.required_capabilities)
+    required_lower = {item.casefold() for item in required}
+
+    relation = "NONE"
+    references_previous = False
+    requested_effects: list[str] = list(semantic.requested_effects)
+    fresh_data = False
+    external_action = False
+    multi_step = _multi_step_instruction(text)
+    source = "RULE"
+    confidence = float(semantic.confidence)
+    model_clarification = False
+    model_missing_fields: list[str] = []
+    model_reference_type = "NONE"
+
+    if descriptor is not None:
+        source = "MODEL"
+        confidence = max(confidence, 0.86)
+        relation = str(getattr(descriptor, "continuation_intent", "NONE") or "NONE")
+        references_previous = bool(getattr(descriptor, "references_previous", False)) or relation in {
+            "EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS", "NEW_FACT_FOLLOWUP",
+            "REFRESH_DATA", "CONFIRM_ACTION", "RESUME_TASK",
+        }
+        fresh_data = bool(getattr(descriptor, "needs_fresh_data", False))
+        external_action = bool(getattr(descriptor, "external_action_required", False))
+        trusted_model_only_followup = (
+            req.previous_turn.exists
+            and req.previous_turn.execution_route == "FAST_PATH"
+            and req.previous_turn.status.strip().upper() == "COMPLETED"
+            and not req.previous_turn.knowledge_used
+            and not req.previous_turn.tool_used
+            and not req.previous_turn.mcp_used
+            and relation in {"EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS", "NEW_FACT_FOLLOWUP"}
+            and semantic.knowledge_dependency is KnowledgeDependency.NONE
+            and not semantic.requires_tool
+            and not semantic.requires_external
+            and not fresh_data
+            and not external_action
+        )
+        if not trusted_model_only_followup:
+            multi_step = multi_step or bool(getattr(descriptor, "multi_step", False)) or bool(getattr(descriptor, "has_dependencies", False))
+        requested_effects = list(dict.fromkeys(
+            [*requested_effects, *(getattr(descriptor, "requested_effects", ()) or ())]
+        ))
+        model_clarification = bool(getattr(descriptor, "clarification_required", False))
+        model_missing_fields = list(getattr(descriptor, "missing_fields", ()) or ())
+        model_reference_type = str(getattr(descriptor, "reference_type", "NONE") or "NONE")
+        model_knowledge = str(getattr(descriptor, "knowledge_dependency", "NONE") or "NONE")
+        if model_knowledge == "REQUIRED":
+            knowledge = KnowledgeDependency.REQUIRED
+        elif model_knowledge == "OPTIONAL" and knowledge is KnowledgeDependency.NONE:
+            knowledge = KnowledgeDependency.OPTIONAL
+        if not trusted_model_only_followup:
+            for kind in tuple(getattr(descriptor, "capability_kinds", ()) or ()):
+                abstract = str(kind).casefold()
+                if abstract and abstract not in required_lower:
+                    required.append(abstract)
+                    required_lower.add(abstract)
+
+    deps = ExecutionDependencies(
+        knowledge=knowledge,
+        memory=semantic.requires_memory,
+        freshData=fresh_data,
+        attachment=req.has_attachments,
+        externalSystem=semantic.requires_external or external_action,
+        tool=semantic.requires_tool or "tool" in required_lower,
+        mcp="mcp" in required_lower,
+        agent="agent" in required_lower,
+        multiStep=multi_step,
+        sideEffect=semantic.side_effect or external_action or any(
+            effect in {"WRITE", "EXTERNAL_SEND"} for effect in requested_effects
+        ),
+    )
+
+    # Explicit MCP/Agent model facts are abstract capability requirements only.
+    # No dynamic resource identifier is permitted in this contract.
+    if deps.knowledge is not KnowledgeDependency.NONE and "knowledge" not in required_lower:
+        required.append("knowledge")
+    if deps.tool and "tool" not in required_lower:
+        required.append("tool")
+    if deps.mcp and "mcp" not in required_lower:
+        required.append("mcp")
+    if deps.agent and "agent" not in required_lower:
+        required.append("agent")
+
+    trusted_previous = (
+        req.previous_turn.exists
+        and req.previous_turn.status.strip().upper() == "COMPLETED"
+        and req.previous_turn.execution_route == "FAST_PATH"
+        and not req.previous_turn.knowledge_used
+        and not req.previous_turn.tool_used
+        and not req.previous_turn.mcp_used
+    )
+    is_continuation = req.continuation_state != "NONE" or relation != "NONE" or references_previous
+    deterministic_history_reference = _explicit_trusted_history_target_reference(text)
+    side_effect_pronoun_reference = bool(
+        deps.side_effect
+        and re.search(r"^(?:请|帮我|麻烦)?\s*(?:把|将)\s*(?:它|这个|那个)", text)
+    )
+    contextual_reference = (
+        references_previous
+        or model_reference_type in {"CONTEXTUAL_REFERENCE", "UNRESOLVED"}
+        or deterministic_history_reference
+        or side_effect_pronoun_reference
+        or _has_unresolved_anaphora(text)
+    )
+    trusted_contextual_reference = (
+        trusted_previous
+        and descriptor is not None
+        and contextual_reference
+        and not (deps.knowledge is not KnowledgeDependency.NONE or deps.tool or deps.mcp or deps.side_effect or deps.fresh_data)
+    )
+    runtime_trusted_history_resolution = (
+        req.previous_turn.exists
+        and req.previous_turn.status.strip().upper() == "COMPLETED"
+        and req.continuation_state not in {"ONE_PENDING", "AMBIGUOUS"}
+        and contextual_reference
+        and deterministic_history_reference
+        and deps.side_effect
+        and bool(deps.tool or deps.external_system)
+    )
+    if trusted_contextual_reference:
+        reference = ReferenceIntent(
+            type="TRUSTED_HISTORY", resolvableFromTrustedHistory=True,
+            requiresExternalResolution=False, targetScope="HISTORY",
+            trustedHistoryResolution="RESOLVED",
+        )
+    elif runtime_trusted_history_resolution:
+        # The preflight deliberately does not receive raw conversation bodies.
+        # For a governed side-effect continuation it can therefore state only
+        # that Runtime must resolve the reference against bounded trusted history.
+        # It must never guess a concrete target or mark it resolved here.
+        reference = ReferenceIntent(
+            type="CONTEXTUAL_REFERENCE", resolvableFromTrustedHistory=False,
+            requiresExternalResolution=False, targetScope="HISTORY",
+            trustedHistoryResolution="REQUIRED",
+        )
+    elif contextual_reference:
+        reference = ReferenceIntent(
+            type="CONTEXTUAL_REFERENCE" if req.previous_turn.exists else "UNRESOLVED",
+            resolvableFromTrustedHistory=False,
+            requiresExternalResolution=bool(deps.tool or deps.external_system or deps.side_effect),
+            targetScope="HISTORY" if req.previous_turn.exists else "NONE",
+        )
+    elif req.has_attachments:
+        reference = ReferenceIntent(type="ATTACHMENT", targetScope="ATTACHMENT")
+    elif _inline_material(text):
+        reference = ReferenceIntent(type="REQUEST_INPUT", targetScope="REQUEST")
+    else:
+        reference = ReferenceIntent()
+
+    missing: list[str] = []
+    clarification_required = False
+    clarification_reason = ""
+    if (
+        model_clarification
+        and not reference.resolvable_from_trusted_history
+        and reference.trusted_history_resolution != "REQUIRED"
+    ):
+        clarification_required = True
+        clarification_reason = "MODEL_UNRESOLVED_REQUIREMENT"
+        missing = [item for item in model_missing_fields if item in {
+            "TARGET", "SOURCE", "CONTEXT", "AUTHORIZATION", "PARAMETER", "CAPABILITY"
+        }][:6] or ["TARGET"]
+    if (
+        deps.side_effect
+        and reference.type in {"CONTEXTUAL_REFERENCE", "UNRESOLVED"}
+        and not reference.resolvable_from_trusted_history
+        and reference.trusted_history_resolution != "REQUIRED"
+    ):
+        clarification_required = True
+        clarification_reason = "AMBIGUOUS_SIDE_EFFECT_TARGET"
+        missing = ["TARGET"]
+
+    task_type = "UNKNOWN"
+    if req.has_attachments:
+        task_type = "ATTACHMENT_ANALYSIS"
+    elif deps.multi_step:
+        task_type = "MULTI_STEP"
+    elif deps.knowledge is not KnowledgeDependency.NONE:
+        task_type = "KNOWLEDGE_QUERY"
+    elif deps.tool or deps.mcp or deps.side_effect or deps.external_system:
+        task_type = "OPERATION"
+    elif semantic.requires_memory:
+        task_type = "MEMORY_RECALL"
+    elif semantic.explanation_only:
+        task_type = "EXPLAIN"
+    elif _model_only_request(text) and _any(text, _INLINE_EDIT):
+        task_type = "TRANSFORM"
+    elif text in _SAFE_GREETING or semantic.explanation_only:
+        task_type = "CHAT"
+
+    codes = [
+        code for code in (getattr(descriptor, "reason_codes", ()) or ())
+        if re.fullmatch(r"[A-Z0-9_]{1,64}", str(code or ""))
+    ][:8]
+    return ExecutionIntent(
+        userIntent=str(getattr(descriptor, "objective", "") or semantic.objective)[:600],
+        taskType=task_type,
+        continuation=ContinuationIntent(
+            isContinuation=is_continuation,
+            relation=relation if relation in {
+                "NONE", "EXPLAIN_PREVIOUS", "TRANSFORM_PREVIOUS", "NEW_FACT_FOLLOWUP",
+                "REFRESH_DATA", "CONFIRM_ACTION", "RESUME_TASK", "AMBIGUOUS",
+            } else "AMBIGUOUS",
+            confidence=confidence if is_continuation else 0.0,
+        ),
+        reference=reference,
+        clarification=ClarificationIntent(
+            required=clarification_required,
+            reasonCode=clarification_reason,
+            missingFields=missing,
+        ),
+        dependencies=deps,
+        capabilities=ExecutionCapabilities(
+            requiredCapabilities=list(dict.fromkeys(required)),
+            forbiddenCapabilities=list(semantic.forbidden_capabilities),
+        ),
+        requestedEffects=requested_effects,
+        forbiddenActions=list(semantic.forbidden_actions),
+        ragPreference=semantic.rag_preference,
+        explanationOnly=semantic.explanation_only,
+        confidence=confidence,
+        semanticSource=source,
+        reasonCodes=codes,
+    )
+
+
+def _decide_execution_route_from_intent(
+    req: ExecutionRoutingRequest,
+    intent: ExecutionIntent,
+    *,
+    descriptor=None,
+) -> ExecutionRoutingResult:
+    """Derive WHERE from the authoritative WHAT contract."""
+    text = _clean(req.task)
+    semantic = intent.to_task_semantic_intent(objective=req.task)
+    knowledge = intent.dependencies.knowledge
     # Negating retrieval is not itself a request to retrieve. If the user asks
     # solely to transform supplied prose, respect RAG OFF without treating the
     # word "知识库" in "不要查知识库" as a positive Knowledge dependency.
@@ -445,6 +714,22 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
             capabilityRequired=True, reasonCodes=["EXISTING_TASK_OPERATION_REQUIRED"],
             unresolvedRequirements=["已有未结束任务；请使用原任务的查询、恢复或取消操作，不会再次提交"],
         )
+    # Typed clarification is authoritative regardless of whether the optional
+    # semantic model produced a descriptor. Deterministic side-effect analysis
+    # must therefore fail closed for a bare contextual target such as
+    # ``把它删掉`` instead of depending on a model call to activate the guard.
+    if (
+        intent.clarification.required
+        and not intent.reference.resolvable_from_trusted_history
+        and intent.reference.trusted_history_resolution != "REQUIRED"
+    ):
+        return ExecutionRoutingResult(
+            executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
+            capabilityRequired=True,
+            reasonCodes=[intent.clarification.reason_code or "UNRESOLVED_REQUIREMENT"],
+            unresolvedRequirements=["请补充完成该请求所需的明确目标或上下文"],
+            analysisSource="MODEL" if descriptor is not None else "RULE",
+        )
     if req.continuation_state == "NONE" and _chat_model_followup(text) and not must_use_runtime:
         # Not every reference to a previous assistant answer contains "继续"
         # or "刚才" (e.g. "上一条回复最后一段"). Without trusted history,
@@ -544,23 +829,7 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
         if model_resolved_chat_only:
             descriptor_requires_runtime = False
         must_use_runtime = must_use_runtime or descriptor_requires_runtime
-        unknowns = list(getattr(descriptor, "unknowns", ()) or ())
-        if unknowns:
-            # The model can describe the same conversational referent as
-            # ``it``, ``subject``, ``referenced concept``, or another free-form
-            # label. Routing must not depend on that unstable wording. Once the
-            # guarded predicate above has established a trusted, completed,
-            # capability-free FAST_PATH continuation, normal chat history owns
-            # resolution of the referent. Real missing runtime targets still
-            # fail closed: deterministic action/target checks run earlier, and
-            # any Knowledge/Tool/MCP/fresh-data/effect signal prevents
-            # model_resolved_chat_only from becoming true.
-            if not (model_resolved_chat_only and _has_unresolved_anaphora(text)):
-                return ExecutionRoutingResult(
-                    executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
-                    capabilityRequired=True, reasonCodes=["MODEL_UNRESOLVED_REQUIREMENT"],
-                    unresolvedRequirements=[str(item)[:160] for item in unknowns[:4]], analysisSource="MODEL",
-                )
+        # P24 control flow is typed; descriptor.unknowns remains diagnostic-only.
         if (req.rag_mode == "OFF" or semantic.rag_preference is RagPreference.DISABLE) and knowledge != KnowledgeDependency.NONE:
             return ExecutionRoutingResult(
                 executionRoute="RUNTIME", disposition="CLARIFY", knowledgeDependency=knowledge,
@@ -593,6 +862,30 @@ def decide_execution_route(req: ExecutionRoutingRequest, *, descriptor=None) -> 
         reasonCodes=["RUNTIME_DEPENDENCY_OR_UNCERTAINTY" if must_use_runtime else "CLEAR_MODEL_ONLY"],
         analysisSource="MODEL" if descriptor is not None else "RULE",
     )
+
+
+def decide_execution_route(
+    req: ExecutionRoutingRequest, *, descriptor=None, intent: ExecutionIntent | None = None,
+) -> ExecutionRoutingResult:
+    authoritative = intent or build_execution_intent(req, descriptor=descriptor)
+    result = _decide_execution_route_from_intent(req, authoritative, descriptor=descriptor)
+    clarification = authoritative.clarification
+    if result.disposition == "CLARIFY":
+        reason = result.reason_codes[0] if result.reason_codes else clarification.reason_code
+        missing = list(clarification.missing_fields)
+        if not missing:
+            if "CONTEXT" in reason or "CONTINUATION" in reason:
+                missing = ["CONTEXT"]
+            elif "POLICY" in reason or "AUTH" in reason:
+                missing = ["AUTHORIZATION"]
+            elif "INPUT" in reason or "SOURCE" in reason:
+                missing = ["SOURCE"]
+            else:
+                missing = ["TARGET"]
+        authoritative = authoritative.model_copy(update={
+            "clarification": ClarificationIntent(required=True, reasonCode=reason, missingFields=missing),
+        })
+    return result.model_copy(update={"execution_intent": authoritative})
 
 
 def trusted_fast_path_continuation_fallback(
@@ -635,13 +928,11 @@ def trusted_fast_path_continuation_fallback(
     )):
         return baseline
 
-    # The fallback is intentionally semantic rather than a growing phrase table.
-    # It only accepts a request that the deterministic analyzer itself classifies
-    # as capability-free explanation/model work. Ambiguous anaphora remains on
-    # Runtime unless the semantic model successfully resolves it above.
-    semantic = analyze_task_semantics(
-        req.task, has_attachments=req.has_attachments, enable_implicit_business=True,
-    )
+    # Consume the already-created authoritative intent. P24 forbids a second
+    # request-level semantic interpretation during fallback.
+    if baseline.execution_intent is None:
+        return baseline
+    semantic = baseline.execution_intent.to_task_semantic_intent(objective=req.task)
     capability_free_model_work = (
         semantic.knowledge_dependency == KnowledgeDependency.NONE
         and not semantic.requires_tool
@@ -657,12 +948,23 @@ def trusted_fast_path_continuation_fallback(
     if not capability_free_model_work:
         return baseline
 
+    fallback_intent = baseline.execution_intent.model_copy(update={
+        "continuation": ContinuationIntent(
+            isContinuation=True, relation="EXPLAIN_PREVIOUS", confidence=max(0.8, baseline.execution_intent.confidence),
+        ),
+        "reference": ReferenceIntent(
+            type="TRUSTED_HISTORY", resolvableFromTrustedHistory=True,
+            requiresExternalResolution=False, targetScope="HISTORY",
+        ),
+        "clarification": ClarificationIntent(),
+    })
     return baseline.model_copy(update={
         "execution_route": "FAST_PATH",
         "knowledge_dependency": KnowledgeDependency.NONE,
         "capability_required": False,
         "reason_codes": ["TRUSTED_FAST_PATH_CONTINUATION_FALLBACK"],
         "analysis_source": "RULE",
+        "execution_intent": fallback_intent,
     })
 
 

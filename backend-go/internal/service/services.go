@@ -1569,6 +1569,87 @@ func (s *TaskService) SetAttachmentService(attachments *AttachmentService) {
 
 const taskFinalizationTimeout = 5 * time.Second
 
+func executionIntentRequiresTrustedHistory(intent *runtimeclient.ExecutionIntent) bool {
+	if intent == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(intent.Reference.TrustedHistoryResolution), "REQUIRED")
+}
+
+func latestUserRequestID(messages []model.Message) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		message := messages[i]
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "user") || message.RequestID == nil {
+			continue
+		}
+		requestID := strings.TrimSpace(*message.RequestID)
+		if requestID != "" {
+			return requestID
+		}
+	}
+	return ""
+}
+
+func historyHasAssistantRequest(messages []model.Message, requestID string) bool {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return false
+	}
+	for _, message := range messages {
+		if !strings.EqualFold(strings.TrimSpace(message.Role), "assistant") || message.RequestID == nil {
+			continue
+		}
+		if strings.TrimSpace(*message.RequestID) == requestID && strings.TrimSpace(message.Content) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// waitForTrustedHistoryAssistant closes the small persistence race between a
+// streamed prior turn becoming visible in the browser and its authoritative
+// assistant message committing to MySQL. It is shared by semantic preflight
+// settlement and the post-route Runtime history boundary. The wait is bounded,
+// cross-process safe because MySQL is the authority, and does not attempt to
+// interpret the message body. On timeout the latest durable history is returned
+// unchanged so semantic/runtime resolution still fails closed.
+func (s *TaskService) waitForTrustedHistoryAssistant(
+	ctx context.Context,
+	uid int64,
+	conversationID int64,
+	initial []model.Message,
+	maxWait time.Duration,
+) ([]model.Message, error) {
+	requestID := latestUserRequestID(initial)
+	if requestID == "" || historyHasAssistantRequest(initial, requestID) || maxWait <= 0 {
+		return initial, nil
+	}
+
+	latest := initial
+	deadline := time.NewTimer(maxWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return latest, nil
+		case <-ticker.C:
+			messages, err := s.messages.ListMessages(ctx, uid, conversationID, 48)
+			if err != nil {
+				return nil, err
+			}
+			latest = messages
+			if historyHasAssistantRequest(messages, requestID) {
+				return messages, nil
+			}
+		}
+	}
+}
+
 func conversationIDValue(id *int64) int64 {
 	if id == nil {
 		return 0
@@ -1806,14 +1887,15 @@ func (s *TaskService) resolveRequestModelRuntimePool(
 
 type RunTaskInput struct {
 	// Non-authoritative to the transport; never include routing results in the original idempotency fingerprint.
-	ExecutionRoute            string   `json:"-"`
-	RoutingReasonCodes        []string `json:"-"`
-	RoutingAnalysisSource     string   `json:"-"`
-	RoutingAnalysisLatencyMS  int64    `json:"-"`
-	RoutingModelCalls         int      `json:"-"`
-	RoutingModelTokens        int      `json:"-"`
-	RoutingModelEstimatedCost float64  `json:"-"`
-	RoutingModelCostKnown     bool     `json:"-"`
+	ExecutionRoute            string                         `json:"-"`
+	ExecutionIntent           *runtimeclient.ExecutionIntent `json:"-"`
+	RoutingReasonCodes        []string                       `json:"-"`
+	RoutingAnalysisSource     string                         `json:"-"`
+	RoutingAnalysisLatencyMS  int64                          `json:"-"`
+	RoutingModelCalls         int                            `json:"-"`
+	RoutingModelTokens        int                            `json:"-"`
+	RoutingModelEstimatedCost float64                        `json:"-"`
+	RoutingModelCostKnown     bool                           `json:"-"`
 	ClientRequestID           string
 	ConversationID            *int64
 
@@ -2840,6 +2922,17 @@ func (s *TaskService) Run(
 		if historyErr != nil {
 			return nil, historyErr
 		}
+		if executionIntentRequiresTrustedHistory(in.ExecutionIntent) {
+			previous, historyErr = s.waitForTrustedHistoryAssistant(
+				ctx, uid, *in.ConversationID, previous, taskFinalizationTimeout,
+			)
+			if errors.Is(historyErr, repository.ErrNotOwned) {
+				return nil, ErrNotFound
+			}
+			if historyErr != nil {
+				return nil, historyErr
+			}
+		}
 		history = boundedInteractiveHistory(previous)
 	}
 
@@ -2925,8 +3018,9 @@ func (s *TaskService) Run(
 		runtimeclient.ExecuteRequest{
 			UserID: uid,
 
-			RequestID:      requestID,
-			ExecutionRoute: in.ExecutionRoute,
+			RequestID:       requestID,
+			ExecutionRoute:  in.ExecutionRoute,
+			ExecutionIntent: in.ExecutionIntent,
 
 			ConversationID: in.ConversationID,
 

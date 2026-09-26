@@ -13,9 +13,9 @@ import (
 
 const clarificationTaskKind = "clarification"
 
-// PersistRoutingClarification records the user turn and the clarification prompt as
-// one idempotent, suspended logical task. It creates no Runtime job and invokes
-// no Tool/Agent/Knowledge capability.
+// PersistRoutingClarification records the user turn and clarification prompt as
+// one idempotent completed turn. Semantic clarification is not an Agent suspension:
+// it creates no Runtime job, continuation, Tool, Agent or Knowledge execution.
 func (s *TaskService) PersistRoutingClarification(
 	ctx context.Context,
 	uid int64,
@@ -65,6 +65,7 @@ func (s *TaskService) PersistRoutingClarification(
 	}
 	in.RagPolicy = normalizedRag
 	in.ExecutionRoute = decision.Strategy
+	in.ExecutionIntent = decision.ExecutionIntent
 	in.RoutingReasonCodes = append([]string(nil), decision.ReasonCodes...)
 	in.RoutingAnalysisSource = decision.AnalysisSource
 	in.RoutingAnalysisLatencyMS = decision.AnalysisLatencyMS
@@ -79,7 +80,7 @@ func (s *TaskService) PersistRoutingClarification(
 		ModelSelection: in.ModelSelection, RagPolicy: in.RagPolicy, EffectiveRagPolicy: effectiveRag,
 		ClientRequestID: clientKey, RequestFingerprint: fingerprint,
 		PendingUserMessageMetadata: executionRoutingMetadata(in, map[string]any{
-			"runtimePhase": "clarification", "status": "INPUT_REQUIRED",
+			"runtimePhase": "clarification", "status": "COMPLETED",
 		}),
 	}, in.Constraints)
 	if err != nil {
@@ -89,29 +90,24 @@ func (s *TaskService) PersistRoutingClarification(
 		return replayDirectTask(task), nil
 	}
 	message := decision.UnresolvedRequirements[0]
-	continuation := &model.TaskContinuation{
-		Protocol: clarificationTaskKind, AgentID: 0, Capability: "clarification",
-		TaskID: "clarification", ContextID: executionRoutingVersion,
-		State: "INPUT_REQUIRED", Kind: clarificationTaskKind, Summary: message,
-	}
 	var assistant *repository.AssistantMessageWrite
 	if in.ConversationID != nil {
 		assistant = &repository.AssistantMessageWrite{
 			UserID: uid, ConversationID: *in.ConversationID, Content: message,
-			Status: "INPUT_REQUIRED", RequestID: requestID,
+			Status: "COMPLETED", RequestID: requestID,
 			Metadata: map[string]any{
 				"taskId": task.ID, "runtimePhase": "clarification",
-				"status": "INPUT_REQUIRED", "routingClarification": true,
+				"status": "COMPLETED", "routingClarification": true,
 			},
 		}
 	}
 	trace := executionRoutingTrace(in, "direct")
-	if err = s.suspendTaskWithAssistant(ctx, repository.TaskSuspensionWrite{
+	if err = s.completeTaskWithAssistant(ctx, repository.TaskCompletionWrite{
 		UserID: uid, TaskID: task.ID, ConversationID: conversationIDValue(in.ConversationID),
-		Status: "INPUT_REQUIRED", Result: message, Continuation: continuation,
-		Selected: []string{}, Trace: trace, DAG: map[string]any{}, LatencyMS: 0, EstimatedCost: 0,
+		Result: message, Selected: []string{}, Trace: trace, DAG: map[string]any{},
+		LatencyMS: 0, EstimatedCost: 0,
 	}, assistant); err != nil {
-		_ = s.tasks.FailTask(ctx, uid, task.ID, "failed to persist clarification state", 0)
+		_ = s.tasks.FailTask(ctx, uid, task.ID, "failed to persist clarification result", 0)
 		if errors.Is(err, repository.ErrInvalidTaskState) {
 			return nil, ErrConflict
 		}
@@ -124,9 +120,9 @@ func (s *TaskService) PersistRoutingClarification(
 	return replayDirectTask(fresh), nil
 }
 
-// ResolveRoutingClarification marks a consumed clarification wait as completed. It
-// has no external side effects; failure leaves a harmless stale wait that the
-// continuation resolver ignores once a newer execution exists.
+// ResolveRoutingClarification is retained only for legacy clarification tasks that
+// were persisted as resumable waits before semantic clarification became a completed
+// turn. New clarification turns never create a continuation.
 func (s *TaskService) ResolveRoutingClarification(ctx context.Context, uid, taskID int64) error {
 	if taskID <= 0 {
 		return nil
@@ -145,9 +141,9 @@ func (s *TaskService) ResolveRoutingClarification(ctx context.Context, uid, task
 	return s.tasks.CompleteTask(ctx, uid, task.ID, "clarification resolved", task.SelectedAgents, task.Trace, task.DAG, 0, 0)
 }
 
-// Supersede prior clarification waits only AFTER a newer task was durably
-// accepted or finished. Failure to clean up must never retry business work.
-// Only older, same-conversation, user-owned clarification tasks are touched.
+// SupersedeRoutingClarifications cleans up only legacy clarification waits after a
+// newer task was durably accepted or finished. New clarification turns complete
+// immediately and therefore never need supersession.
 func (s *TaskService) SupersedeRoutingClarifications(ctx context.Context, uid int64, completed *model.Task) error {
 	if completed == nil || completed.ConversationID == nil || s.tasks == nil {
 		return nil

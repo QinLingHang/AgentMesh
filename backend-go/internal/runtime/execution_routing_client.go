@@ -40,19 +40,79 @@ type ExecutionRoutingRequest struct {
 	Constraints              model.TaskConstraints `json:"constraints"`
 }
 
+// ExecutionIntent is the P24 authoritative WHAT contract. It carries only
+// semantic facts and abstract capability requirements; concrete resource IDs
+// and authorization decisions are intentionally impossible to encode here.
+type ExecutionIntentContinuation struct {
+	IsContinuation bool    `json:"isContinuation"`
+	Relation       string  `json:"relation"`
+	Confidence     float64 `json:"confidence"`
+}
+
+type ExecutionIntentReference struct {
+	Type                         string `json:"type"`
+	ResolvableFromTrustedHistory bool   `json:"resolvableFromTrustedHistory"`
+	RequiresExternalResolution   bool   `json:"requiresExternalResolution"`
+	TargetScope                  string `json:"targetScope"`
+	TrustedHistoryResolution     string `json:"trustedHistoryResolution"`
+}
+
+type ExecutionIntentClarification struct {
+	Required      bool     `json:"required"`
+	ReasonCode    string   `json:"reasonCode"`
+	MissingFields []string `json:"missingFields"`
+}
+
+type ExecutionIntentDependencies struct {
+	Knowledge      string `json:"knowledge"`
+	Memory         bool   `json:"memory"`
+	FreshData      bool   `json:"freshData"`
+	Attachment     bool   `json:"attachment"`
+	ExternalSystem bool   `json:"externalSystem"`
+	Tool           bool   `json:"tool"`
+	MCP            bool   `json:"mcp"`
+	Agent          bool   `json:"agent"`
+	MultiStep      bool   `json:"multiStep"`
+	SideEffect     bool   `json:"sideEffect"`
+}
+
+type ExecutionIntentCapabilities struct {
+	RequiredCapabilities  []string `json:"requiredCapabilities"`
+	ForbiddenCapabilities []string `json:"forbiddenCapabilities"`
+}
+
+type ExecutionIntent struct {
+	Version          string                       `json:"version"`
+	UserIntent       string                       `json:"userIntent"`
+	TaskType         string                       `json:"taskType"`
+	Continuation     ExecutionIntentContinuation  `json:"continuation"`
+	Reference        ExecutionIntentReference     `json:"reference"`
+	Clarification    ExecutionIntentClarification `json:"clarification"`
+	Dependencies     ExecutionIntentDependencies  `json:"dependencies"`
+	Capabilities     ExecutionIntentCapabilities  `json:"capabilities"`
+	RequestedEffects []string                     `json:"requestedEffects"`
+	ForbiddenActions []string                     `json:"forbiddenActions"`
+	RagPreference    string                       `json:"ragPreference"`
+	ExplanationOnly  bool                         `json:"explanationOnly"`
+	Confidence       float64                      `json:"confidence"`
+	SemanticSource   string                       `json:"semanticSource"`
+	ReasonCodes      []string                     `json:"reasonCodes"`
+}
+
 type ExecutionRoutingResponse struct {
-	SchemaVersion          string   `json:"schemaVersion"`
-	ExecutionRoute         string   `json:"executionRoute"`
-	Disposition            string   `json:"disposition"`
-	KnowledgeDependency    string   `json:"knowledgeDependency"`
-	CapabilityRequired     bool     `json:"capabilityRequired"`
-	ReasonCodes            []string `json:"reasonCodes"`
-	UnresolvedRequirements []string `json:"unresolvedRequirements"`
-	AnalysisSource         string   `json:"analysisSource"`
-	ModelCalls             int      `json:"modelCalls"`
-	ModelTokens            int      `json:"modelTokens"`
-	ModelEstimatedCost     float64  `json:"modelEstimatedCost"`
-	ModelCostKnown         bool     `json:"modelCostKnown"`
+	SchemaVersion          string           `json:"schemaVersion"`
+	ExecutionRoute         string           `json:"executionRoute"`
+	Disposition            string           `json:"disposition"`
+	KnowledgeDependency    string           `json:"knowledgeDependency"`
+	CapabilityRequired     bool             `json:"capabilityRequired"`
+	ReasonCodes            []string         `json:"reasonCodes"`
+	UnresolvedRequirements []string         `json:"unresolvedRequirements"`
+	AnalysisSource         string           `json:"analysisSource"`
+	ModelCalls             int              `json:"modelCalls"`
+	ModelTokens            int              `json:"modelTokens"`
+	ModelEstimatedCost     float64          `json:"modelEstimatedCost"`
+	ModelCostKnown         bool             `json:"modelCostKnown"`
+	ExecutionIntent        *ExecutionIntent `json:"executionIntent"`
 }
 
 // UnderstandExecutionRoute is a bounded internal-only suggestion, not execution permission.

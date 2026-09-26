@@ -13,6 +13,60 @@ if TYPE_CHECKING:
     from app.semantics.contracts import TaskSemanticIntent
 
 
+
+
+_FILE_TARGET_RE = re.compile(
+    r"(?i)(?:[a-z]:[\\/][^\r\n<>|]+|/(?:[^/\s]+/)+[^/\s]+|[\w.-]+\.[a-z0-9]{1,16})"
+)
+
+
+def _history_role_content(raw: Any) -> tuple[str, str]:
+    if isinstance(raw, dict):
+        return str(raw.get("role", "")), str(raw.get("content", ""))
+    return str(getattr(raw, "role", "")), str(getattr(raw, "content", ""))
+
+
+def resolve_trusted_history_reference(task: str, history: Iterable[Any] = ()) -> tuple[bool, str | None]:
+    """Resolve only a uniquely named file target from bounded trusted history.
+
+    P24 preflight intentionally does not receive raw conversation bodies. For a
+    side-effect continuation it may request trusted-history resolution, but the
+    Runtime must perform that resolution before exposing a mutating Tool. This
+    resolver is deliberately conservative: today it recognizes file-target
+    continuations only, and succeeds only when the newest relevant assistant
+    message contains exactly one distinct file/path candidate. Any ambiguity or
+    unsupported resource type fails closed.
+    """
+
+    current = " ".join(str(task or "").casefold().split())
+    if not current:
+        return False, None
+    file_request = any(token in current for token in ("文件", "file", "目录", "folder", "path", "路径"))
+    side_effect = any(token in current for token in ("删除", "删掉", "移除", "delete", "remove"))
+    contextual = any(token in current for token in ("刚才", "刚刚", "那个", "这个", "它", "上述", "上一个", "previous", "that", "it"))
+    if not (file_request and side_effect and contextual):
+        return False, None
+
+    for raw in reversed(list(history)):
+        role, content = _history_role_content(raw)
+        if role.casefold().strip() != "assistant" or not content.strip():
+            continue
+        matches = [item.rstrip(".,，。;；:：!?！？") for item in _FILE_TARGET_RE.findall(content)]
+        if not matches:
+            continue
+        # A full path and its basename are the same target, not two targets.
+        canonical: dict[str, str] = {}
+        for item in matches:
+            normalized = item.replace("\\", "/").rstrip("/")
+            basename = normalized.rsplit("/", 1)[-1].casefold()
+            if basename:
+                canonical.setdefault(basename, item)
+        if len(canonical) == 1:
+            return True, next(iter(canonical.values()))
+        return False, None
+    return False, None
+
+
 class CapabilityKind(str, Enum):
     TOOL = "tool"
     MCP_SERVER = "mcp_server"
@@ -170,6 +224,7 @@ def contextualize_discovery_task(
     task: str,
     history: Iterable[Any] = (),
     *,
+    semantic_intent: "TaskSemanticIntent | None" = None,
     max_turns: int = 4,
     max_chars: int = 3200,
 ) -> tuple[str, bool, int]:
@@ -183,7 +238,12 @@ def contextualize_discovery_task(
     """
 
     current = str(task or "").strip()
-    if not is_continuation_turn(current):
+    trusted_semantic_continuation = bool(
+        semantic_intent is not None
+        and semantic_intent.is_continuation
+        and semantic_intent.trusted_reference_resolvable
+    )
+    if not trusted_semantic_continuation and not is_continuation_turn(current):
         return current, False, 0
 
     selected_reversed: list[tuple[str, str]] = []

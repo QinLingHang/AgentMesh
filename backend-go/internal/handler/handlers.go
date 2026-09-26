@@ -1121,6 +1121,7 @@ func (h *TaskHandler) RunAutoStream(c *gin.Context, durable *DurableRuntimeHandl
 			return
 		}
 		input.ExecutionRoute = routingDecision.Strategy
+		input.ExecutionIntent = routingDecision.ExecutionIntent
 		input.RoutingReasonCodes = append([]string(nil), routingDecision.ReasonCodes...)
 		input.RoutingAnalysisSource = routingDecision.AnalysisSource
 		input.RoutingAnalysisLatencyMS = routingDecision.AnalysisLatencyMS
@@ -1196,6 +1197,7 @@ func (h *TaskHandler) runStreamRequest(c *gin.Context, req runReq, decision *ser
 	}
 	if routingDecision != nil {
 		input.ExecutionRoute = routingDecision.Strategy
+		input.ExecutionIntent = routingDecision.ExecutionIntent
 		input.RoutingReasonCodes = append([]string(nil), routingDecision.ReasonCodes...)
 		input.RoutingAnalysisSource = routingDecision.AnalysisSource
 		input.RoutingAnalysisLatencyMS = routingDecision.AnalysisLatencyMS

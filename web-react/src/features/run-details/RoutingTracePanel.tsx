@@ -114,6 +114,29 @@ export function RoutingTracePanel({
 
                 {reason && <p className="routing-reason">{reason}</p>}
 
+                {typeof detail.intentVersion === "string" && detail.intentVersion && (
+                  <div className="routing-candidates">
+                    <div className="routing-candidate-row">
+                      <div>
+                        <strong>ExecutionIntent</strong>
+                        <small>{String(detail.intentVersion)}</small>
+                      </div>
+                      <span>{String(detail.taskType ?? "UNKNOWN")}</span>
+                      <span>续接 {String(detail.continuation ?? "NONE")}</span>
+                      <span>引用 {String(detail.reference ?? "NONE")}</span>
+                      <span>知识 {String(detail.knowledgeDependency ?? "NONE")}</span>
+                      <span className={detail.sideEffect === true ? "constraint-bad" : "constraint-good"}>
+                        {detail.sideEffect === true ? "副作用" : "无副作用"}
+                      </span>
+                    </div>
+                    {Array.isArray(detail.requiredCapabilities) && detail.requiredCapabilities.length > 0 && (
+                      <p className="routing-reason">
+                        所需能力：{detail.requiredCapabilities.filter((item): item is string => typeof item === "string").join(", ")}
+                      </p>
+                    )}
+                  </div>
+                )}
+
                 {candidates.length > 0 && (
                   <div className="routing-candidates">
                     {candidates.map((candidate, candidateIndex) => {

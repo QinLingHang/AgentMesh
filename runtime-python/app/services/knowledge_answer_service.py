@@ -67,9 +67,14 @@ async def execute_knowledge_answer(
             dag=DynamicDAG(nodes=[], edges=[]), agent_feedback=[],
         )
 
-    semantic = analyze_task_semantics(
-        req.task, has_attachments=bool(req.attachments), enable_implicit_business=True,
-    )
+    if req.execution_route == "RUNTIME":
+        if req.execution_intent is None:
+            return await result("缺少统一执行意图，无法安全执行知识检索。")
+        semantic = req.execution_intent.to_task_semantic_intent(objective=req.task)
+    else:
+        semantic = analyze_task_semantics(
+            req.task, has_attachments=bool(req.attachments), enable_implicit_business=False,
+        )
     policy = req.effective_rag_policy
     if policy is None or policy.mode == "OFF" or semantic.rag_preference is RagPreference.DISABLE:
         event("Knowledge policy", "error", "DISABLED")

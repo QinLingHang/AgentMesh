@@ -15,6 +15,7 @@ from app.tools.contracts import (
 )
 
 from app.request_contracts import ModelSelection, ProjectModelRuntime, TaskConstraints
+from app.semantics.contracts import ExecutionIntent
 
 
 class AgentCapabilityProfile(
@@ -278,6 +279,7 @@ class RuntimeRequest(
     user_id: int
     request_id: str
     execution_route: Literal["RUNTIME"] | None = Field(default=None, alias="executionRoute")
+    execution_intent: ExecutionIntent | None = Field(default=None, alias="executionIntent")
 
     conversation_id: int | None = Field(
         default=None,

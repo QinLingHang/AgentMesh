@@ -8,6 +8,7 @@ from .discovery import (
     discover_mcp_tools,
     discovery_context,
     is_continuation_turn,
+    resolve_trusted_history_reference,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "discover_mcp_tools",
     "discovery_context",
     "is_continuation_turn",
+    "resolve_trusted_history_reference",
 ]

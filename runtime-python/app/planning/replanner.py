@@ -7,6 +7,7 @@ from typing import Any, Callable
 from app.planning.contracts import ExecutionPlan, PlanStep
 from app.planning.planner import SemanticTaskPlanner
 from app.planning.validator import PlanValidator
+from app.semantics.contracts import TaskSemanticIntent
 
 
 class SemanticReplanner:
@@ -36,6 +37,7 @@ class SemanticReplanner:
         available_capabilities: set[str],
         baseline_capabilities: list[str],
         model: Any | None,
+        semantic: TaskSemanticIntent | None = None,
         on_model_event: Callable[[dict[str, Any]], None] | None = None,
     ) -> ExecutionPlan | None:
         if model is None:
@@ -48,6 +50,7 @@ class SemanticReplanner:
             failed_step_id=failed_step_id,
             failure=failure,
             available_capabilities=available_capabilities,
+            semantic=semantic,
         )
 
         try:
@@ -61,6 +64,13 @@ class SemanticReplanner:
                 available_capabilities=available_capabilities,
                 baseline_capabilities=baseline_capabilities,
                 completed_steps=completed_steps,
+                authoritative_knowledge_dependency=(
+                    semantic.knowledge_dependency.value if semantic is not None else None
+                ),
+                authoritative_forbidden_actions=(
+                    list(semantic.forbidden_actions) if semantic is not None else None
+                ),
+                enforce_baseline_capability_boundary=semantic is not None,
             )
         except Exception:
             return None
@@ -86,6 +96,7 @@ class SemanticReplanner:
         failed_step_id: str | None,
         failure: BaseException,
         available_capabilities: set[str],
+        semantic: TaskSemanticIntent | None = None,
     ) -> str:
         completed = sorted(completed_steps)
         failure_summary = f"{type(failure).__name__}: {str(failure)[:1000]}"
@@ -102,6 +113,10 @@ class SemanticReplanner:
             f"FAILED_STEP_ID={json.dumps(failed_step_id, ensure_ascii=False)}\n"
             f"FAILURE={json.dumps(failure_summary, ensure_ascii=False)}\n"
             f"CURRENT_PLAN={current_plan.model_dump_json(by_alias=True)}\n"
+            f"SEMANTIC_CONSTRAINTS={(semantic.model_dump_json(by_alias=True) if semantic is not None else '{}')}\n"
+            "ExecutionIntent/SEMANTIC_CONSTRAINTS remains authoritative for WHAT during replanning. "
+            "Do not upgrade knowledgeDependency, add a capability outside BASELINE/CURRENT_PLAN, "
+            "or weaken forbiddenActions. Replanning may only change HOW unfinished authorized work is organized.\n"
             "USER_GOAL_BEGIN\n"
             f"{task}\n"
             "USER_GOAL_END"

@@ -138,6 +138,13 @@ class SemanticTaskPlanner:
                     parsed,
                     available_capabilities=available,
                     baseline_capabilities=list(profile.required_capabilities),
+                    authoritative_knowledge_dependency=(
+                        semantic.knowledge_dependency.value if semantic is not None else None
+                    ),
+                    authoritative_forbidden_actions=(
+                        list(semantic.forbidden_actions) if semantic is not None else None
+                    ),
+                    enforce_baseline_capability_boundary=semantic is not None,
                 )
                 validated = self._reconcile_source_bounded_knowledge(validated, semantic, task)
                 return SemanticPlanningOutcome(plan=validated, used_model=True)
@@ -291,6 +298,13 @@ class SemanticTaskPlanner:
             plan,
             available_capabilities=available,
             baseline_capabilities=list(profile.required_capabilities),
+            authoritative_knowledge_dependency=(
+                semantic.knowledge_dependency.value if semantic is not None else None
+            ),
+            authoritative_forbidden_actions=(
+                list(semantic.forbidden_actions) if semantic is not None else None
+            ),
+            enforce_baseline_capability_boundary=semantic is not None,
         )
 
     @staticmethod
@@ -343,8 +357,10 @@ class SemanticTaskPlanner:
     ) -> str:
         catalog = sorted(available, key=str.casefold)
         return (
-            "You are the AgentMesh semantic task planner. Produce JSON only.\n"
-            "You decide WHAT work is needed; never select concrete agent IDs or names.\n"
+            "You are the AgentMesh execution planner. Produce JSON only.\n"
+            "ExecutionIntent/SEMANTIC_CONSTRAINTS is authoritative for WHAT. "
+            "You decide only HOW to organize that work; never add a new capability dependency "
+            "or select concrete agent IDs or names.\n"
             "Use only a capability from AVAILABLE_CAPABILITIES. Keep the plan minimal, "
             "bounded, acyclic, and dependency-aware. Independent steps should have no "
             "dependency so the runtime can execute them in parallel.\n"
@@ -357,7 +373,10 @@ class SemanticTaskPlanner:
             f"AVAILABLE_CAPABILITIES={json.dumps(catalog, ensure_ascii=False)}\n"
             f"BASELINE_PROFILE={profile.model_dump_json()}\n"
             f"SEMANTIC_CONSTRAINTS={(semantic.model_dump_json(by_alias=True) if semantic is not None else '{}')}\n"
-            "Never weaken forbiddenActions. Knowledge dependency describes evidence requirements; it does not grant access. If SEMANTIC_CONSTRAINTS.knowledgeDependency is NONE, then a step that only transforms user-provided material or a dependency's upstream output (summarize, rewrite, extract, synthesize, render, generate from that source) must keep knowledgeDependency=NONE. Do not invent retrieval merely because a transformation creates new wording. Only mark REQUIRED when the user goal itself needs external/tenant evidence.\n"
+            "Never weaken forbiddenActions. Never upgrade knowledgeDependency beyond SEMANTIC_CONSTRAINTS, "
+            "and never invent Tool/MCP/Knowledge/Agent requirements that are absent from the authoritative contract. "
+            "Knowledge dependency describes evidence requirements; it does not grant access. If SEMANTIC_CONSTRAINTS.knowledgeDependency is NONE, every step must keep knowledgeDependency=NONE. "
+            "Do not invent retrieval merely because a transformation creates new wording.\n"
             "USER_GOAL_BEGIN\n"
             f"{task}\n"
             "USER_GOAL_END"

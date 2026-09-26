@@ -287,8 +287,9 @@ type RuntimeAttachment struct {
 // ============================================================
 
 type ExecuteRequest struct {
-	ExecutionRoute string `json:"executionRoute,omitempty"`
-	UserID         int64  `json:"user_id"`
+	ExecutionRoute  string           `json:"executionRoute,omitempty"`
+	ExecutionIntent *ExecutionIntent `json:"executionIntent,omitempty"`
+	UserID          int64            `json:"user_id"`
 
 	RequestID string `json:"request_id"`
 

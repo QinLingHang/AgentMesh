@@ -269,7 +269,24 @@ async def run_scoped_runtime(req: RuntimeRequest, event_sink=None, delta_sink=No
                 "kind": "routing", "title": "Execution Route Decision",
                 "status": "completed", "elapsedMs": 0,
                 "detail": json.dumps({
-                    "decisionVersion": "execution-routing.v1", "strategy": req.execution_route,
+                    "decisionVersion": "execution-routing.v1",
+                    "strategy": req.execution_route,
+                    "intentVersion": req.execution_intent.version if req.execution_intent is not None else "",
+                    "taskType": req.execution_intent.task_type if req.execution_intent is not None else "",
+                    "continuation": req.execution_intent.continuation.relation if req.execution_intent is not None else "NONE",
+                    "reference": req.execution_intent.reference.type if req.execution_intent is not None else "NONE",
+                    "requiredCapabilities": (
+                        list(req.execution_intent.capabilities.required_capabilities)
+                        if req.execution_intent is not None else []
+                    ),
+                    "knowledgeDependency": (
+                        req.execution_intent.dependencies.knowledge.value
+                        if req.execution_intent is not None else "NONE"
+                    ),
+                    "toolRequired": bool(req.execution_intent.dependencies.tool) if req.execution_intent is not None else False,
+                    "mcpRequired": bool(req.execution_intent.dependencies.mcp) if req.execution_intent is not None else False,
+                    "sideEffect": bool(req.execution_intent.dependencies.side_effect) if req.execution_intent is not None else False,
+                    "clarificationRequired": bool(req.execution_intent.clarification.required) if req.execution_intent is not None else False,
                 }, ensure_ascii=False),
             }))
         return response

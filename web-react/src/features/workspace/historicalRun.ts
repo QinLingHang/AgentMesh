@@ -555,6 +555,21 @@ function taskFromHistory(
     }
   }
 
+  // Recovery boundary for persisted assistant rows whose request/task identity
+  // metadata was lost by an older/provisional completion projection. Never
+  // guess by "latest task": bind only when the authoritative Task result text
+  // and conversation produce exactly one match for this assistant message.
+  const resultMatches = tasks.filter(
+    (task) =>
+      task.conversationId === message.conversationId &&
+      task.resultText === message.content &&
+      (task.status === "COMPLETED" || task.status === message.status),
+  );
+
+  if (resultMatches.length === 1) {
+    return resultMatches[0];
+  }
+
   return null;
 }
 
@@ -568,13 +583,15 @@ export function reconstructHistoricalRun(
     return null;
   }
 
-  const metadata = asRecord(
-    message.metadata,
-  );
-
-  if (!metadata) {
-    return null;
-  }
+  // Persisted assistant rows from older/provisional completion projections may
+  // legitimately lack message.metadata even though the authoritative Task row
+  // still exists. Treat missing metadata as an empty projection so taskFromHistory
+  // can recover identity through taskId/requestId/unique result matching. We still
+  // fail closed below when neither an authoritative Task nor runtime metadata exists.
+  const metadata =
+    asRecord(
+      message.metadata,
+    ) ?? {};
 
   const rawTaskId =
     metadata.taskId;

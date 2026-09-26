@@ -40,6 +40,10 @@ class SemanticIntentDescriptor(BaseModel):
     references_previous: bool = Field(default=False, alias="referencesPrevious")
     needs_fresh_data: bool = Field(default=False, alias="needsFreshData")
     external_action_required: bool = Field(default=False, alias="externalActionRequired")
+    reference_type: Literal["NONE", "CONTEXTUAL_REFERENCE", "EXTERNAL_RESOURCE", "UNRESOLVED"] = Field(default="NONE", alias="referenceType")
+    clarification_required: bool = Field(default=False, alias="clarificationRequired")
+    missing_fields: list[Literal["TARGET", "SOURCE", "CONTEXT", "AUTHORIZATION", "PARAMETER", "CAPABILITY"]] = Field(default_factory=list, max_length=6, alias="missingFields")
+    # Deprecated diagnostics only. P24 never uses this free-form field for control flow.
     unknowns: list[str] = Field(default_factory=list, max_length=4)
     reason_codes: list[str] = Field(default_factory=list, max_length=8, alias="reasonCodes")
 
@@ -102,7 +106,8 @@ async def describe_routing_with_model(engine, req) -> tuple[SemanticIntentDescri
         "You classify the user's requested outcome for a governed Agent platform. "
         "Return exactly one JSON object and nothing else. Never invent resource IDs, tool names, "
         "knowledge-base names, permissions, task IDs, files, or prior history. If a critical target "
-        "is missing, put a short description in unknowns. capabilityKinds can only contain "
+        "is missing, set clarificationRequired=true and use typed missingFields; never encode it in unknowns. "
+        "capabilityKinds can only contain "
         "KNOWLEDGE, TOOL, MCP, AGENT. KNOWLEDGE means tenant/project-specific policy or factual "
         "content; TOOL means live personal/business data or an operation; MCP means explicitly "
         "requested MCP; AGENT means explicit delegation to an Agent. General explanations need none. "
@@ -112,11 +117,16 @@ async def describe_routing_with_model(engine, req) -> tuple[SemanticIntentDescri
         "for a new factual question; REFRESH_DATA for a request to fetch current/live data again; "
         "CONFIRM_ACTION only when the user confirms an action; RESUME_TASK only for unfinished work. "
         "Set referencesPrevious=true only when the current utterance semantically depends on the prior turn. "
-        "Set needsFreshData=true for current/live/re-query facts and externalActionRequired=true for side effects.\n"
+        "Set needsFreshData=true for current/live/re-query facts and externalActionRequired=true for side effects. "
+        "Use referenceType only from NONE, CONTEXTUAL_REFERENCE, EXTERNAL_RESOURCE, UNRESOLVED. "
+        "If execution cannot safely proceed, set clarificationRequired=true and missingFields using only "
+        "TARGET, SOURCE, CONTEXT, AUTHORIZATION, PARAMETER, CAPABILITY. unknowns is deprecated diagnostic "
+        "text and should be empty; it is never a control-flow signal.\n"
         "Schema: {\"objective\":\"...\",\"capabilityKinds\":[],\"knowledgeDependency\":"
         "\"NONE|OPTIONAL|REQUIRED\",\"multiStep\":false,\"hasDependencies\":false,"
         "\"hasConditionalEffects\":false,\"requestedEffects\":[],\"continuationIntent\":\"NONE\","
         "\"referencesPrevious\":false,\"needsFreshData\":false,\"externalActionRequired\":false,"
+        "\"referenceType\":\"NONE\",\"clarificationRequired\":false,\"missingFields\":[],"
         "\"unknowns\":[],\"reasonCodes\":[]}\n"
         f"TRUSTED_PREVIOUS_TURN_METADATA:\n{json.dumps(req.previous_turn.model_dump(by_alias=True), ensure_ascii=False)}\n"
         f"USER_REQUEST:\n{req.task[:12000]}"

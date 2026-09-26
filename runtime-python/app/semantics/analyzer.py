@@ -122,6 +122,56 @@ _FORBIDDEN_CAPABILITY_PATTERNS = {
 }
 
 
+# Deterministic effect inference is part of the Unified Semantic Core.
+# It describes WHAT the user is asking to happen, never WHICH concrete
+# capability/resource should perform it and never grants authorization.
+_READ_EFFECT_RE = re.compile(
+    r"^(?:请|请帮我|帮我|麻烦|给我)?\s*(?:查询|查一下|查找|搜索|获取|读取|列出|打开文件)"
+    r"|^(?:please\s+)?(?:query|lookup|search|fetch|read|list)\b",
+    re.IGNORECASE,
+)
+_WRITE_EFFECT_RE = re.compile(
+    r"^(?:请|请帮我|帮我|麻烦|现在|立即|直接|给我)?\s*(?:删除|删掉|移除|创建|新建|更新|修改|修复|退款|取消|上传|导入)"
+    r"|^(?:请|请帮我|帮我|麻烦)?\s*(?:把|将).{0,120}?(?:删除|删掉|移除|创建|更新|修改|修复|退款|取消|上传|导入)"
+    r"|^(?:please\s+)?(?:delete|remove|create|update|modify|fix|refund|cancel|upload|import)\b",
+    re.IGNORECASE,
+)
+_EXECUTE_EFFECT_RE = re.compile(
+    r"^(?:请|请帮我|帮我|麻烦|现在|立即|直接)?\s*(?:执行|运行|部署)"
+    r"|^(?:please\s+)?(?:execute|run|deploy)\b",
+    re.IGNORECASE,
+)
+_EXTERNAL_SEND_EFFECT_RE = re.compile(
+    r"^(?:请|请帮我|帮我|麻烦|现在|立即|直接)?\s*(?:发送|发邮件|发消息|通知)"
+    r"|^(?:请|请帮我|帮我|麻烦)?\s*(?:把|将).{0,120}?(?:发送|通知)"
+    r"|^(?:please\s+)?(?:send|email|notify)\b",
+    re.IGNORECASE,
+)
+
+
+def infer_requested_effects(text: str) -> list[str]:
+    """Infer typed abstract effects from explicit user instructions.
+
+    The match is intentionally syntax-shaped instead of generic substring
+    matching. For example, ``授权测试目录`` must not imply EXECUTE merely
+    because the resource name contains ``测试``. Explicit negative policy
+    phrases are removed before positive matching, so ``不要删除`` cannot grant
+    a WRITE effect.
+    """
+    scope = _instruction_scope(" ".join(str(text or "").split()))
+    positive_scope = _without_markers(scope, (marker for marker, _ in _FORBID_PATTERNS)).strip()
+    effects: list[str] = []
+    if _READ_EFFECT_RE.search(positive_scope):
+        effects.append("READ")
+    if _WRITE_EFFECT_RE.search(positive_scope):
+        effects.append("WRITE")
+    if _EXECUTE_EFFECT_RE.search(positive_scope):
+        effects.append("EXECUTE")
+    if _EXTERNAL_SEND_EFFECT_RE.search(positive_scope):
+        effects.append("EXTERNAL_SEND")
+    return effects
+
+
 def _contains(text: str, values: Iterable[str]) -> bool:
     lower = text.casefold()
     return any(value.casefold() in lower for value in values)
@@ -179,6 +229,28 @@ def _instruction_scope(text: str) -> str:
         return text
     return text[:match.start()].strip()
 
+
+
+# P24: abstract domain capability cues belong to the Unified Semantic Core.
+# Profiler may consume this classifier for complexity/modality, but routed
+# Runtime code must never independently add semantic capabilities afterwards.
+_ABSTRACT_CAPABILITY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "vision": ("图片", "截图", "图像", "照片", "image", "screenshot"),
+    "document": ("文档", "pdf", "论文", "合同", "说明书", "document"),
+    "data": ("csv", "data", "数据", "统计", "sql", "表格", "database", "excel"),
+    "diagnostic": ("报错", "异常", "错误", "500", "502", "timeout", "故障", "日志"),
+    "business": ("订单", "退款", "物流", "支付", "order", "refund", "logistics"),
+}
+
+
+def infer_abstract_capabilities(text: str) -> list[str]:
+    """Return stable abstract capability families, never concrete resource IDs."""
+    scope = _instruction_scope(" ".join(str(text or "").split())).casefold()
+    return [
+        capability
+        for capability, words in _ABSTRACT_CAPABILITY_KEYWORDS.items()
+        if any(word.casefold() in scope for word in words)
+    ]
 
 def analyze_task_semantics(
     task: str,
@@ -245,7 +317,11 @@ def analyze_task_semantics(
             forbidden_capabilities.append(capability)
             reasons.append(f"user prohibited capability: {capability}")
 
-    capabilities = [str(item).strip() for item in profiler_capabilities if str(item).strip()]
+    capabilities = infer_abstract_capabilities(intent_text)
+    for item in profiler_capabilities:
+        capability = str(item).strip()
+        if capability and capability.casefold() != "general" and capability not in capabilities:
+            capabilities.append(capability)
     if _AGENT_DELEGATION_RE.search(intent_text) and "agent" not in {item.casefold() for item in capabilities}:
         capabilities.append("agent")
         reasons.append("user explicitly requested Agent delegation")
@@ -280,6 +356,9 @@ def analyze_task_semantics(
     if has_attachments and dependency != KnowledgeDependency.NONE:
         reasons.append("attachment and governed knowledge may be used together")
 
+    requested_effects = infer_requested_effects(intent_text)
+    side_effect = any(effect in {"WRITE", "EXTERNAL_SEND"} for effect in requested_effects)
+
     confidence = 0.55
     if explicit_disable or explicit_enable or required_knowledge or forbidden:
         confidence = 0.96
@@ -301,6 +380,8 @@ def analyze_task_semantics(
         explanationOnly=explanation_only,
         hasAttachments=has_attachments,
         mixedCapabilityRequest=mixed,
+        sideEffect=side_effect,
+        requestedEffects=requested_effects,
         confidence=confidence,
         reasons=reasons,
     )
