@@ -1,1269 +1,1143 @@
 # AgentMesh
 
-**Intent-Aware Agent Platform · Adaptive Multi-Agent Orchestration · Distributed Agent Runtime · AI Application Infrastructure**
+> A production-oriented multi-agent execution platform built with Go, Python and React.
 
-面向多用户、多项目场景的 Agent 应用与运行时平台。
+AgentMesh 是一个面向真实业务场景设计的 **多智能体执行平台 / Agent Runtime Platform**。
 
-基于 **Go Control Plane + Python Agent Runtime + React / TypeScript** 构建，提供从自然语言意图理解、执行路径决策、语义任务规划、多 Agent 编排、知识检索、长期记忆、Tool / MCP 调用，到分布式执行、运行时恢复、可靠结果交付和多租户治理的完整工程实践。
+项目关注的重点不是简单封装一次 LLM 调用，而是解决 Agent 在真实任务执行过程中面临的核心工程问题：
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue)](LICENSE)
-![Go](https://img.shields.io/badge/Go-Control%20Plane-00ADD8)
-![Python](https://img.shields.io/badge/Python-Agent%20Runtime-3776AB)
-![React](https://img.shields.io/badge/React-TypeScript-149ECA)
-![Kafka](https://img.shields.io/badge/Kafka-Event%20Plane-231F20)
+- 用户意图如何被稳定理解
+- 普通对话与复杂执行任务如何正确分流
+- Agent / Tool / MCP / Knowledge 能力如何动态发现
+- 多步骤任务如何规划与编排
+- RAG、Memory 与会话上下文如何协同
+- 高风险 Tool 如何进行授权与审批
+- Streaming、幂等、崩溃恢复与事件驱动执行如何保证可靠性
+- 如何避免多个模块重复解释用户意图并产生控制冲突
+- 如何保证跨用户、跨项目的数据和知识隔离
+- 如何让 Agent 的执行过程可观测、可诊断、可治理
 
----
-
-# 📖 项目介绍
-
-AgentMesh 是一个面向真实任务执行的 Agent 应用与运行时平台。
-
-与简单的 LLM API 封装、固定 Workflow 或单 Agent Tool Loop 不同，AgentMesh 重点解决：
-
-> **如何先理解用户真正想做什么，再决定应该直接调用模型回答，还是进入完整 Agent Runtime；进入 Runtime 后，如何动态发现并组合 Agent、Tool、MCP、Knowledge、Memory 等能力，并在权限、审批、Worker 故障、结果交付异常和长会话场景下保持执行过程可观测、可恢复和可治理。**
-
-平台采用多语言分层架构：
-
-| 模块            | 技术                           | 核心职责                                                                 |
-| :------------ | :--------------------------- | :------------------------------------------------------------------- |
-| Control Plane | Go / Gin                     | API、认证、Intent Routing、Durable Task、资源管理与治理                           |
-| Agent Runtime | Python / FastAPI / LangGraph | Semantic Understanding、Planner、Multi-Agent、DAG、RAG、Memory、Tool / MCP |
-| Web           | React / TypeScript           | Workspace、Run Details、Knowledge、Approval 与 Governance                |
-| Storage       | MySQL / Redis / Milvus       | 业务持久化、运行时记忆与向量检索                                                     |
-| Event Plane   | Kafka / SQLite Outbox        | 执行结果可靠交付与异步事件传输                                                      |
-
-**项目核心目标：构建能够理解用户意图，并具备可规划、可协作、可观测、可恢复、可治理和可扩展能力的 Agent Runtime。**
-
----
-
-# ✨ 核心功能
-
-| 能力模块                 | 功能                                                           |
-| :------------------- | :----------------------------------------------------------- |
-| Intent-Aware Routing | 自然语言意图理解、FAST_PATH / RUNTIME 二元执行决策                          |
-| Capability Discovery | Agent、Tool、MCP、Knowledge 等运行时能力发现                            |
-| Adaptive Workflow    | Semantic Planner、ExecutionPlan、Plan Validation、Plan Compiler |
-| Multi-Agent          | 动态发现、智能路由、Hybrid DAG、Fan-out / Fan-in、多 Agent 协作             |
-| Agent Runtime        | Internal / LangGraph / HTTP / A2A Agent 统一执行                 |
-| Runtime Recovery     | Quality Gate、Repair、Reschedule、Replan                        |
-| Multimodal RAG       | 文本与视觉知识检索、混合检索、授权与引用                                         |
-| Memory               | 长期记忆、上下文压缩、会话持久化与恢复                                          |
-| Tool / MCP           | 工具发现、参数校验、执行反馈、审批与治理                                         |
-| Distributed Runtime  | Durable Queue、多 Worker、Lease、Fencing                         |
-| Reliability          | 幂等执行、故障恢复、Kafka 可靠结果交付                                       |
-| Multi-Tenant         | Organization、Workspace、RBAC、资源隔离                             |
-| Model Gateway        | 多模型配置、BYOK、模型路由与密钥隔离                                         |
-| Platform Ecosystem   | Public API、SDK、Agent Template、Marketplace                    |
-| Observability        | Routing、Planner、DAG、Tool、RAG、调度、质量门控与故障诊断                    |
-
----
-
-# 🏗 系统架构
-
-AgentMesh 将执行入口、控制面、Agent Runtime、执行层和基础设施可靠性进行分层。
+AgentMesh 最终形成了一套明确的执行职责模型：
 
 ```text
-                         User Query
-                             │
-                             ▼
-                 ┌──────────────────────┐
-                 │ React / TypeScript   │
-                 │      Workspace       │
-                 └──────────┬───────────┘
-                            │
-                         HTTP / SSE
-                            │
-                            ▼
-             ┌──────────────────────────────┐
-             │       Go Control Plane       │
-             │                              │
-             │ Auth / Project / Governance  │
-             │ Intent Execution Decision    │
-             │ Durable Task / API           │
-             └──────────────┬───────────────┘
-                            │
-                 ┌──────────┴───────────┐
-                 │                      │
-                 ▼                      ▼
-             FAST_PATH               RUNTIME
-                 │                      │
-                 ▼                      ▼
-            Model Provider     Python Agent Runtime
-                                      │
-                                      ▼
-                           Semantic Understanding
-                                      │
-                                      ▼
-                           Capability Discovery
-                                      │
-                    ┌─────────────────┼─────────────────┐
-                    │                 │                 │
-                    ▼                 ▼                 ▼
-                 Planner           Tool / MCP       RAG / Memory
-                    │
-                    ▼
-             ExecutionPlan
-                    │
-                    ▼
-              Plan Validation
-                    │
-                    ▼
-            Adaptive Scheduler
-                    │
-                    ▼
-               Hybrid DAG
-                    │
-          ┌─────────┼──────────┐
-          ▼         ▼          ▼
-      Internal   LangGraph   HTTP / A2A
-       Agent      Agent        Agent
-          │         │          │
-          └─────────┼──────────┘
-                    │
-                    ▼
-               Quality Gate
-                    │
-           Repair / Reschedule
-                    │
-                    ▼
-               Final Result
-                    │
-                    ▼
-              SQLite Outbox
-                    │
-                    ▼
-                  Kafka
-                    │
-                    ▼
-             Go Consumer
-                    │
-                    ▼
-                  MySQL
+Semantic Core  → WHAT
+Route          → WHERE
+Discovery      → WHICH
+Planner        → HOW
+Governance     → CAN
+Executor       → DO
+```
+
+并通过统一的 `ExecutionIntent` 将用户语义理解与后续执行链路解耦。
+
+---
+
+# 1. Architecture
+
+AgentMesh 采用三层核心架构：
+
+```text
+React + TypeScript
+        │
+        │ HTTP / SSE
+        ▼
+Go Control Plane
+        │
+        │ Internal Runtime API
+        ▼
+Python Agent Runtime
+```
+
+整体执行流程：
+
+```text
+                           User Request
+                                │
+                                ▼
+                        React Workspace
+                                │
+                           HTTP / SSE
+                                │
+                                ▼
+                         Go Control Plane
+             Auth / Session / Task / Governance
+                  Persistence / Reliability
+                                │
+                                ▼
+                    Unified Semantic Core
+                                │
+                                ▼
+                       ExecutionIntent
+                                │
+                                ▼
+                    Deterministic Routing
+                        /               \
+                       /                 \
+                FAST_PATH              RUNTIME
+                    │                      │
+                    ▼                      ▼
+             Model Provider          Discovery
+                                           │
+                                           ▼
+                                        Planner
+                                           │
+                                           ▼
+                                      Hybrid DAG
+                                           │
+                                           ▼
+                              Agent / Tool / MCP / RAG
+                                           │
+                                           ▼
+                                      Governance
+                                           │
+                                           ▼
+                                        Executor
+                                           │
+                                           ▼
+                                     Final Result
 ```
 
 ---
 
-## 架构职责
+# 2. Unified ExecutionIntent
 
-### Go Control Plane
+AgentMesh 使用统一的结构化 `ExecutionIntent` 作为一次请求的权威语义合同。
 
-负责：
-
-* API 与认证
-* Organization / Workspace / Project
-* 用户请求入口
-* Intent Execution Decision
-* FAST_PATH / RUNTIME 路径选择
-* Durable Task
-* RBAC / Governance
-* Tool Approval
-* Resource Ownership
-* Worker 与任务状态管理
-* MySQL 持久化
-
-Go 控制面只负责决定顶层执行路径：
+传统 Agent 系统中常见的问题是：
 
 ```text
-FAST_PATH
-RUNTIME
+Router 理解一次用户意图
+Planner 再理解一次
+Tool Selector 再判断一次
+Runtime 又重新判断一次
 ```
 
-它不会重新实现 Python Runtime 内部的 Planner、Tool Loop、RAG 或 MCP 执行逻辑。
+多个模块分别理解 WHAT，容易导致：
+
+- Route 与 Planner 结论不一致
+- Tool 被错误选择
+- Knowledge 被错误触发
+- Continuation 被错误识别
+- 高风险副作用请求被错误执行
+- 同一个请求在不同模块出现语义漂移
+
+AgentMesh 将这一过程统一为：
+
+```text
+User Request
+      +
+Trusted Context
+      │
+      ▼
+Unified Semantic Core
+      │
+      ▼
+ExecutionIntent
+      │
+      ├── Goal
+      ├── Requested Effects
+      ├── Capability Requirements
+      ├── Knowledge Requirements
+      ├── Reference Resolution
+      ├── Continuation Semantics
+      └── Safety / Clarification Facts
+```
+
+后续模块只消费这份权威语义结果。
+
+```text
+ExecutionIntent
+      │
+      ├── Route
+      ├── Discovery
+      ├── Planner
+      └── Governance Context
+```
+
+不会再由多个模块重新解释用户真正想做什么。
 
 ---
 
-### Python Agent Runtime
+# 3. Clear Execution Boundaries
 
-负责进入 `RUNTIME` 后的智能执行。
+AgentMesh 将一次 Agent 请求拆分成六类职责。
 
-主要包括：
+| Layer | Responsibility |
+|---|---|
+| Semantic Core | WHAT — 用户真正想完成什么 |
+| Route Derivation | WHERE — FAST_PATH 或 RUNTIME |
+| Capability Discovery | WHICH — 需要哪些 Agent / Tool / MCP / Knowledge |
+| Planner | HOW — 如何拆解和执行任务 |
+| Governance | CAN — 当前能力是否允许执行 |
+| Executor | DO — 真正执行并交付结果 |
+
+核心原则：
 
 ```text
-Semantic Understanding
-Capability Discovery
-Semantic Planner
-ExecutionPlan
-Plan Validation
-Adaptive Scheduler
-Hybrid DAG
-Agent Routing
-Tool / MCP
-RAG
-Memory
-Quality Gate
-Repair
-Reschedule
-Replan
+Semantic Core 决定 WHAT
+Planner 不重新判断 WHAT
+Discovery 不重新判断 WHAT
+Governance 不接受模型绕过
+Executor 不参与语义决策
 ```
 
-Runtime 根据用户当前请求、会话上下文、附件、授权范围和可用能力，动态判断实际需要使用哪些能力。
+这样可以减少多个控制模块之间的冲突。
 
 ---
 
-### React Web
+# 4. FAST_PATH and RUNTIME
 
-提供用户侧 Workspace 和治理界面，包括：
-
-```text
-Conversation
-Run Details
-Knowledge
-Memory
-Routing Trace
-Tool Approval
-Runtime Status
-Governance
-```
-
-普通用户只需要描述自己的目标。
-
-用户不需要知道：
+AgentMesh 保留两条顶层执行路径：
 
 ```text
-RAG
-Vector Search
-Capability Discovery
-MCP Routing
-Runtime Internal Mode
+                ExecutionIntent
+                      │
+              Route Derivation
+                /            \
+               /              \
+         FAST_PATH           RUNTIME
 ```
-
-这些属于平台内部执行能力。
-
----
-
-### 基础设施
-
-```text
-MySQL
-    业务数据
-    Conversation
-    Durable Task
-    Runtime State
-
-Redis
-    Cache
-    Runtime Working Memory
-
-Milvus
-    Project Knowledge
-    Vector Retrieval
-
-Kafka
-    Runtime Result Event Delivery
-
-SQLite Outbox
-    Runtime 本地 Durable Result Buffer
-```
-
-Go Durable Runtime 负责任务可靠调度。
-
-Python Agent Runtime 负责任务内部智能执行。
-
-Kafka 负责执行结果可靠交付。
-
-三者职责相互独立。
-
----
-
-# 🧭 1. Intent-Aware Execution Routing
-
-P23 引入了新的用户请求入口决策机制。
-
-过去仅依靠规则或任务复杂度判断执行路径，会出现：
-
-```text
-用户真实意图 ≠ 表面关键词
-```
-
-从而造成：
-
-```text
-应该直接回答的请求进入 Runtime
-
-或者
-
-真正需要 Tool / Knowledge / Agent 的请求被错误地直接交给模型
-```
-
-因此 AgentMesh 将入口决策调整为：
-
-```text
-User Query
-    │
-    ▼
-Conversation Context
-    │
-    ▼
-Attachment Context
-    │
-    ▼
-Intent Understanding
-    │
-    ▼
-Execution Decision
-    │
-    ├─────────────── FAST_PATH
-    │
-    └─────────────── RUNTIME
-```
-
----
 
 ## FAST_PATH
 
-适用于不需要 Runtime 能力的请求。
+适合：
 
-典型链路：
+- 普通问答
+- 日常聊天
+- 简单知识解释
+- 不依赖 Tool
+- 不依赖 MCP
+- 不依赖项目知识
+- 不需要 Agent 编排
+- 不包含真实副作用
+
+流程：
 
 ```text
-User Query
-    │
-    ▼
-Go Control Plane
-    │
-    ▼
+Request
+   │
+   ▼
+Semantic Core
+   │
+   ▼
+ExecutionIntent
+   │
+   ▼
 FAST_PATH
-    │
-    ▼
+   │
+   ▼
 Model Provider
-    │
-    ▼
-Streaming Answer
+   │
+   ▼
+Streaming Result
 ```
 
-FAST_PATH 不进入完整 Agent Runtime，因此具有更低的执行开销。
+FAST_PATH 避免所有简单请求都进入完整 Runtime，降低：
 
-例如：
-
-```text
-普通问答
-文本解释
-无需外部能力的生成任务
-基于当前已提供内容可以直接完成的请求
-```
+- 延迟
+- Token 消耗
+- Runtime 开销
+- 不必要的 Agent 调度
 
 ---
 
 ## RUNTIME
 
-当请求需要平台能力时进入 Runtime：
+当请求需要：
+
+- Tool
+- MCP
+- Knowledge
+- RAG
+- Agent
+- 多步骤任务
+- 文件操作
+- 外部系统
+- 副作用执行
+- 复杂任务编排
+
+则进入 Runtime。
 
 ```text
-User Query
-    │
-    ▼
-RUNTIME
-    │
-    ▼
-Semantic Understanding
-    │
-    ▼
+ExecutionIntent
+      │
+      ▼
+Discovery
+      │
+      ▼
+Planner
+      │
+      ▼
+DAG
+      │
+      ▼
+Agent / Tool / MCP / RAG
+      │
+      ▼
+Governance
+      │
+      ▼
+Execution
+```
+
+---
+
+# 5. Capability Discovery
+
+Semantic Core 不绑定具体资源 ID。
+
+例如用户说：
+
+```text
+帮我读取项目中的配置文件
+```
+
+Semantic Core 只描述：
+
+```text
+需要文件读取能力
+```
+
+而不是：
+
+```text
+调用 Tool ID = 17
+```
+
+进入 Runtime 后由 Discovery 根据当前运行环境动态解析：
+
+```text
+Capability Requirement
+        │
+        ▼
 Capability Discovery
-    │
-    ├── Agent
-    ├── Tool
-    ├── MCP
-    ├── Knowledge
-    ├── Memory
-    └── Workflow
+        │
+        ├── Agent
+        ├── Tool
+        ├── MCP
+        ├── Knowledge
+        └── Runtime Capability
 ```
 
-进入 Runtime 并不意味着一定执行 RAG 或 Tool。
-
-真正需要使用什么能力，由 Runtime 根据当前任务继续判断。
+这样可以避免 Semantic Layer 与具体基础设施耦合。
 
 ---
 
-## Intent Understanding
+# 6. Planner and Hybrid DAG
 
-Intent Understanding 关注的不是简单关键词分类，而是理解：
-
-```text
-用户想完成什么目标？
-
-当前请求是否依赖已有上下文？
-
-是否存在附件？
-
-是否需要项目资源？
-
-是否需要读取或修改外部状态？
-
-是否存在工具调用？
-
-是否需要知识证据？
-
-是否涉及审批或高风险副作用？
-```
-
-因此：
-
-```text
-Intent
-    ≠
-Keyword Matching
-```
-
----
-
-## Authoritative Decision
-
-模型可以参与语义理解，但最终执行路径仍受到平台规则和治理边界约束。
-
-决策过程不会允许模型通过自然语言绕过：
-
-```text
-RBAC
-Project Scope
-Tool Governance
-Approval
-Knowledge Authorization
-MCP Scope
-Resource Ownership
-```
-
-对于需要受治理能力的任务，必须进入 Runtime。
-
----
-
-## Attachment-Aware Routing
-
-上传文件并不意味着一定进入 Runtime。
+对于复杂任务，Planner 将 ExecutionIntent 转换为执行计划。
 
 例如：
 
 ```text
-用户上传一份文档
-然后要求：
-“总结一下这份内容”
-```
-
-如果当前请求可以直接基于已提供附件内容回答，可以继续走：
-
-```text
-FAST_PATH
-```
-
-而不是仅因为存在附件就强制进入完整 Runtime。
-
----
-
-## Continuation-Aware Routing
-
-执行路径同时考虑会话上下文。
-
-例如：
-
-```text
-第一轮：
-“读取项目中的配置文件”
-
-第二轮：
-“把刚才那个改掉”
-```
-
-第二轮虽然文本很短，但它依赖上一轮建立的执行对象与上下文，因此不能只依据当前字符串判断。
-
----
-
-# 🤖 2. Adaptive Multi-Agent Orchestration
-
-进入 Runtime 后，如果任务需要复杂执行，AgentMesh 可以进一步进入 Adaptive Workflow。
-
-完整链路：
-
-```text
-RUNTIME
-    │
-    ▼
-Semantic Understanding
-    │
-    ▼
-Capability Discovery
-    │
-    ▼
-Semantic Planner
-    │
-    ▼
-ExecutionPlan
-    │
-    ▼
-Plan Validation
-    │
-    ▼
-Adaptive Scheduler
-    │
-    ▼
-Plan Compiler
-    │
-    ▼
-Hybrid Dynamic DAG
-    │
-    ▼
-DAGExecutor
-    │
- ┌──┼────────────┐
- ▼  ▼            ▼
-Internal     LangGraph
-Agent        Agent
-                 │
-          HTTP / A2A
-    │
-    ▼
-Quality Gate
-    │
- ┌──┼────────────┐
-PASS REPAIR     FAIL
- │     │          │
- │     │      Reschedule
- │     │          │
- │     └────── Replan
- │
- ▼
-Synthesis
- │
- ▼
-Final Answer
-```
-
----
-
-## Semantic Planner
-
-Semantic Planner 回答：
-
-> **这个复杂任务需要完成哪些步骤？**
-
-它不会直接决定具体由哪个 Agent 执行。
-
-例如：
-
-```text
-分析系统架构和安全风险，
-并根据两部分分析结果给出最终优化方案。
+分析项目文档
+→ 查找相关知识
+→ 调用工具
+→ 生成结果
 ```
 
 可以形成：
 
 ```text
-Architecture Analysis ─┐
-                       ├── Solution Design
-Security Analysis ─────┘
+        Step A
+       /      \
+      ▼        ▼
+   Step B    Step C
+       \      /
+        ▼    ▼
+        Step D
 ```
 
-每个 Step 可以包含：
+Planner 只负责：
 
 ```text
-step id
-objective
-required capability
-dependencies
-execution metadata
+HOW
 ```
 
-Planner：
+不会重新定义：
 
 ```text
-What to do
+WHAT
 ```
 
-Scheduler：
+Runtime 支持：
 
-```text
-Who executes
-```
+- 多步骤执行
+- 顺序任务
+- 并行任务
+- DAG 编排
+- Agent 调度
+- Tool Loop
+- Capability Re-discovery
+- Execution Validation
 
 ---
 
-## Plan Validation
+# 7. Multi-Agent Collaboration
 
-Semantic Plan 在进入执行层前必须经过验证。
+AgentMesh 属于 **任务编排型多智能体协作平台**。
 
-主要检查：
-
-```text
-Duplicate Step ID
-Self Dependency
-Missing Dependency
-DAG Cycle
-Step Limit
-Capability Validation
-Planner Output Schema
-Replan Validation
-```
-
-非法 Plan 不会直接进入 Agent 执行。
-
-Planner 超时、解析失败或返回非法结构时，根据任务类型执行：
+系统不是让多个 Agent 无限制自由对话，而是通过 Runtime 对 Agent 进行：
 
 ```text
-bounded fallback
-或
-fail closed
+任务分解
+   ↓
+能力匹配
+   ↓
+Agent 选择
+   ↓
+任务调度
+   ↓
+执行
+   ↓
+结果聚合
 ```
+
+Agent 由 Runtime 根据当前任务进行选择，而不是由前端或用户手动绑定执行流程。
+
+这种方式更适合：
+
+- 企业 Agent
+- Workflow Agent
+- Tool Agent
+- Research Agent
+- Coding Agent
+- Multi-step Automation
 
 ---
 
-## Hybrid Dynamic DAG
+# 8. Tool System
 
-AgentMesh 不局限于固定：
-
-```text
-single
-parallel
-sequential
-```
-
-ExecutionPlan 可以编译成混合依赖 DAG：
+AgentMesh 提供统一 Tool 执行链路。
 
 ```text
-         A ─────┐
-                ├──── C ────┐
-         B ─────┘            │
-              └──── D ──────┤
-                             ▼
-                             E
+ExecutionIntent
+      │
+      ▼
+Discovery
+      │
+      ▼
+Tool Selection
+      │
+      ▼
+Governance
+      │
+      ▼
+Tool Execution
+      │
+      ▼
+Tool Result
+      │
+      ▼
+Agent Loop
 ```
 
-支持：
+Tool 可以包含：
 
-```text
-Serial Dependency
-Parallel Ready Set
-Fan-out
-Fan-in
-Hybrid Dependency
-Conditional Execution
-Optional Execution
-Dependency-aware Scheduling
-```
+- Local Tool
+- HTTP Tool
+- File Tool
+- External Service Tool
+- Business Tool
+- MCP Tool
 
-只有依赖满足的 Step 才会进入 Ready Set。
+所有 Tool 调用统一经过治理和执行链路，而不是让模型直接绕过平台调用。
 
 ---
 
-## Heterogeneous Agent Execution
+# 9. MCP Integration
 
-同一个 ExecutionPlan 可以组合：
+AgentMesh 支持 MCP Server。
+
+Runtime 可以：
 
 ```text
-Internal Agent
-LangGraph Agent
-HTTP Agent
-A2A Agent
+Discover MCP Server
+        │
+        ▼
+Discover MCP Tools
+        │
+        ▼
+Capability Matching
+        │
+        ▼
+Planner
+        │
+        ▼
+MCP Invocation
 ```
 
-例如：
+MCP 能力进入 AgentMesh 后仍然受到：
+
+- ExecutionIntent
+- Discovery
+- Planner
+- Governance
+- Trace
+- Runtime
+
+统一管理。
+
+---
+
+# 10. RAG and Project Knowledge
+
+AgentMesh 支持项目级 Knowledge 与 RAG。
+
+终端用户不需要知道“知识库”这个概念。
+
+例如用户只需要问：
 
 ```text
-Internal Agent ────┐
-                   ├── HTTP Agent ─── A2A Agent
-LangGraph Agent ───┘
+这个项目的退款规则是什么？
 ```
 
-因此 AgentMesh 的 Multi-Agent 不是简单把多个 Prompt 串起来，而是：
+系统会根据：
 
 ```text
-Semantic Planning
+ExecutionIntent
 +
-Capability Routing
+Project Context
 +
-Heterogeneous Agent Execution
-+
-Dynamic DAG
+Authorization Scope
 ```
 
----
-
-# 🔍 3. Knowledge & Multimodal RAG
-
-AgentMesh 支持文本与视觉知识检索。
-
-与传统“用户主动选择知识库”的模式不同，Knowledge / RAG 属于 Runtime 内部能力。
-
-用户只需要正常表达问题。
-
-Runtime 根据：
+自动判断是否需要 Knowledge。
 
 ```text
-User Intent
-Conversation Context
-Project Scope
-Available Knowledge
-Authorization
-Evidence Requirement
+User Query
+    │
+    ▼
+ExecutionIntent
+    │
+    ▼
+Knowledge Required?
+    │
+   YES
+    │
+    ▼
+Knowledge Scope Resolution
+    │
+    ▼
+RAG Retrieval
+    │
+    ▼
+Evidence
+    │
+    ▼
+Answer
 ```
 
-决定是否需要检索项目知识。
-
----
-
-## Knowledge Flow
+Knowledge Scope 支持：
 
 ```text
-Document / Image
-       │
-       ▼
-Knowledge Ingest
-       │
-       ▼
-Chunking / Embedding
-       │
-       ▼
-     Milvus
-       │
-       ▼
-Hybrid Retrieval
-       │
-       ▼
-     Rerank
-       │
-       ▼
-Citation / Evidence
-       │
-       ▼
-Agent Context
-```
-
----
-
-## Retrieval Mode
-
-内部支持：
-
-```text
-TEXT
-VISUAL
-HYBRID
-```
-
-Runtime 自动选择合适的知识能力。
-
-终端用户不需要选择：
-
-```text
-RAG ON
-RAG OFF
-Knowledge Mode
-```
-
----
-
-## Evidence & Citation
-
-当任务明确依赖项目知识时，Runtime 对检索结果执行证据治理。
-
-包括：
-
-```text
-Project Scope Validation
-Authorization
-Evidence Provenance
-Citation
-Cross-user Isolation
-Knowledge Boundary
-```
-
-未经授权的 Knowledge 不会被作为当前任务证据使用。
-
----
-
-# 🧠 4. Conversation & Memory
-
-AgentMesh 将：
-
-```text
-Conversation History
-User Memory
-Runtime Working Memory
+Global Knowledge
 Project Knowledge
+User / Project Authorization
 ```
 
-进行分层管理。
+并进行跨用户和跨项目隔离。
 
-| 组件             | 职责                       |
-| :------------- | :----------------------- |
-| MySQL          | 完整会话历史与业务持久化             |
-| Redis          | Runtime Working Memory   |
-| User Memory    | User-global 长期记忆         |
-| Memory Capsule | 长上下文压缩与记忆延续              |
-| Milvus         | Project-scoped Knowledge |
+---
 
-核心边界：
+# 11. Memory
+
+AgentMesh 将 Memory 与 Project Knowledge 分开。
 
 ```text
 Memory
 → User-global
 
-Knowledge
+Project Knowledge
 → Project-scoped
 ```
 
-避免不同项目之间发生非预期知识串用。
+Memory 可以保存长期用户信息，而项目知识用于：
+
+```text
+项目文档
+业务知识
+项目资料
+项目配置
+```
+
+Memory Pipeline 支持：
+
+```text
+Conversation
+   │
+   ▼
+Memory Extraction
+   │
+   ▼
+Deduplication
+   │
+   ▼
+Persistence
+   │
+   ▼
+Future Retrieval
+```
+
+并考虑：
+
+- Memory 去重
+- 用户隔离
+- 写入失败隔离
+- 同回合避免错误自召回
+- Conversation Memory Capsule
+- 历史会话恢复
 
 ---
 
-## Conversation History Reliability
+# 12. Semantic Clarification
 
-长会话支持：
+AgentMesh 区分：
 
 ```text
-Historical Message Pagination
-Conversation Persistence
-Context Compaction
-Memory Capsule
-Redis-loss Recovery
-Refresh Recovery
-Long Conversation Continuity
+语义不明确
 ```
 
-历史消息加载时保持可见锚点稳定，避免追加旧历史导致页面跳动。
+与：
+
+```text
+Runtime 执行暂停
+```
+
+这是两个完全不同的概念。
+
+例如：
+
+```text
+把它删掉
+```
+
+如果可信上下文中无法确认唯一目标：
+
+```text
+Ambiguous Target
+      │
+      ▼
+Clarification
+      │
+      ▼
+COMPLETED
+```
+
+系统不会：
+
+```text
+猜目标
+调用 delete
+创建 Approval
+执行副作用
+```
+
+而是要求用户明确目标。
 
 ---
 
-# 🔧 5. Tool & MCP
+# 13. Runtime Suspension
 
-AgentMesh 支持：
+真正已经进入 Agent / Tool 执行后，如果任务需要：
 
 ```text
-Internal Tool
-HTTP Tool
-MCP Tool
-Desktop Tool
+补充信息
 ```
 
----
-
-## Tool Execution
+或者：
 
 ```text
-Available Tool Schema
-        │
-        ▼
-       LLM
-        │
-        ▼
-     ToolCall
- name + arguments
-        │
-        ▼
-Tool Governance
-        │
-        ▼
-Approval Check
-        │
-        ▼
-Tool Registry / MCP
-        │
-        ▼
-Real Execution
-        │
-        ▼
-Tool Result
-        │
-        ▼
-       LLM
-        │
-        ▼
-Continue / Final
+用户授权
 ```
 
-模型只负责产生结构化 ToolCall。
-
-真正执行发生在 Runtime / Tool Registry / MCP Adapter 中。
-
----
-
-## Tool Governance
-
-工具执行受到：
+才进入执行暂停状态：
 
 ```text
-Project Scope
-Resource Ownership
-Risk Level
-Authorization
-Human Approval
-Runtime State
-```
-
-约束。
-
-例如高风险删除操作：
-
-```text
-local.fs.delete
-```
-
-需要经过：
-
-```text
-Tool Governance
-    │
-    ▼
+INPUT_REQUIRED
 AUTH_REQUIRED
-    │
-    ▼
-Approval Card
+      +
+Real Continuation
 ```
 
-在用户批准之前不会发生实际副作用。
-
----
-
-## Approval Resume
-
-Approval 不会重新创建整个任务。
-
-原 Task 在获得：
+之后可以：
 
 ```text
-Approve
-或
-Reject
+Resume
 ```
 
-结果后继续处理。
+继续原来的 Runtime。
 
-Reject 后：
+因此：
 
 ```text
-no new Task
-no side effect
-no replay
+Semantic Clarification
+≠
+Runtime Suspension
 ```
 
 ---
 
-# 🛡 6. Side-Effect Replay Protection
+# 14. Governance and Approval
 
-AgentMesh 对具有业务副作用的执行采取严格恢复策略。
+AgentMesh 不允许模型自行决定高风险操作是否可以执行。
 
-包括：
-
-```text
-Tool Action
-HTTP Agent Action
-A2A Agent Action
-Approval-gated Action
-```
-
-已完成的副作用不会因为普通质量评分不足而自动再次执行。
-
-保护机制包括：
+Governance 负责：
 
 ```text
-Bounded Repair
-Bounded Replan
-Completed Step Carry-forward
-Completed Side-effect Carry-forward
-HTTP / A2A Replay Protection
-Tool Replay Protection
-Idempotency
-Fencing
+CAN
 ```
+
+例如：
+
+```text
+删除文件
+修改数据
+发送外部消息
+执行外部副作用
+```
+
+执行流程：
+
+```text
+Tool Request
+     │
+     ▼
+Risk Detection
+     │
+     ▼
+Governance
+     │
+     ├── ALLOW
+     │
+     ├── DENY
+     │
+     └── AUTH_REQUIRED
+```
+
+需要用户确认时：
+
+```text
+AUTH_REQUIRED
+      │
+      ▼
+Approval
+      │
+   ┌──┴──┐
+   │     │
+ALLOW   REJECT
+```
+
+拒绝后不会产生实际副作用。
 
 ---
 
-# ⚙️ 7. Distributed Agent Runtime
+# 15. Dangerous Reference Protection
 
-AgentMesh 支持多 Worker 分布式执行。
+对于危险副作用请求：
 
-| 机制                   | 作用              |
-| :------------------- | :-------------- |
-| Durable Queue        | 持久化任务队列         |
-| Worker Registration  | Worker 注册       |
-| Heartbeat            | 存活检测            |
-| Lease                | 执行所有权           |
-| Fencing              | 防止旧 Worker 提交结果 |
-| Idempotent Execution | 防止重复业务执行        |
-| Backpressure         | 负载控制            |
-| Deadline / Cancel    | 执行期限与取消         |
-| Worker Recovery      | Worker 故障恢复     |
-| Dispatcher HA        | 调度器高可用          |
+```text
+把它删掉
+```
+
+如果没有唯一可信目标：
+
+```text
+No Unique Target
+      │
+      ▼
+Clarification
+```
+
+不会提前：
+
+```text
+选择 delete Tool
+执行 delete
+猜测历史目标
+```
+
+如果存在多个候选目标，也必须先澄清。
+
+这是 AgentMesh 的 Fail-Closed 原则之一。
 
 ---
 
-## Lease & Fencing
+# 16. Streaming
+
+AgentMesh 支持实时 Streaming。
+
+```text
+Model
+  │
+  ▼
+Python Runtime
+  │
+  ▼
+Go Control Plane
+  │
+  ▼
+SSE
+  │
+  ▼
+React Workspace
+```
+
+Streaming 与最终任务状态分开管理。
+
+这样可以同时支持：
+
+- Token 实时输出
+- Runtime Trace
+- Tool Result
+- Task Status
+- Final Result
+
+---
+
+# 17. Durable Runtime
+
+AgentMesh 支持持久化 Runtime。
+
+任务生命周期不会完全依赖单个 HTTP 请求。
+
+核心模型：
+
+```text
+Task
+  │
+  ▼
+Runtime Job
+  │
+  ▼
+Worker
+  │
+  ▼
+Execution
+```
+
+支持：
+
+- Durable Task
+- Worker Heartbeat
+- Lease
+- Fence
+- Retry
+- Recovery
+- Replay Protection
+
+---
+
+# 18. Lease and Fencing
+
+为了防止 Worker 崩溃后旧 Worker 再次写回结果，AgentMesh 使用：
+
+```text
+Lease
++
+Fence Token
+```
+
+执行逻辑：
+
+```text
+Worker A
+Fence = 1
+   │
+   ├── crash
+   │
+   ▼
+Lease Expired
+   │
+   ▼
+Worker B
+Fence = 2
+```
+
+如果 Worker A 恢复并尝试写结果：
+
+```text
+Fence 1 < Fence 2
+```
+
+旧结果会被拒绝。
+
+从而避免：
+
+- stale worker overwrite
+- duplicate completion
+- stale side effect result
+
+---
+
+# 19. Event-Driven Runtime
+
+AgentMesh 支持 Kafka 驱动的 Runtime 事件链。
 
 ```text
 Task
  │
  ▼
-Durable Queue
+Outbox
  │
  ▼
-Worker Assignment
+Kafka
  │
  ▼
-Acquire Lease
+Worker
  │
  ▼
-Execute Agent
+Execution
  │
  ▼
-Validate Fencing
- │
- ▼
-Commit Result
+Result Event
 ```
 
-Worker 失联或 Lease 过期后，任务可以安全重新分配。
+用于提升：
 
-旧 Worker 恢复后，也不能利用过期 Fencing Token 覆盖当前执行结果。
+- 解耦能力
+- Runtime 可靠性
+- Worker 恢复能力
+- 任务事件追踪能力
+
+并考虑：
+
+- Producer Failure
+- Broker Outage
+- Replay
+- Offset
+- Duplicate Event
+- Crash Recovery
 
 ---
 
-# 📨 8. Reliable Result Delivery
+# 20. Idempotency
 
-Python Runtime 执行完成后使用 Durable Outbox + Kafka 交付结果。
+AgentMesh 对任务提交和执行考虑幂等语义。
 
-```text
-Python Agent Runtime
-        │
-        ▼
-SQLite Durable Outbox
-        │
-        ▼
-      Kafka
-        │
-        ▼
-Go Runtime Consumer
-        │
-        ▼
-Idempotency / Fencing
-        │
-        ▼
-MySQL Transaction
-        │
-        ▼
-Task COMPLETED
-```
-
-关键机制：
+同一个逻辑请求不会因为：
 
 ```text
-Durable Outbox
-At-Least-Once Delivery
-RESULT_PENDING
-Broker ACK
-Business ACK
-Fencing Validation
-Consumer Recovery
-DLQ
-HTTP Compatibility
+网络重试
+页面刷新
+客户端重复提交
+Runtime Replay
 ```
 
-Go Durable Queue 负责任务调度。
+而产生多次业务执行。
 
-Kafka 负责 Runtime 执行结果交付。
+通过：
 
-两者不是替代关系。
+```text
+Client Request ID
++
+Request Fingerprint
++
+Durable Task
++
+Execution State
+```
+
+共同保证任务一致性。
 
 ---
 
-# 🔐 9. Multi-Tenant Governance
+# 21. Conversation Reliability
 
-资源层级：
-
-```text
-User
- │
- ▼
-Organization
- │
- ▼
-Workspace / Project
- │
- ├── Agent
- ├── Knowledge
- ├── Conversation
- ├── Memory
- ├── Model
- ├── Tool
- └── MCP
-```
-
-核心治理能力：
-
-```text
-Organization
-Workspace
-RBAC
-Project Scope
-Resource Ownership
-BYOK Secret Isolation
-Knowledge Isolation
-Conversation Isolation
-Memory Isolation
-Quota
-Usage
-Audit
-```
-
-Intent Router、Planner、Tool Loop、RAG 和 MCP 都不能绕过现有治理边界。
-
----
-
-# 🔑 10. Model Gateway & BYOK
-
-AgentMesh 使用统一 Model Provider 抽象。
-
-支持：
-
-```text
-User Model Configuration
-Project Model Configuration
-Model Provider
-BYOK
-Provider Candidate
-Model Routing
-Secret Isolation
-Usage Control
-Governance Check
-```
-
-Runtime 不绑定单一模型厂商。
-
-开发环境可以接入 OpenAI-compatible Provider。
-
-生产环境可以由用户或项目配置自己的模型凭据。
-
----
-
-# 🖥️ 11. Desktop Bridge
-
-Desktop Bridge 用于扩展 Agent 对本地桌面环境的受控访问。
-
-支持：
-
-```text
-Desktop Capability Discovery
-Read-only Desktop Access
-File Tool
-Runtime Tool Integration
-Governance Check
-Runtime Trace
-```
-
-本地修改类操作仍受到：
-
-```text
-Risk Level
-Authorization
-Approval
-Project Scope
-```
-
-约束。
-
----
-
-# 🌐 12. Platform Ecosystem
-
-AgentMesh 同时提供平台化能力：
-
-```text
-Public API
-API Key
-Service Account
-Python SDK
-TypeScript SDK
-Agent Template
-Agent Versioning
-Plugin Registry
-MCP Registry
-Marketplace
-```
-
-通过 Registry、SDK 和 API 支持能力复用与第三方系统接入。
-
----
-
-# 📊 13. Execution Trace & Observability
-
-AgentMesh 提供完整运行追踪。
+AgentMesh 支持长会话历史。
 
 包括：
 
+- Conversation Persistence
+- History Pagination
+- Refresh Recovery
+- Redis Loss Recovery
+- Memory Capsule
+- Durable Message History
+- Conversation Anchor Preservation
+
+Redis 只作为缓存 / 加速层使用。
+
+关键历史数据不会只存在 Redis 中。
+
+---
+
+# 22. Observability
+
+AgentMesh 将最终回答和内部执行 Trace 分离。
+
+用户主要看到：
+
 ```text
-Intent Understanding
-Execution Decision
-FAST_PATH / RUNTIME
-Task Profile
-Semantic Planning
-Plan Validation
-Capability Discovery
-DAG Compilation
-Scheduling Decision
-Agent Assignment
-Agent Execution
-Knowledge Retrieval
-Citation
-Tool / MCP Invocation
+Answer
+```
+
+而开发者可以通过 Run Details 查看：
+
+```text
+Semantic
+Route
+Discovery
+Planner
+Agent
+Tool
+MCP
+RAG
+Governance
+Runtime
+Cost
+Latency
+```
+
+这样可以用于：
+
+- Debug
+- Root Cause Analysis
+- Tool Diagnosis
+- Agent Diagnosis
+- Runtime Diagnosis
+- Governance Audit
+
+---
+
+# 23. Run Details
+
+Run Details 用于查看单次任务执行链路。
+
+可以观察：
+
+```text
+Execution Route
+ExecutionIntent
+Selected Agents
+Tool Calls
+Runtime Trace
+DAG
+Knowledge
 Approval
-Quality Evaluation
-Repair
-Reschedule
-Replan
-Runtime Error
-Worker / Failover
-Kafka / Outbox
-Final Synthesis
+Token
+Cost
+Latency
 ```
 
-可以回答：
+Workspace 保持面向最终用户的简洁界面。
+
+运行诊断信息独立放在 Run Details 中。
+
+---
+
+# 24. BYOK
+
+AgentMesh 支持用户配置自己的模型服务。
+
+可以根据配置连接不同 Model Provider。
+
+Model Provider 与 Agent Runtime 解耦：
 
 ```text
-为什么这次请求进入 FAST_PATH？
-
-为什么进入 Runtime？
-
-Runtime 为什么需要 Knowledge？
-
-为什么选择这个 Agent？
-
-为什么调用这个 Tool？
-
-为什么需要 Approval？
-
-为什么发生 Repair？
-
-为什么重新选择 Agent？
-
-为什么重新规划？
-
-哪个 Worker 执行了任务？
-
-任务失败后如何恢复？
+Runtime
+   │
+   ▼
+Model Provider Interface
+   │
+   ├── OpenAI Compatible
+   ├── DashScope
+   └── Other Providers
 ```
 
-最终回答与详细 Trace 分离展示。
-
-普通用户看到正常 Workspace。
-
-需要分析问题时再进入 Run Details。
+方便扩展不同模型。
 
 ---
 
-# 🛠 技术栈
+# 25. Technology Stack
 
-| 层级              | 技术                               |
-| :-------------- | :------------------------------- |
-| Frontend        | React、TypeScript、Vite            |
-| Control Plane   | Go、Gin                           |
-| Agent Runtime   | Python、FastAPI、LangGraph、asyncio |
-| Database        | MySQL                            |
-| Cache / Memory  | Redis                            |
-| Vector Database | Milvus                           |
-| Event Plane     | Apache Kafka、SQLite Outbox       |
-| Infrastructure  | Docker、Docker Compose、Nginx      |
-| Security        | JWT、RBAC、BYOK                    |
-| Communication   | HTTP、SSE、Kafka、A2A               |
+## Frontend
+
+```text
+React
+TypeScript
+Vite
+SSE
+```
+
+负责：
+
+- Workspace
+- Conversation
+- Run Details
+- Governance UI
+- Approval UI
+- Knowledge UI
+- Agent / Tool Management
 
 ---
 
-# 📁 项目结构
+## Control Plane
+
+```text
+Go
+Gin
+MySQL
+Redis
+Kafka
+JWT
+```
+
+负责：
+
+- Authentication
+- Session
+- Conversation
+- Task
+- Execution Route Consumption
+- Governance
+- Approval
+- Persistence
+- Durable Runtime
+- Idempotency
+- Streaming
+- Reliability
+
+---
+
+## Agent Runtime
+
+```text
+Python
+FastAPI
+Pydantic
+```
+
+负责：
+
+- Semantic Core
+- ExecutionIntent
+- Agent Runtime
+- Capability Discovery
+- Planner
+- Replanner
+- Tool Loop
+- MCP
+- RAG
+- Memory
+- Runtime Execution
+- Model Provider
+
+---
+
+## Infrastructure
+
+```text
+MySQL
+Redis
+Kafka
+Milvus
+Docker
+```
+
+---
+
+# 26. Project Structure
 
 ```text
 AgentMesh/
@@ -1272,441 +1146,295 @@ AgentMesh/
 │   ├── cmd/
 │   └── internal/
 │       ├── handler/
-│       ├── repository/
 │       ├── runtime/
-│       └── service/
+│       ├── service/
+│       ├── repository/
+│       └── model/
 │
 ├── runtime-python/
-│   ├── app/
-│   │   ├── semantics/
-│   │   ├── planning/
-│   │   ├── services/
-│   │   ├── agents/
-│   │   ├── rag/
-│   │   └── eval/
-│   └── tests/
+│   └── app/
+│       ├── capabilities/
+│       ├── planning/
+│       ├── semantics/
+│       ├── services/
+│       ├── tools/
+│       ├── memory/
+│       └── ...
 │
 ├── web-react/
-│   ├── src/
-│   ├── tests/
-│   └── e2e/
+│   └── src/
+│       ├── features/
+│       ├── components/
+│       └── ...
 │
-├── desktop-bridge/
-├── sdk/
-├── infra/
-├── scripts/
-│
-├── docs/
-│   ├── runtime/
-│   ├── platform/
-│   ├── operations/
-│   ├── governance/
-│   ├── memory/
-│   ├── multimodal/
-│   ├── security/
-│   └── desktop/
-│
-├── docker-compose.yml
-├── VERSION
-├── LICENSE
-└── README.md
+└── ...
 ```
 
 ---
 
-# 🚀 快速开始
+# 27. Request Lifecycle
 
-## 1. 环境要求
-
-建议准备：
+一个典型请求的生命周期：
 
 ```text
-Go
-Python
-Node.js
-Docker Desktop
-Docker Compose
-```
-
----
-
-## 2. 克隆项目
-
-```bash
-git clone https://github.com/QinLingHang/AgentMesh.git
-cd AgentMesh
-```
-
----
-
-## 3. 启动基础设施
-
-当前 Windows 本地开发模式：
-
-```text
-Windows
-├── Go Control Plane
-├── Python Agent Runtime
-└── React / TypeScript
-
-Docker Compose
-└── agentmesh_runtime_mvp_full_v02
-    ├── MySQL
-    ├── Redis
-    ├── Kafka
-    ├── Milvus
-    ├── etcd
-    └── MinIO
-```
-
-检查：
-
-```powershell
-docker compose -p agentmesh_runtime_mvp_full_v02 ps
-```
-
-不要在已有开发数据的环境中随意执行：
-
-```powershell
-docker compose down -v
-```
-
-否则可能删除持久化数据。
-
----
-
-## 4. 配置服务
-
-参考：
-
-```text
-backend-go/.env.example
-runtime-python/.env.example
-```
-
-配置：
-
-```text
-MySQL
-Redis
-Runtime
-Model Provider
-Kafka
-Milvus
-BYOK
-```
-
----
-
-## 5. Intent Routing 配置
-
-P23 Intent-Aware Routing 使用：
-
-```text
-P23_DECISION_MODE
-```
-
-当前安全默认：
-
-```text
-P23_DECISION_MODE=OFF
-```
-
-可根据发布策略受控切换到新的 Intent Decision 路径。
-
-`OFF` 用于保持兼容与回滚能力。
-
-新的 Decision Mode 在启用后仍不会绕过：
-
-```text
-RBAC
-Project Scope
-Tool Governance
-Knowledge Authorization
-MCP Scope
-Approval
-```
-
----
-
-## 6. Kafka Result Delivery
-
-使用 Kafka Runtime Result Transport 时需要启用：
-
-```text
-Go Runtime Consumer
-Python Kafka Result Transport
-```
-
-Kafka 只负责结果事件交付。
-
-任务调度仍然由 Go Durable Runtime 负责。
-
----
-
-## 7. 启动应用
-
-分别启动：
-
-```text
+User
+ │
+ ▼
+React Workspace
+ │
+ ▼
 Go Control Plane
-Python Agent Runtime
-React Web
+ │
+ ├── Authentication
+ │
+ ├── Conversation
+ │
+ └── Trusted Context
+ │
+ ▼
+Python Semantic Core
+ │
+ ▼
+ExecutionIntent
+ │
+ ▼
+Route Derivation
+ │
+ ├──────────── FAST_PATH
+ │                 │
+ │                 ▼
+ │              Model
+ │
+ └──────────── RUNTIME
+                   │
+                   ▼
+               Discovery
+                   │
+                   ▼
+                Planner
+                   │
+                   ▼
+                  DAG
+                   │
+                   ▼
+          Agent / Tool / MCP
+                   │
+                   ▼
+              Governance
+                   │
+                   ▼
+               Executor
+                   │
+                   ▼
+                 Result
+                   │
+                   ▼
+                  SSE
+                   │
+                   ▼
+                React
 ```
-
-首次运行前需要完成数据库初始化和 Model Provider 配置。
 
 ---
 
-# ✅ 测试
+# 28. Design Principles
 
-仓库包含：
+AgentMesh 的核心设计原则：
+
+### One Semantic Source of Truth
+
+一次请求只有一个权威 ExecutionIntent。
+
+### Fail Closed
+
+危险操作无法确认时，不猜测、不执行。
+
+### Capability Dynamic Discovery
+
+Semantic 不绑定具体资源。
+
+### Governance Is Independent
+
+模型无法绕过治理层。
+
+### Planner Only Plans
+
+Planner 不重新解释用户意图。
+
+### Durable Before Convenient
+
+关键任务状态优先保证可靠持久化。
+
+### Redis Is Not the Source of Truth
+
+缓存丢失不能导致核心会话数据丢失。
+
+### Side Effects Require Control
+
+真实副作用必须经过治理链路。
+
+### Observability Is a First-Class Capability
+
+Agent 的执行过程必须可追踪、可诊断。
+
+---
+
+# 29. Why AgentMesh
+
+很多 Agent Demo 的核心流程是：
 
 ```text
-Go Unit / Integration Test
-Python Runtime Test
-React Contract Test
-Browser E2E
-Intent Routing Evaluation
-Frozen Human Evaluation Set
-Fault Injection
-Performance Benchmark
+Prompt
+  ↓
+LLM
+  ↓
+Tool
+  ↓
+Answer
 ```
 
----
-
-## Go Control Plane
-
-```powershell
-cd backend-go
-go test ./...
-```
-
----
-
-## Python Runtime
-
-```powershell
-cd runtime-python
-python -m pytest -q
-```
-
----
-
-## React
-
-```powershell
-cd web-react
-npm install
-npm test
-npm run build
-```
-
----
-
-## Browser E2E
-
-需要本地：
+AgentMesh 关注的是当这条链真正进入生产环境以后会发生什么：
 
 ```text
-Go
-Python
-React
-MySQL
-Redis
-Kafka
-Milvus
+模型选错工具怎么办？
+
+用户说“把它删了”，系统怎么知道“它”是谁？
+
+Agent 执行一半需要用户授权怎么办？
+
+Worker 崩溃以后谁继续任务？
+
+旧 Worker 恢复后写入旧结果怎么办？
+
+Kafka 暂时不可用怎么办？
+
+用户刷新浏览器以后 Streaming 怎么恢复？
+
+Redis 数据丢失以后 Conversation 怎么恢复？
+
+RAG 如何保证项目之间隔离？
+
+Planner 和 Router 判断不一致怎么办？
+
+多个模块重复理解用户意图怎么办？
+
+高风险 Tool 怎么防止模型绕过审批？
 ```
 
-运行：
-
-```powershell
-cd web-react
-npm run test:e2e:v4-1
-```
+AgentMesh 的目标就是围绕这些问题构建一套完整的 Agent Runtime 与控制平面。
 
 ---
 
-## P23 Intent Routing Evaluation
+# 30. Current Capabilities
 
-P23 提供固定评测资产和可复现评测工具。
+当前 AgentMesh 已实现：
 
-包括：
-
-```text
-Binary Route Contract
-Frozen Evaluation Fixture
-Human-reviewed Evaluation Set
-Authoritative Handling Validation
-Real-stack Gate
-HTTP Performance Benchmark
-```
-
-用于长期防止：
-
-```text
-Runtime Required Request
-被错误送入 FAST_PATH
-
-或
-
-普通 Direct Request
-被无意义送入 Runtime
-```
-
----
-
-## Reliability & Security
-
-相关测试覆盖：
-
-```text
-Request Idempotency
-SSE
-Conversation History
-Memory Isolation
-Knowledge Isolation
-RAG Authorization
-Citation
-Tool Governance
-MCP Governance
-Approval
-Durable Queue
-Worker Lease
-Fencing
-Kafka Outbox
-Kafka Consumer
-DLQ
-Duplicate Event
-Crash Recovery
-Rollback
-```
-
-破坏性测试必须使用隔离 QA 资源。
-
-不要停止共享基础设施，也不要清空开发数据库。
+- Unified Semantic Core
+- Structured ExecutionIntent
+- FAST_PATH / RUNTIME Routing
+- Capability Discovery
+- Multi-Agent Runtime
+- Dynamic Planner
+- Hybrid DAG
+- Tool Execution
+- Tool Loop
+- MCP Integration
+- RAG
+- Project Knowledge
+- User Memory
+- Conversation Memory Capsule
+- Model Provider / BYOK
+- Streaming
+- Governance
+- Approval
+- Semantic Clarification
+- Dangerous Side-Effect Protection
+- Durable Runtime
+- Idempotency
+- Worker Lease
+- Fence Token
+- Kafka Event Runtime
+- Crash Recovery
+- Conversation Recovery
+- Cross-user Isolation
+- Project Knowledge Isolation
+- Runtime Trace
+- Run Details
+- Cost / Token / Latency Observation
 
 ---
 
-# 🧪 P23 Intent & Capability Routing
+# 31. Project Positioning
 
-P23 的核心目标并不是增加一个新的执行引擎。
-
-它解决的是：
-
-> **在任务真正开始执行之前，先正确理解用户当前意图，并选择正确的顶层执行路径。**
-
-最终架构保持：
+AgentMesh 更接近：
 
 ```text
-Go
-│
-├── FAST_PATH
-│
-└── RUNTIME
-        │
-        ├── Semantic Understanding
-        ├── Capability Discovery
-        ├── Planner
-        ├── Agent
-        ├── Tool
-        ├── MCP
-        ├── RAG
-        ├── Memory
-        └── Governance
+Agent Runtime Platform
++
+Multi-Agent Orchestration Platform
++
+AI Control Plane
 ```
 
-P23 不创建：
+而不是单纯：
 
 ```text
-第二套 Agent Runtime
-第二套 Tool Loop
-第二套 RAG Pipeline
-第二套 MCP Engine
+Chatbot
 ```
 
-而是继续复用已有 Runtime 能力。
-
-这保证了新的 Intent Routing 不会破坏原有：
+或：
 
 ```text
-P20 Conversation Reliability
-P21 Distributed Runtime / Kafka
-P22 RAG
-V4 Governance
-Tool Approval
-Desktop Tool
+Prompt Wrapper
 ```
 
-能力边界。
+它主要探索的是：
+
+> 如何把大模型的不确定推理能力，与传统后端系统的确定性、安全性、可靠性和治理能力结合起来。
 
 ---
 
-# 📦 Release
+# 32. Summary
 
-已发布版本：
-
-**AgentMesh v1.0.0**
-
-[查看 GitHub Releases](https://github.com/QinLingHang/AgentMesh/releases)
-
-Release Tag 表示对应历史稳定版本。
-
-当前开发分支持续演进：
+AgentMesh 的核心目标可以概括为：
 
 ```text
-Conversation Reliability
-Distributed Runtime
-Kafka Event Plane
-Adaptive Semantic Workflow
-RAG
-Intent-Aware Routing
-Capability Discovery
-Governance
+Understand
+    ↓
+Decide
+    ↓
+Discover
+    ↓
+Plan
+    ↓
+Govern
+    ↓
+Execute
+    ↓
+Observe
+    ↓
+Recover
 ```
 
-使用项目时请根据实际需求选择：
+其中最重要的架构边界是：
 
 ```text
-Release Tag
-Stable Commit
-Development Branch
+Semantic Core  → WHAT
+Route          → WHERE
+Discovery      → WHICH
+Planner        → HOW
+Governance     → CAN
+Executor       → DO
 ```
 
----
-
-# 🗺 Roadmap
-
-后续主要演进方向：
+通过统一 ExecutionIntent、动态能力发现、Planner、Governance、Durable Runtime 和可观测执行链路，AgentMesh 将 Agent 从一次简单模型调用扩展为一个具备：
 
 ```text
-Intent Understanding Accuracy
-Capability Selection
-Planner Strategy
-Evaluation Feedback
-Multimodal Agent
-Tool / MCP Ecosystem
-A2A Agent
-Cross-task Workflow
-Production Observability
-Event Replay
-Distributed Performance
-Cross-host HA
-Production Deployment
+可执行
+可治理
+可恢复
+可观测
+可扩展
 ```
 
----
-
-# 📄 License
-
-This project is licensed under the [Apache License 2.0](LICENSE).
-
----
-
-# 👨‍💻 Author
-
-**Qin LingHang**
-
-GitHub: [QinLingHang](https://github.com/QinLingHang)
-
-如果这个项目对你的 Agent 开发与学习有所帮助，欢迎 Star ⭐
+能力的完整 Agent Runtime Platform.
