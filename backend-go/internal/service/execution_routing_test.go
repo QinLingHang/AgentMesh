@@ -10,9 +10,62 @@ import (
 	"testing"
 )
 
+func testExecutionIntent(knowledge string) *runtimeclient.ExecutionIntent {
+	if knowledge == "" {
+		knowledge = "NONE"
+	}
+
+	requiredCapabilities := []string{}
+	if knowledge != "NONE" {
+		requiredCapabilities = append(requiredCapabilities, "knowledge")
+	}
+
+	return &runtimeclient.ExecutionIntent{
+		Version:    "execution-intent.v1",
+		UserIntent: "contract test",
+		TaskType:   "TEST",
+		Continuation: runtimeclient.ExecutionIntentContinuation{
+			IsContinuation: false,
+			Relation:       "NONE",
+			Confidence:     0,
+		},
+		Reference: runtimeclient.ExecutionIntentReference{
+			Type:                         "NONE",
+			ResolvableFromTrustedHistory: false,
+			RequiresExternalResolution:   false,
+			TargetScope:                  "NONE",
+			TrustedHistoryResolution:     "NONE",
+		},
+		Clarification: runtimeclient.ExecutionIntentClarification{
+			Required:      false,
+			ReasonCode:    "",
+			MissingFields: []string{},
+		},
+		Dependencies: runtimeclient.ExecutionIntentDependencies{
+			Knowledge: knowledge,
+		},
+		Capabilities: runtimeclient.ExecutionIntentCapabilities{
+			RequiredCapabilities:  requiredCapabilities,
+			ForbiddenCapabilities: []string{},
+		},
+		RequestedEffects: []string{},
+		ForbiddenActions: []string{},
+		RagPreference:    "UNSPECIFIED",
+		ExplanationOnly:  false,
+		Confidence:       1,
+		SemanticSource:   "RULE",
+		ReasonCodes:      []string{},
+	}
+}
+
 func routeProposal(route string) runtimeclient.ExecutionRoutingResponse {
 	return runtimeclient.ExecutionRoutingResponse{
-		SchemaVersion: executionRoutingVersion, ExecutionRoute: route, Disposition: "EXECUTE", KnowledgeDependency: "NONE", ReasonCodes: []string{"CONTRACT_TEST"},
+		SchemaVersion:       executionRoutingVersion,
+		ExecutionRoute:      route,
+		Disposition:         "EXECUTE",
+		KnowledgeDependency: "NONE",
+		ReasonCodes:         []string{"CONTRACT_TEST"},
+		ExecutionIntent:     testExecutionIntent("NONE"),
 	}
 }
 func routeDecision(route string) ExecutionRouteDecision {
@@ -33,6 +86,7 @@ func TestBinaryRouteAllowsRuntimeWithoutChoosingCapabilities(t *testing.T) {
 	p := routeProposal("RUNTIME")
 	p.CapabilityRequired = true
 	p.KnowledgeDependency = "REQUIRED"
+	p.ExecutionIntent = testExecutionIntent("REQUIRED")
 	d := routeDecision("RUNTIME")
 	if err := ValidateExecutionRouteDecision(d, p, model.RagPolicy{Mode: model.RagModeAuto}); err != nil {
 		t.Fatal(err)
@@ -46,10 +100,12 @@ func TestRuntimeDependencyCannotBecomeFastPath(t *testing.T) {
 	}
 	p.CapabilityRequired = false
 	p.KnowledgeDependency = "REQUIRED"
+	p.ExecutionIntent = testExecutionIntent("REQUIRED")
 	if err := ValidateExecutionRouteDecision(routeDecision("FAST_PATH"), p, model.RagPolicy{}); err == nil {
 		t.Fatal("implicit Knowledge must not bypass Runtime")
 	}
 	p.KnowledgeDependency = "NONE"
+	p.ExecutionIntent = testExecutionIntent("NONE")
 	if err := ValidateExecutionRouteDecision(routeDecision("FAST_PATH"), p, model.RagPolicy{Mode: model.RagModeOn}); err == nil {
 		t.Fatal("RAG ON must not bypass Runtime")
 	}
@@ -79,6 +135,9 @@ func TestClarificationCannotCreateRuntimeExecution(t *testing.T) {
 	p := routeProposal("RUNTIME")
 	p.Disposition = "CLARIFY"
 	p.UnresolvedRequirements = []string{"missing target"}
+	p.ExecutionIntent.Clarification.Required = true
+	p.ExecutionIntent.Clarification.ReasonCode = "MISSING_TARGET"
+	p.ExecutionIntent.Clarification.MissingFields = []string{"target"}
 	d := routeDecision("RUNTIME")
 	d.RuntimePath = "NONE"
 	d.Disposition = "CLARIFY"
@@ -113,6 +172,7 @@ func TestRagOffKnowledgeCannotExecute(t *testing.T) {
 	p := routeProposal("RUNTIME")
 	p.KnowledgeDependency = "REQUIRED"
 	p.CapabilityRequired = true
+	p.ExecutionIntent = testExecutionIntent("REQUIRED")
 	if err := ValidateExecutionRouteDecision(routeDecision("RUNTIME"), p, model.RagPolicy{Mode: model.RagModeOff}); err == nil {
 		t.Fatal("RAG OFF is a hard boundary")
 	}
@@ -204,6 +264,9 @@ func TestExecutionRoutingModelOnlyClarificationIsNotThirdExecutionRoute(t *testi
 	p.Disposition = "CLARIFY"
 	p.ReasonCodes = []string{"MISSING_MODEL_INPUT"}
 	p.UnresolvedRequirements = []string{"请提供原文"}
+	p.ExecutionIntent.Clarification.Required = true
+	p.ExecutionIntent.Clarification.ReasonCode = "MISSING_MODEL_INPUT"
+	p.ExecutionIntent.Clarification.MissingFields = []string{"model_input"}
 	d := routeDecision("FAST_PATH")
 	d.Disposition = "CLARIFY"
 	d.RuntimePath = "NONE"

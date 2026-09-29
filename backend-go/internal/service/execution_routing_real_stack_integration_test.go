@@ -101,8 +101,13 @@ func TestExecutionRoutingRealStackCase56DoesNotChangeFrozenLabelContract(t *test
 	// Keep the final real-stack gate tied to the reviewed contract: readable
 	// request-local documents are model input, not a Tool permission grant.
 	proposal := runtimeclient.ExecutionRoutingResponse{
-		SchemaVersion: "execution-routing.v1", ExecutionRoute: "FAST_PATH", Disposition: "EXECUTE",
-		KnowledgeDependency: "NONE", CapabilityRequired: false, AnalysisSource: "RULE",
+		SchemaVersion:       "execution-routing.v1",
+		ExecutionRoute:      "FAST_PATH",
+		Disposition:         "EXECUTE",
+		KnowledgeDependency: "NONE",
+		CapabilityRequired:  false,
+		AnalysisSource:      "RULE",
+		ExecutionIntent:     testExecutionIntent("NONE"),
 	}
 	decision := ExecutionRouteDecision{
 		SchemaVersion: "execution-routing.v1", Strategy: "FAST_PATH", Disposition: "EXECUTE",

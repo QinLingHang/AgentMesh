@@ -6,8 +6,14 @@
     "hasAttachments": false,
     "continuationState": "NONE",
     "allowModel": false,
-    "modelSelection": {"mode": "auto"},
-    "constraints": {"maxLatencyMs": 8000, "maxCost": 0.15, "minQuality": 0.8}
+    "modelSelection": {
+      "mode": "auto"
+    },
+    "constraints": {
+      "maxLatencyMs": 8000,
+      "maxCost": 0.15,
+      "minQuality": 0.8
+    }
   },
   "response": {
     "schemaVersion": "execution-routing.v1",
@@ -15,12 +21,61 @@
     "disposition": "EXECUTE",
     "knowledgeDependency": "REQUIRED",
     "capabilityRequired": true,
-    "reasonCodes": ["RUNTIME_DEPENDENCY_OR_UNCERTAINTY"],
+    "reasonCodes": [
+      "RUNTIME_DEPENDENCY_OR_UNCERTAINTY"
+    ],
     "unresolvedRequirements": [],
     "analysisSource": "RULE",
     "modelCalls": 0,
     "modelTokens": 0,
-    "modelEstimatedCost": 0,
-    "modelCostKnown": false
+    "modelEstimatedCost": 0.0,
+    "modelCostKnown": false,
+    "executionIntent": {
+      "version": "execution-intent.v1",
+      "userIntent": "你们的商品支持七天无理由退货吗？",
+      "taskType": "KNOWLEDGE_QUERY",
+      "continuation": {
+        "isContinuation": false,
+        "relation": "NONE",
+        "confidence": 0.0
+      },
+      "reference": {
+        "type": "NONE",
+        "resolvableFromTrustedHistory": false,
+        "requiresExternalResolution": false,
+        "targetScope": "NONE",
+        "trustedHistoryResolution": "NONE"
+      },
+      "clarification": {
+        "required": false,
+        "reasonCode": "",
+        "missingFields": []
+      },
+      "dependencies": {
+        "knowledge": "REQUIRED",
+        "memory": false,
+        "freshData": false,
+        "attachment": false,
+        "externalSystem": false,
+        "tool": false,
+        "mcp": false,
+        "agent": false,
+        "multiStep": false,
+        "sideEffect": false
+      },
+      "capabilities": {
+        "requiredCapabilities": [
+          "knowledge"
+        ],
+        "forbiddenCapabilities": []
+      },
+      "requestedEffects": [],
+      "forbiddenActions": [],
+      "ragPreference": "UNSPECIFIED",
+      "explanationOnly": false,
+      "confidence": 0.96,
+      "semanticSource": "RULE",
+      "reasonCodes": []
+    }
   }
 }
