@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import re
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Protocol
 
 import httpx
@@ -292,6 +294,15 @@ class QwenReranker:
             httpx.AsyncClient
             | None
         ) = None,
+        max_attempts: int = 3,
+        retry_backoff_seconds: Sequence[float] = (
+            2.0,
+            4.0,
+        ),
+        sleeper: Callable[
+            [float],
+            Awaitable[None],
+        ] = asyncio.sleep,
     ) -> None:
 
         api_key = (
@@ -351,6 +362,21 @@ class QwenReranker:
             )
         )
 
+        self.max_attempts = max(
+            1,
+            int(max_attempts),
+        )
+
+        self.retry_backoff_seconds = tuple(
+            max(
+                0.0,
+                float(value),
+            )
+            for value in retry_backoff_seconds
+        )
+
+        self._sleeper = sleeper
+
     async def rerank(
         self,
         query: str,
@@ -396,33 +422,13 @@ class QwenReranker:
                 self.instruct,
         }
 
-        response = (
-            await self
-            ._client
-            .post(
-                (
-                    f"{self.base_url}"
-                    "/reranks"
-                ),
-                headers={
-                    "Authorization":
-                        (
-                            "Bearer "
-                            f"{self.api_key}"
-                        ),
-
-                    "Content-Type":
-                        "application/json",
-                },
-                json=payload,
+        response, attempt_count = (
+            await self._request_with_retry(
+                payload
             )
         )
 
-        response.raise_for_status()
-
-        body = (
-            response.json()
-        )
+        body = response.json()
 
         # qwen3-rerank:
         #   results 在顶层。
@@ -516,6 +522,20 @@ class QwenReranker:
 
                 "modelRerankScore":
                     relevance_score,
+
+                "rerankAttempts":
+                    attempt_count,
+
+                "rerankRetries":
+                    max(
+                        0,
+                        attempt_count - 1,
+                    ),
+
+                "rerankRecovered":
+                    (
+                        attempt_count > 1
+                    ),
             }
 
             reranked.append(
@@ -563,6 +583,167 @@ class QwenReranker:
         return reranked[
             :top_k
         ]
+
+    async def _request_with_retry(
+        self,
+        payload: dict,
+    ) -> tuple[
+        httpx.Response,
+        int,
+    ]:
+        for attempt in range(
+            1,
+            self.max_attempts + 1,
+        ):
+            try:
+                response = (
+                    await self
+                    ._client
+                    .post(
+                        (
+                            f"{self.base_url}"
+                            "/reranks"
+                        ),
+                        headers={
+                            "Authorization":
+                                (
+                                    "Bearer "
+                                    f"{self.api_key}"
+                                ),
+                            "Content-Type":
+                                "application/json",
+                        },
+                        json=payload,
+                    )
+                )
+
+                response.raise_for_status()
+
+                return (
+                    response,
+                    attempt,
+                )
+
+            except Exception as exc:
+                retryable = (
+                    self
+                    ._is_retryable_error(
+                        exc
+                    )
+                )
+
+                setattr(
+                    exc,
+                    "agentmesh_rerank_attempts",
+                    attempt,
+                )
+                setattr(
+                    exc,
+                    "agentmesh_rerank_retries",
+                    max(0, attempt - 1),
+                )
+                setattr(
+                    exc,
+                    "agentmesh_rerank_retryable",
+                    retryable,
+                )
+
+                if (
+                    not retryable
+                    or attempt >= self.max_attempts
+                ):
+                    raise
+
+                delay = (
+                    self
+                    ._retry_delay(
+                        attempt
+                    )
+                )
+
+                if delay > 0:
+                    await self._sleeper(
+                        delay
+                    )
+
+        raise AssertionError(
+            "unreachable"
+        )
+
+    def _retry_delay(
+        self,
+        failed_attempt: int,
+    ) -> float:
+        if not self.retry_backoff_seconds:
+            return 0.0
+
+        index = min(
+            max(
+                0,
+                failed_attempt - 1,
+            ),
+            len(
+                self.retry_backoff_seconds
+            ) - 1,
+        )
+
+        return (
+            self.retry_backoff_seconds[
+                index
+            ]
+        )
+
+    @classmethod
+    def _is_retryable_error(
+        cls,
+        exc: BaseException,
+    ) -> bool:
+        current: BaseException | None = (
+            exc
+        )
+        visited: set[int] = set()
+
+        while current is not None:
+            current_id = id(current)
+
+            if current_id in visited:
+                break
+
+            visited.add(current_id)
+
+            if isinstance(
+                current,
+                httpx.HTTPStatusError,
+            ):
+                status = (
+                    current.response.status_code
+                )
+
+                if (
+                    status == 429
+                    or 500 <= status <= 599
+                ):
+                    return True
+
+                return False
+
+            if isinstance(
+                current,
+                (
+                    httpx.NetworkError,
+                    httpx.TimeoutException,
+                    httpx.RemoteProtocolError,
+                    ConnectionResetError,
+                ),
+            ):
+                return True
+
+            current = (
+                current.__cause__
+                or current.__context__
+            )
+
+        return False
 
     async def aclose(
         self,
