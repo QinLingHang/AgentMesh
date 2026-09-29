@@ -1,17 +1,17 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import json
 import re
 from typing import Iterable
 
+from app.document_text_normalization import (
+    normalize_document_text,
+    normalize_pdf_pages,
+)
 
-def _normalize_text(text: str) -> str:
-    text = text.replace("\x00", "")
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+
+_HEADING_STYLE_RE = re.compile(r"^Heading\s+(\d+)$", re.IGNORECASE)
 
 
 def _decode_text(content: bytes) -> str:
@@ -30,19 +30,13 @@ def _parse_pdf(content: bytes) -> str:
         raise RuntimeError("pypdf is required for PDF ingestion") from exc
 
     reader = PdfReader(io.BytesIO(content))
-    pages: list[str] = []
-
-    for page in reader.pages:
-        text = page.extract_text() or ""
-        if text.strip():
-            pages.append(text)
-
-    return "\n\n".join(pages)
+    pages = normalize_pdf_pages([(page.extract_text() or "") for page in reader.pages])
+    return "\n\n".join(page for page in pages if page)
 
 
 def _table_rows(table) -> Iterable[str]:
     for row in table.rows:
-        values = [cell.text.strip() for cell in row.cells]
+        values = [normalize_document_text(cell.text) for cell in row.cells]
         if any(values):
             yield " | ".join(values)
 
@@ -57,12 +51,24 @@ def _parse_docx(content: bytes) -> str:
     blocks: list[str] = []
 
     for paragraph in document.paragraphs:
-        value = paragraph.text.strip()
-        if value:
+        value = normalize_document_text(paragraph.text)
+        if not value:
+            continue
+
+        style_name = ""
+        if paragraph.style is not None:
+            style_name = str(getattr(paragraph.style, "name", "") or "")
+        heading_match = _HEADING_STYLE_RE.match(style_name)
+        if heading_match:
+            level = min(6, max(1, int(heading_match.group(1))))
+            blocks.append(f"{'#' * level} {value}")
+        else:
             blocks.append(value)
 
     for table in document.tables:
-        blocks.extend(_table_rows(table))
+        rows = list(_table_rows(table))
+        if rows:
+            blocks.append("\n".join(rows))
 
     return "\n\n".join(blocks)
 
@@ -92,10 +98,9 @@ def parse_document_bytes(
     else:
         raise ValueError(f"unsupported knowledge extension: {extension}")
 
-    text = _normalize_text(text)
+    text = normalize_document_text(text)
     if not text:
         raise ValueError(
             "no extractable text found; scanned PDF OCR is not enabled in knowledge"
         )
-
     return text
