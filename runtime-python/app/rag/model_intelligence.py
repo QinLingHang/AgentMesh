@@ -12,6 +12,8 @@ from typing import (
 from pydantic import (
     BaseModel,
     Field,
+    ValidationError,
+    field_validator,
 )
 
 from app.models.gateway import (
@@ -109,70 +111,477 @@ class _EvidencePayload(
 
     reason: str = ""
 
+    @field_validator(
+        "relevance",
+        "coverage",
+        "confidence",
+        mode="before",
+    )
+    @classmethod
+    def _require_numeric_score(
+        cls,
+        value: Any,
+    ) -> Any:
+        if (
+            isinstance(value, bool)
+            or not isinstance(
+                value,
+                (int, float),
+            )
+        ):
+            raise ValueError(
+                "evidence score must be numeric"
+            )
+
+        return value
+
+    @field_validator(
+        "sufficient",
+        mode="before",
+    )
+    @classmethod
+    def _require_boolean_sufficient(
+        cls,
+        value: Any,
+    ) -> Any:
+        if type(value) is not bool:
+            raise ValueError(
+                "sufficient must be boolean"
+            )
+
+        return value
+
+
+# ============================================================
+# Structured Output Errors
+# ============================================================
+
+
+class StructuredOutputParseError(
+    ValueError
+):
+    """Model output did not contain a parseable JSON object."""
+
+
+class StructuredOutputSchemaError(
+    ValueError
+):
+    """Parsed JSON did not satisfy the expected response schema."""
+
+
+class StructuredOutputSemanticError(
+    ValueError
+):
+    """Parsed JSON is valid but violates an operation-level semantic contract."""
+
+
+class StructuredOutputProcessingError(
+    ValueError
+):
+    """Unexpected local processing failure after a model response."""
+
 
 # ============================================================
 # JSON Parsing
 #
-# Model output may be:
-#
-# ```json
-# {...}
-# ```
-#
-# or:
-#
-# explanation
-# {...}
-#
-# so we extract the outer JSON object first.
+# Real model output may wrap JSON in markdown fences or prose.
+# Extraction therefore scans for the first *balanced* JSON object and
+# understands quoted strings / escapes instead of using a greedy regex.
 # ============================================================
+
+
+def _balanced_object_end(
+    text: str,
+    start: int,
+) -> int | None:
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index in range(
+        start,
+        len(text),
+    ):
+        char = text[index]
+
+        if in_string:
+            if escaped:
+                escaped = False
+                continue
+
+            if char == "\\":
+                escaped = True
+                continue
+
+            if char == '"':
+                in_string = False
+
+            continue
+
+        if char == '"':
+            in_string = True
+            continue
+
+        if char == "{":
+            depth += 1
+            continue
+
+        if char == "}":
+            depth -= 1
+
+            if depth == 0:
+                return index
+
+            if depth < 0:
+                return None
+
+    return None
+
+
+def _looks_like_json_object_start(
+    text: str,
+    start: int,
+) -> bool:
+    """
+    Return whether ``text[start:]`` begins like a JSON object.
+
+    JSON object members must start with a quoted key (or the object may be
+    empty).  This lets the extractor distinguish a structured-output
+    candidate such as ``{"key": ...}`` from incidental prose braces such
+    as ``{example}``.
+    """
+    index = start + 1
+
+    while (
+        index < len(text)
+        and text[index].isspace()
+    ):
+        index += 1
+
+    if index >= len(text):
+        return True
+
+    return text[index] in {"\"", "}"}
 
 
 def _extract_json_object(
     content: str,
 ) -> dict[str, Any]:
-    text = (
-        content
-        .strip()
-    )
+    text = content.strip()
 
-    start = text.find(
-        "{"
-    )
-
-    end = text.rfind(
-        "}"
-    )
-
-    if (
-        start < 0
-        or end < start
-    ):
-        raise ValueError(
-            (
-                "model response "
-                "does not contain "
-                "a JSON object"
-            )
+    if not text:
+        raise StructuredOutputParseError(
+            "model response is empty"
         )
 
-    payload = json.loads(
-        text[
+    saw_object_start = False
+    cursor = 0
+
+    while cursor < len(text):
+        start = text.find(
+            "{",
+            cursor,
+        )
+
+        if start < 0:
+            break
+
+        saw_object_start = True
+        looks_structured = (
+            _looks_like_json_object_start(
+                text,
+                start,
+            )
+        )
+        end = _balanced_object_end(
+            text,
+            start,
+        )
+
+        if end is None:
+            # A JSON-looking outer object that never closes is an invalid
+            # structured response.  Do not keep scanning its nested braces
+            # and accidentally promote a complete inner object to the
+            # top-level payload.
+            if looks_structured:
+                raise StructuredOutputParseError(
+                    (
+                        "model response contains an "
+                        "unterminated JSON object"
+                    )
+                )
+
+            # Incidental prose can contain an unmatched non-JSON brace.
+            # Move past that brace so a later independent JSON object can
+            # still be discovered.
+            cursor = start + 1
+            continue
+
+        candidate = text[
             start:
             end + 1
         ]
-    )
 
-    if not isinstance(
-        payload,
-        dict,
-    ):
-        raise ValueError(
-            "model JSON must be object"
+        try:
+            payload = json.loads(
+                candidate
+            )
+        except json.JSONDecodeError:
+            # The whole balanced brace block is one candidate.  If it is
+            # malformed, skip that complete block rather than scanning its
+            # nested braces as separate top-level payloads.  A later
+            # independent JSON object remains eligible.
+            cursor = end + 1
+            continue
+
+        if isinstance(
+            payload,
+            dict,
+        ):
+            return payload
+
+        cursor = end + 1
+
+    if saw_object_start:
+        raise StructuredOutputParseError(
+            (
+                "model response contains "
+                "no parseable JSON object"
+            )
         )
 
-    return payload
+    raise StructuredOutputParseError(
+        (
+            "model response does not contain "
+            "a JSON object"
+        )
+    )
 
+
+def _validate_payload(
+    schema: type[BaseModel],
+    content: str,
+) -> BaseModel:
+    payload = _extract_json_object(
+        content
+    )
+
+    try:
+        return schema.model_validate(
+            payload
+        )
+    except ValidationError as exc:
+        raise StructuredOutputSchemaError(
+            (
+                "model JSON does not satisfy "
+                f"{schema.__name__}: "
+                f"{exc.errors(include_url=False)}"
+            )[:1000]
+        ) from exc
+
+
+# ============================================================
+# Structured Output Recovery
+#
+# Provider/network retry stays in ModelGateway. This layer only retries a
+# successful model call whose text cannot satisfy the structured-output
+# contract. It never repairs, guesses, or coerces malformed JSON.
+# ============================================================
+
+
+def _structured_output_error_class(
+    exc: Exception,
+) -> str:
+    if isinstance(
+        exc,
+        StructuredOutputParseError,
+    ):
+        return "RESPONSE_PARSE_ERROR"
+
+    if isinstance(
+        exc,
+        StructuredOutputSchemaError,
+    ):
+        return "RESPONSE_SCHEMA_ERROR"
+
+    if isinstance(
+        exc,
+        StructuredOutputSemanticError,
+    ):
+        return "RESPONSE_SEMANTIC_ERROR"
+
+    if isinstance(
+        exc,
+        StructuredOutputProcessingError,
+    ):
+        return "RESPONSE_PROCESSING_ERROR"
+
+    return "RESPONSE_PROCESSING_ERROR"
+
+
+def _structured_output_retry_prompt(
+    prompt: str,
+    *,
+    error_class: str,
+    error_detail: str | None = None,
+) -> str:
+    detail = " ".join(
+        (error_detail or "").strip().split()
+    )[:300]
+
+    semantic_instruction = ""
+    if error_class == "RESPONSE_SEMANTIC_ERROR":
+        semantic_instruction = (
+            "\nThe JSON syntax was valid, but the response violated the "
+            "operation-level semantic contract. Correct that semantic "
+            "violation while preserving the original retrieval intent."
+        )
+
+    detail_instruction = (
+        f"\nValidation detail: {detail}"
+        if detail
+        else ""
+    )
+
+    return f"""
+{prompt}
+
+[structured-output retry]
+The previous response was rejected as {error_class}.{semantic_instruction}{detail_instruction}
+Return exactly ONE complete JSON object matching the Required JSON schema above.
+Do not use markdown fences, comments, or explanatory prose.
+Start with {{ and end with }}.
+Close every string and object.
+Include every required field with the exact required JSON type.
+Keep free-text explanation fields short.
+""".strip()
+
+
+async def _generate_structured_payload(
+    *,
+    model: AgenticRAGModel,
+    prompt: str,
+    schema: type[BaseModel],
+    on_model_event: (
+        ModelEventHandler
+        | None
+    ),
+    max_attempts: int,
+    semantic_validator: (
+        Callable[[BaseModel], None]
+        | None
+    ) = None,
+) -> tuple[
+    BaseModel,
+    int,
+    int,
+    bool,
+    str | None,
+]:
+    attempts_limit = max(
+        1,
+        int(max_attempts),
+    )
+
+    first_error_class: str | None = None
+    current_prompt = prompt
+
+    for attempt in range(
+        1,
+        attempts_limit + 1,
+    ):
+        content = await model.generate(
+            current_prompt,
+            on_model_event,
+        )
+
+        try:
+            payload = _validate_payload(
+                schema,
+                content,
+            )
+
+            if semantic_validator is not None:
+                semantic_validator(payload)
+        except (
+            StructuredOutputParseError,
+            StructuredOutputSchemaError,
+            StructuredOutputSemanticError,
+        ) as exc:
+            error_class = (
+                _structured_output_error_class(
+                    exc
+                )
+            )
+
+            if first_error_class is None:
+                first_error_class = error_class
+
+            setattr(
+                exc,
+                "agentmesh_structured_output_attempts",
+                attempt,
+            )
+            setattr(
+                exc,
+                "agentmesh_structured_output_retries",
+                attempt - 1,
+            )
+            setattr(
+                exc,
+                "agentmesh_structured_output_first_error_type",
+                first_error_class,
+            )
+
+            if attempt >= attempts_limit:
+                raise
+
+            current_prompt = (
+                _structured_output_retry_prompt(
+                    prompt,
+                    error_class=error_class,
+                    error_detail=str(exc),
+                )
+            )
+            continue
+        except Exception as exc:
+            processing_error = StructuredOutputProcessingError(
+                (
+                    "structured output processing failed: "
+                    f"{type(exc).__name__}: {str(exc)[:300]}"
+                )
+            )
+            setattr(
+                processing_error,
+                "agentmesh_structured_output_attempts",
+                attempt,
+            )
+            setattr(
+                processing_error,
+                "agentmesh_structured_output_retries",
+                attempt - 1,
+            )
+            setattr(
+                processing_error,
+                "agentmesh_structured_output_first_error_type",
+                (
+                    first_error_class
+                    or "RESPONSE_PROCESSING_ERROR"
+                ),
+            )
+            raise processing_error from exc
+
+        return (
+            payload,
+            attempt,
+            attempt - 1,
+            attempt > 1,
+            first_error_class,
+        )
+
+    raise AssertionError(
+        "unreachable structured-output recovery state"
+    )
 
 def _deduplicate_strings(
     values: Sequence[str],
@@ -260,6 +669,7 @@ class ModelBackedQueryTransformer(
             RAGIntelligenceEventHandler
             | None
         ) = None,
+        structured_output_max_attempts: int = 3,
     ) -> None:
         self._model = model
 
@@ -275,6 +685,73 @@ class ModelBackedQueryTransformer(
         self._on_rag_event = (
             on_rag_event
         )
+
+        self._structured_output_max_attempts = max(
+            1,
+            int(structured_output_max_attempts),
+        )
+
+    @staticmethod
+    def _normalize_query_value(
+        value: str,
+    ) -> str:
+        return " ".join(
+            str(value).strip().split()
+        )
+
+    @classmethod
+    def _validate_rewrite_payload(
+        cls,
+        payload: BaseModel,
+        *,
+        previous_query: str,
+    ) -> None:
+        if not isinstance(payload, _RewritePayload):
+            raise StructuredOutputProcessingError(
+                "rewrite validator received unexpected payload type"
+            )
+
+        result = cls._normalize_query_value(
+            payload.query
+        )
+
+        if not result:
+            raise StructuredOutputSemanticError(
+                "rewritten query is empty after normalization"
+            )
+
+        if (
+            previous_query
+            and result.lower()
+            == previous_query.lower()
+        ):
+            raise StructuredOutputSemanticError(
+                (
+                    "rewritten query duplicates previous "
+                    "retrieval query"
+                )
+            )
+
+    @staticmethod
+    def _validate_queries_payload(
+        payload: BaseModel,
+        *,
+        operation: str,
+    ) -> None:
+        if not isinstance(payload, _QueriesPayload):
+            raise StructuredOutputProcessingError(
+                f"{operation} validator received unexpected payload type"
+            )
+
+        queries = _deduplicate_strings(
+            payload.queries,
+            max_items=4,
+        )
+
+        if not queries:
+            raise StructuredOutputSemanticError(
+                f"model returned no usable {operation} queries"
+            )
 
     # ========================================================
     # Rewrite
@@ -358,50 +835,33 @@ Required JSON:
 """.strip()
 
         try:
-            content = (
-                await self
-                ._model
-                .generate(
-                    prompt,
-                    self._on_model_event,
-                )
-            )
-
-            payload = (
-                _RewritePayload
-                .model_validate(
-                    _extract_json_object(
-                        content
+            (
+                payload,
+                structured_attempts,
+                structured_retries,
+                structured_recovered,
+                structured_recovery_error_type,
+            ) = await _generate_structured_payload(
+                model=self._model,
+                prompt=prompt,
+                schema=_RewritePayload,
+                on_model_event=self._on_model_event,
+                max_attempts=(
+                    self._structured_output_max_attempts
+                ),
+                semantic_validator=(
+                    lambda candidate: (
+                        self._validate_rewrite_payload(
+                            candidate,
+                            previous_query=previous_query_text,
+                        )
                     )
-                )
+                ),
             )
 
-            result = " ".join(
-                payload
-                .query
-                .strip()
-                .split()
+            result = self._normalize_query_value(
+                payload.query
             )
-
-            if not result:
-                raise ValueError(
-                    "empty rewritten query"
-                )
-
-            # Retry Diversity Guard:
-            # prompt is a soft constraint; this is the hard guard.
-            if (
-                previous_query_text
-                and result.lower()
-                == previous_query_text.lower()
-            ):
-                raise ValueError(
-                    (
-                        "rewritten query "
-                        "duplicates previous "
-                        "retrieval query"
-                    )
-                )
 
             self._emit(
                 "RAG Query Rewrite",
@@ -416,6 +876,18 @@ Required JSON:
                     bool(
                         feedback_text
                     )
+                ),
+                structuredOutputAttempts=(
+                    structured_attempts
+                ),
+                structuredOutputRetries=(
+                    structured_retries
+                ),
+                structuredOutputRecovered=(
+                    structured_recovered
+                ),
+                structuredOutputRecoveryErrorType=(
+                    structured_recovery_error_type
                 ),
             )
 
@@ -526,22 +998,28 @@ Required JSON:
 """.strip()
 
         try:
-            content = (
-                await self
-                ._model
-                .generate(
-                    prompt,
-                    self._on_model_event,
-                )
-            )
-
-            payload = (
-                _QueriesPayload
-                .model_validate(
-                    _extract_json_object(
-                        content
+            (
+                payload,
+                structured_attempts,
+                structured_retries,
+                structured_recovered,
+                structured_recovery_error_type,
+            ) = await _generate_structured_payload(
+                model=self._model,
+                prompt=prompt,
+                schema=_QueriesPayload,
+                on_model_event=self._on_model_event,
+                max_attempts=(
+                    self._structured_output_max_attempts
+                ),
+                semantic_validator=(
+                    lambda candidate: (
+                        self._validate_queries_payload(
+                            candidate,
+                            operation="multi-query",
+                        )
                     )
-                )
+                ),
             )
 
             queries = (
@@ -550,11 +1028,6 @@ Required JSON:
                     max_items=4,
                 )
             )
-
-            if not queries:
-                raise ValueError(
-                    "model returned no queries"
-                )
 
             self._emit(
                 "RAG Multi Query Generated",
@@ -565,6 +1038,18 @@ Required JSON:
                     len(
                         queries
                     )
+                ),
+                structuredOutputAttempts=(
+                    structured_attempts
+                ),
+                structuredOutputRetries=(
+                    structured_retries
+                ),
+                structuredOutputRecovered=(
+                    structured_recovered
+                ),
+                structuredOutputRecoveryErrorType=(
+                    structured_recovery_error_type
                 ),
             )
 
@@ -623,22 +1108,28 @@ Required JSON:
 """.strip()
 
         try:
-            content = (
-                await self
-                ._model
-                .generate(
-                    prompt,
-                    self._on_model_event,
-                )
-            )
-
-            payload = (
-                _QueriesPayload
-                .model_validate(
-                    _extract_json_object(
-                        content
+            (
+                payload,
+                structured_attempts,
+                structured_retries,
+                structured_recovered,
+                structured_recovery_error_type,
+            ) = await _generate_structured_payload(
+                model=self._model,
+                prompt=prompt,
+                schema=_QueriesPayload,
+                on_model_event=self._on_model_event,
+                max_attempts=(
+                    self._structured_output_max_attempts
+                ),
+                semantic_validator=(
+                    lambda candidate: (
+                        self._validate_queries_payload(
+                            candidate,
+                            operation="decomposition",
+                        )
                     )
-                )
+                ),
             )
 
             queries = (
@@ -647,14 +1138,6 @@ Required JSON:
                     max_items=4,
                 )
             )
-
-            if not queries:
-                raise ValueError(
-                    (
-                        "model returned no "
-                        "decomposition queries"
-                    )
-                )
 
             self._emit(
                 "RAG Query Decomposed",
@@ -665,6 +1148,18 @@ Required JSON:
                     len(
                         queries
                     )
+                ),
+                structuredOutputAttempts=(
+                    structured_attempts
+                ),
+                structuredOutputRetries=(
+                    structured_retries
+                ),
+                structuredOutputRecovered=(
+                    structured_recovered
+                ),
+                structuredOutputRecoveryErrorType=(
+                    structured_recovery_error_type
                 ),
             )
 
@@ -735,6 +1230,32 @@ Required JSON:
                     exc
                 )[:300]
             ),
+            structuredOutputAttempts=(
+                int(
+                    getattr(
+                        exc,
+                        "agentmesh_structured_output_attempts",
+                        1,
+                    )
+                )
+            ),
+            structuredOutputRetries=(
+                int(
+                    getattr(
+                        exc,
+                        "agentmesh_structured_output_retries",
+                        0,
+                    )
+                )
+            ),
+            structuredOutputRecovered=False,
+            structuredOutputRecoveryErrorType=(
+                getattr(
+                    exc,
+                    "agentmesh_structured_output_first_error_type",
+                    None,
+                )
+            ),
         )
 
 
@@ -769,6 +1290,7 @@ class ModelBackedEvidenceGrader:
         ) = None,
         max_documents: int = 6,
         max_chars_per_document: int = 1200,
+        structured_output_max_attempts: int = 3,
     ) -> None:
         self._model = model
 
@@ -793,6 +1315,11 @@ class ModelBackedEvidenceGrader:
         self._max_chars = max(
             200,
             max_chars_per_document,
+        )
+
+        self._structured_output_max_attempts = max(
+            1,
+            int(structured_output_max_attempts),
         )
 
     async def grade(
@@ -879,115 +1406,223 @@ Required JSON:
 }}
 """.strip()
 
+        requested_grader = (
+            self._requested_grader_name()
+        )
+
         try:
-            content = (
-                await self
-                ._model
-                .generate(
-                    prompt,
-                    self._on_model_event,
-                )
-            )
-
-            payload = (
-                _EvidencePayload
-                .model_validate(
-                    _extract_json_object(
-                        content
-                    )
-                )
-            )
-
-            grade = EvidenceGrade(
-                relevance=(
-                    round(
-                        payload
-                        .relevance,
-                        4,
-                    )
-                ),
-
-                coverage=(
-                    round(
-                        payload
-                        .coverage,
-                        4,
-                    )
-                ),
-
-                confidence=(
-                    round(
-                        payload
-                        .confidence,
-                        4,
-                    )
-                ),
-
-                sufficient=(
-                    payload
-                    .sufficient
-                ),
-
-                reason=(
-                    payload
-                    .reason
+            (
+                payload,
+                structured_attempts,
+                structured_retries,
+                structured_recovered,
+                structured_recovery_error_type,
+            ) = await _generate_structured_payload(
+                model=self._model,
+                prompt=prompt,
+                schema=_EvidencePayload,
+                on_model_event=self._on_model_event,
+                max_attempts=(
+                    self._structured_output_max_attempts
                 ),
             )
-
-            self._emit(
-                "RAG Evidence Graded",
-                backend="model",
-                fallback=False,
-                relevance=(
-                    grade.relevance
+        except StructuredOutputParseError as exc:
+            return await self._fallback_grade(
+                query,
+                hits,
+                requested_grader=requested_grader,
+                error_class=(
+                    "RESPONSE_PARSE_ERROR"
                 ),
-                coverage=(
-                    grade.coverage
-                ),
-                confidence=(
-                    grade.confidence
-                ),
-                sufficient=(
-                    grade.sufficient
-                ),
+                exc=exc,
             )
-
-            return grade
-
+        except StructuredOutputSchemaError as exc:
+            return await self._fallback_grade(
+                query,
+                hits,
+                requested_grader=requested_grader,
+                error_class=(
+                    "RESPONSE_SCHEMA_ERROR"
+                ),
+                exc=exc,
+            )
+        except StructuredOutputProcessingError as exc:
+            return await self._fallback_grade(
+                query,
+                hits,
+                requested_grader=requested_grader,
+                error_class=(
+                    "RESPONSE_PROCESSING_ERROR"
+                ),
+                exc=exc,
+            )
         except Exception as exc:
-            fallback_grade = (
-                await self
-                ._fallback
-                .grade(
-                    query,
-                    hits,
+            return await self._fallback_grade(
+                query,
+                hits,
+                requested_grader=requested_grader,
+                error_class="PROVIDER_ERROR",
+                exc=exc,
+            )
+
+        grade = EvidenceGrade(
+            relevance=(
+                round(
+                    payload.relevance,
+                    4,
                 )
-            )
+            ),
+            coverage=(
+                round(
+                    payload.coverage,
+                    4,
+                )
+            ),
+            confidence=(
+                round(
+                    payload.confidence,
+                    4,
+                )
+            ),
+            sufficient=(
+                payload.sufficient
+            ),
+            reason=(
+                payload.reason
+            ),
+        )
 
-            self._emit(
-                (
-                    "RAG Evidence Grader "
-                    "Fallback"
-                ),
-                backend="heuristic",
-                fallback=True,
-                errorType=(
-                    type(
-                        exc
-                    ).__name__
-                ),
-                error=(
-                    str(
-                        exc
-                    )[:300]
-                ),
-                sufficient=(
-                    fallback_grade
-                    .sufficient
-                ),
-            )
+        self._emit(
+            "RAG Evidence Graded",
+            backend="model",
+            fallback=False,
+            requestedEvidenceGrader=(
+                requested_grader
+            ),
+            effectiveEvidenceGrader=(
+                requested_grader
+            ),
+            evidenceGradeFallback=False,
+            evidenceGradeStructuredAttempts=(
+                structured_attempts
+            ),
+            evidenceGradeStructuredRetries=(
+                structured_retries
+            ),
+            evidenceGradeStructuredRecovered=(
+                structured_recovered
+            ),
+            evidenceGradeStructuredRecoveryErrorType=(
+                structured_recovery_error_type
+            ),
+            relevance=grade.relevance,
+            coverage=grade.coverage,
+            confidence=grade.confidence,
+            sufficient=grade.sufficient,
+        )
 
-            return fallback_grade
+        return grade
+
+    def _requested_grader_name(
+        self,
+    ) -> str:
+        value = (
+            getattr(
+                self._model,
+                "model",
+                None,
+            )
+            or getattr(
+                self._model,
+                "name",
+                None,
+            )
+            or type(
+                self._model
+            ).__name__
+        )
+
+        return str(value)
+
+    async def _fallback_grade(
+        self,
+        query: str,
+        hits: Sequence[
+            RetrievalHit
+        ],
+        *,
+        requested_grader: str,
+        error_class: str,
+        exc: Exception,
+    ) -> EvidenceGrade:
+        fallback_grade = (
+            await self
+            ._fallback
+            .grade(
+                query,
+                hits,
+            )
+        )
+
+        error_message = str(exc)[:300]
+
+        self._emit(
+            (
+                "RAG Evidence Grader "
+                "Fallback"
+            ),
+            backend="heuristic",
+            fallback=True,
+            requestedEvidenceGrader=(
+                requested_grader
+            ),
+            effectiveEvidenceGrader=(
+                "heuristic"
+            ),
+            evidenceGradeFallback=True,
+            evidenceGradeErrorType=(
+                error_class
+            ),
+            evidenceGradeError=(
+                error_message
+            ),
+            evidenceGradeStructuredAttempts=(
+                int(
+                    getattr(
+                        exc,
+                        "agentmesh_structured_output_attempts",
+                        1,
+                    )
+                )
+            ),
+            evidenceGradeStructuredRetries=(
+                int(
+                    getattr(
+                        exc,
+                        "agentmesh_structured_output_retries",
+                        0,
+                    )
+                )
+            ),
+            evidenceGradeStructuredRecovered=False,
+            evidenceGradeStructuredRecoveryErrorType=(
+                getattr(
+                    exc,
+                    "agentmesh_structured_output_first_error_type",
+                    None,
+                )
+            ),
+            # Backward-compatible fields consumed by existing traces.
+            errorType=(
+                type(exc).__name__
+            ),
+            error=error_message,
+            sufficient=(
+                fallback_grade.sufficient
+            ),
+        )
+
+        return fallback_grade
 
     def _emit(
         self,

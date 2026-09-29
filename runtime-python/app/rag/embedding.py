@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import re
@@ -188,6 +189,8 @@ class OpenAICompatibleEmbeddingProvider:
         model: str,
         dimension: int,
         trust_env: bool = True,
+        timeout_seconds: float = 20.0,
+        sdk_max_retries: int | None = None,
     ) -> None:
 
         if not api_key:
@@ -200,8 +203,26 @@ class OpenAICompatibleEmbeddingProvider:
                 "embedding dimension must be > 1"
             )
 
+        if timeout_seconds <= 0:
+            raise ValueError(
+                "embedding timeout_seconds must be > 0"
+            )
+
+        if sdk_max_retries is not None and sdk_max_retries < 0:
+            raise ValueError(
+                "embedding sdk_max_retries must be >= 0"
+            )
+
         self.dimension = (
             dimension
+        )
+
+        self.timeout_seconds = (
+            float(timeout_seconds)
+        )
+
+        self.sdk_max_retries = (
+            sdk_max_retries
         )
 
         self.model = (
@@ -212,22 +233,37 @@ class OpenAICompatibleEmbeddingProvider:
             httpx.AsyncClient(
                 trust_env=(
                     trust_env
-                )
+                ),
+                timeout=httpx.Timeout(
+                    self.timeout_seconds
+                ),
             )
         )
 
+        client_kwargs = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "http_client": (
+                self._http_client
+            ),
+            "timeout": (
+                self.timeout_seconds
+            ),
+        }
+
+        if (
+            self.sdk_max_retries
+            is not None
+        ):
+            client_kwargs[
+                "max_retries"
+            ] = (
+                self.sdk_max_retries
+            )
+
         self._client = (
             AsyncOpenAI(
-                api_key=(
-                    api_key
-                ),
-                base_url=(
-                    base_url
-                ),
-                http_client=(
-                    self
-                    ._http_client
-                ),
+                **client_kwargs
             )
         )
 
@@ -241,8 +277,8 @@ class OpenAICompatibleEmbeddingProvider:
         if not texts:
             return []
 
-        response = (
-            await self
+        request = (
+            self
             ._client
             .embeddings
             .create(
@@ -255,6 +291,24 @@ class OpenAICompatibleEmbeddingProvider:
                 ),
             )
         )
+
+        try:
+            response = (
+                await asyncio.wait_for(
+                    request,
+                    timeout=(
+                        self.timeout_seconds
+                        + 1.0
+                    ),
+                )
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                (
+                    "embedding request timed out "
+                    f"after {self.timeout_seconds:.1f}s"
+                )
+            ) from exc
 
         ordered = sorted(
             response.data,

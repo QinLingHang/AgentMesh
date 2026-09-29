@@ -79,6 +79,7 @@ class HybridMilvusRetriever(
             | None
         ) = None,
         client: Any | None = None,
+        search_timeout_seconds: float = 10.0,
     ) -> None:
 
         super().__init__(
@@ -99,6 +100,15 @@ class HybridMilvusRetriever(
             raise ValueError(
                 "rrf_k must be > 0"
             )
+
+        if search_timeout_seconds <= 0:
+            raise ValueError(
+                "search_timeout_seconds must be > 0"
+            )
+
+        self.search_timeout_seconds = (
+            float(search_timeout_seconds)
+        )
 
         self.candidate_k = (
             candidate_k
@@ -420,8 +430,8 @@ class HybridMilvusRetriever(
             time.perf_counter()
         )
 
-        result = (
-            await asyncio.to_thread(
+        search_operation = (
+            asyncio.to_thread(
                 client.hybrid_search,
 
                 collection_name=(
@@ -451,8 +461,41 @@ class HybridMilvusRetriever(
                     "user_id",
                     "metadata",
                 ],
+
+                # pymilvus 3.x exposes an RPC-level timeout.
+                # Keep this inside the client call so the worker
+                # thread is not left waiting forever after an
+                # asyncio cancellation.
+                timeout=(
+                    self.search_timeout_seconds
+                ),
             )
         )
+
+        try:
+            result = (
+                await asyncio.wait_for(
+                    search_operation,
+                    timeout=(
+                        self.search_timeout_seconds
+                        + min(
+                            2.0,
+                            max(
+                                0.05,
+                                self.search_timeout_seconds
+                                * 0.2,
+                            ),
+                        )
+                    ),
+                )
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                (
+                    "Milvus hybrid search timed out "
+                    f"after {self.search_timeout_seconds:.1f}s"
+                )
+            ) from exc
 
         hybrid_search_ms = int(
             (
@@ -559,6 +602,11 @@ class HybridMilvusRetriever(
         rerank_fallback = False
 
         rerank_error = ""
+        rerank_error_type = ""
+        rerank_attempts = 1
+        rerank_retries = 0
+        rerank_retryable = False
+        rerank_recovered = False
 
         requested_reranker = str(
             getattr(
@@ -583,6 +631,34 @@ class HybridMilvusRetriever(
                 )
             )
 
+            if final_hits:
+                rerank_metadata = (
+                    final_hits[0]
+                    .document
+                    .metadata
+                )
+                rerank_attempts = int(
+                    rerank_metadata.get(
+                        "rerankAttempts",
+                        1,
+                    )
+                )
+                rerank_retries = int(
+                    rerank_metadata.get(
+                        "rerankRetries",
+                        max(
+                            0,
+                            rerank_attempts - 1,
+                        ),
+                    )
+                )
+                rerank_recovered = bool(
+                    rerank_metadata.get(
+                        "rerankRecovered",
+                        rerank_attempts > 1,
+                    )
+                )
+
         except Exception as exc:
             # ---------------------------------------------
             # Model Reranker 是增强能力。
@@ -595,9 +671,38 @@ class HybridMilvusRetriever(
                 True
             )
 
+            rerank_error_type = (
+                type(exc).__name__
+            )
+
             rerank_error = (
-                f"{type(exc).__name__}: "
+                f"{rerank_error_type}: "
                 f"{exc}"
+            )
+
+            rerank_attempts = int(
+                getattr(
+                    exc,
+                    "agentmesh_rerank_attempts",
+                    1,
+                )
+            )
+            rerank_retries = int(
+                getattr(
+                    exc,
+                    "agentmesh_rerank_retries",
+                    max(
+                        0,
+                        rerank_attempts - 1,
+                    ),
+                )
+            )
+            rerank_retryable = bool(
+                getattr(
+                    exc,
+                    "agentmesh_rerank_retryable",
+                    False,
+                )
             )
 
             final_hits = (
@@ -696,8 +801,23 @@ class HybridMilvusRetriever(
             "rerankFallback":
                 rerank_fallback,
 
+            "rerankAttempts":
+                rerank_attempts,
+
+            "rerankRetries":
+                rerank_retries,
+
+            "rerankRecovered":
+                rerank_recovered,
+
+            "rerankFailureRetryable":
+                rerank_retryable,
+
             "embeddingMs":
                 embedding_ms,
+
+            "milvusSearchTimeoutSeconds":
+                self.search_timeout_seconds,
 
             "hybridSearchMs":
                 hybrid_search_ms,
@@ -717,6 +837,9 @@ class HybridMilvusRetriever(
                     :500
                 ]
             )
+            diagnostics[
+                "rerankErrorType"
+            ] = rerank_error_type
 
         # =================================================
         # 7. Attach Diagnostics
