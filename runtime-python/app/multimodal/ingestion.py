@@ -1,10 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.document_text_normalization import normalize_pdf_pages
 from app.multimodal.contracts import MultimodalIngestionStats, VisionAnalyzer
 from app.rag.ingestion import chunk_text
 from app.rag.runtime import RetrievalDocument
@@ -17,7 +18,6 @@ _IMAGE_MEDIA_TYPES = {
     "jpeg": "image/jpeg",
     "webp": "image/webp",
 }
-
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(api[_-]?key|token|password|authorization|secret)(\s*[:=]\s*)([^\s,;]+)"
 )
@@ -33,7 +33,10 @@ def safe_knowledge_error(exc: Exception) -> str:
     text = str(exc).replace("\r", " ").replace("\n", " ").strip()
     text = _PRIVATE_KEY_RE.sub("[redacted-private-key]", text)
     text = _BEARER_RE.sub("Bearer [redacted]", text)
-    text = _SECRET_ASSIGNMENT_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[redacted]", text)
+    text = _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[redacted]",
+        text,
+    )
     return f"{type(exc).__name__}: {text}"[:500]
 
 
@@ -54,10 +57,15 @@ def _page_texts(content: bytes) -> list[str]:
         raise RuntimeError("pypdf is required for PDF ingestion") from exc
 
     reader = PdfReader(io.BytesIO(content))
-    return [(page.extract_text() or "").strip() for page in reader.pages]
+    return normalize_pdf_pages([(page.extract_text() or "") for page in reader.pages])
 
 
-def _render_pdf_pages(content: bytes, *, max_pages: int, dpi: int = 120) -> list[tuple[int, bytes]]:
+def _render_pdf_pages(
+    content: bytes,
+    *,
+    max_pages: int,
+    dpi: int = 120,
+) -> list[tuple[int, bytes]]:
     try:
         import fitz  # PyMuPDF
     except ImportError as exc:  # pragma: no cover - graceful fallback caller handles
@@ -72,8 +80,17 @@ def _render_pdf_pages(content: bytes, *, max_pages: int, dpi: int = 120) -> list
     return result
 
 
-def _base_metadata(base: dict[str, Any], *, modality: str, page_number: int | None = None) -> dict[str, Any]:
-    metadata = {**base, "modality": modality, "evidenceKind": ("text" if modality == "text" else "visual")}
+def _base_metadata(
+    base: dict[str, Any],
+    *,
+    modality: str,
+    page_number: int | None = None,
+) -> dict[str, Any]:
+    metadata = {
+        **base,
+        "modality": modality,
+        "evidenceKind": ("text" if modality == "text" else "visual"),
+    }
     if page_number is not None:
         metadata["pageNumber"] = page_number
     return metadata
@@ -113,6 +130,7 @@ async def ingest_multimodal_document(
             # could project provider error text into the Go knowledge lifecycle.
             # Fail closed with a bounded, secret-redacted message instead.
             raise RuntimeError(safe_knowledge_error(exc)) from None
+
         visual_count = 1
         visual_status = "completed"
         documents.append(
@@ -132,17 +150,23 @@ async def ingest_multimodal_document(
                 },
             )
         )
+
     elif extension == "pdf":
         pages = _page_texts(content)
         page_count = len(pages)
         global_chunk_index = 0
+
         for page_number, page_text in enumerate(pages, start=1):
             if not page_text:
                 continue
             chunks = chunk_text(
                 text=page_text,
                 source=source,
-                metadata=_base_metadata(base_metadata, modality="text", page_number=page_number),
+                metadata=_base_metadata(
+                    base_metadata,
+                    modality="text",
+                    page_number=page_number,
+                ),
                 chunk_size=chunk_size,
                 overlap=overlap,
             )
@@ -154,7 +178,10 @@ async def ingest_multimodal_document(
                 }
                 documents.append(
                     RetrievalDocument(
-                        id=f"{base_metadata['documentId']}_p{page_number}_chunk{global_chunk_index}",
+                        id=(
+                            f"{base_metadata['documentId']}_p{page_number}_"
+                            f"chunk{global_chunk_index}"
+                        ),
                         text=item.text,
                         source=source,
                         metadata=metadata,
@@ -179,8 +206,15 @@ async def ingest_multimodal_document(
                             text=observation.searchable_text(),
                             source=source,
                             metadata={
-                                **_base_metadata(base_metadata, modality="page", page_number=page_number),
-                                "assetId": f"knowledge-file-{base_metadata['knowledgeFileId']}-page-{page_number}",
+                                **_base_metadata(
+                                    base_metadata,
+                                    modality="page",
+                                    page_number=page_number,
+                                ),
+                                "assetId": (
+                                    f"knowledge-file-"
+                                    f"{base_metadata['knowledgeFileId']}-page-{page_number}"
+                                ),
                                 "visualType": observation.visual_type,
                                 "visibleText": list(observation.visible_text),
                                 "entities": list(observation.entities),
@@ -191,8 +225,11 @@ async def ingest_multimodal_document(
                         )
                     )
                     visual_count += 1
+
                 if visual_count:
-                    visual_status = "partial" if page_count > max_visual_pages else "completed"
+                    visual_status = (
+                        "partial" if page_count > max_visual_pages else "completed"
+                    )
                 else:
                     visual_status = "empty"
             except Exception as exc:
@@ -200,6 +237,7 @@ async def ingest_multimodal_document(
                 visual_error = safe_knowledge_error(exc)
         else:
             visual_status = "disabled" if page_count else "not_applicable"
+
     else:
         # Text-first formats retain the knowledge ingestion behavior while receiving
         # explicit modality metadata for V2 retrieval.
