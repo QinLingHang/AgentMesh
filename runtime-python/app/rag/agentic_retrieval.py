@@ -5,6 +5,10 @@ import re
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 
+from app.rag.retrieval_budget import (
+    AdaptiveCandidateBudgetPolicy,
+    CandidateBudgetPolicy,
+)
 from app.rag.runtime import RetrievalHit, Retriever
 
 
@@ -281,6 +285,11 @@ class AgenticRetrievalRound:
     queries: list[str]
     hits: list[RetrievalHit]
     grade: EvidenceGrade
+    retrieval_top_k: int = 0
+    candidate_pool_count: int = 0
+    candidate_pool_limit: int = 0
+    final_top_k: int = 0
+    candidate_budget_reason: str = "base"
 
     @property
     def round_number(self) -> int:
@@ -351,6 +360,7 @@ class AgenticRetrievalExecutor:
         transformer: QueryTransformer | None = None,
         query_transformer: QueryTransformer | None = None,
         grader: EvidenceGrader | None = None,
+        budget_policy: CandidateBudgetPolicy | None = None,
     ) -> None:
         if (
             transformer is not None
@@ -370,6 +380,10 @@ class AgenticRetrievalExecutor:
         self.grader = (
             grader
             or HeuristicEvidenceGrader()
+        )
+        self.budget_policy = (
+            budget_policy
+            or AdaptiveCandidateBudgetPolicy()
         )
 
     async def retrieve(
@@ -409,7 +423,11 @@ class AgenticRetrievalExecutor:
             AgenticRetrievalRound
         ] = []
 
-        accumulated_hits: list[
+        candidate_pool: list[
+            RetrievalHit
+        ] = []
+
+        selected_hits: list[
             RetrievalHit
         ] = []
 
@@ -500,14 +518,24 @@ class AgenticRetrievalExecutor:
                     round_query
                 ]
 
+            budget = self.budget_policy.resolve(
+                final_top_k=effective_top_k,
+                round_index=round_index,
+                enable_multi_query=enable_multi_query,
+                enable_decomposition=enable_decomposition,
+            )
+
             # ----------------------------------------------------
             # 3. Parallel Retrieval Contract
+            #
+            # Retrieve wide only for complex/insufficient-evidence paths.
+            # The final result remains bounded by effective_top_k.
             # ----------------------------------------------------
             retrieved_groups = await asyncio.gather(
                 *[
                     self.retriever.retrieve(
                         candidate_query,
-                        top_k=effective_top_k,
+                        top_k=budget.retrieval_top_k,
                         filters=filters,
                     )
                     for candidate_query
@@ -527,12 +555,19 @@ class AgenticRetrievalExecutor:
             # ----------------------------------------------------
             # 4. Cross-query / Cross-round Deduplication
             # ----------------------------------------------------
-            accumulated_hits = (
+            candidate_pool = (
                 self._merge_hits(
-                    accumulated_hits,
+                    candidate_pool,
                     current_round_hits,
-                    top_k=effective_top_k,
+                    top_k=budget.candidate_pool_k,
                 )
+            )
+
+            # Narrow before grading and before exposing hits to the caller.
+            # This prevents the grader from declaring success based on evidence
+            # that would later be omitted from the final context.
+            selected_hits = list(
+                candidate_pool[:effective_top_k]
             )
 
             # ----------------------------------------------------
@@ -543,7 +578,7 @@ class AgenticRetrievalExecutor:
                 .grader
                 .grade(
                     original_query,
-                    accumulated_hits,
+                    selected_hits,
                 )
             )
 
@@ -555,9 +590,22 @@ class AgenticRetrievalExecutor:
                         candidate_queries
                     ),
                     hits=list(
-                        accumulated_hits
+                        selected_hits
                     ),
                     grade=final_grade,
+                    retrieval_top_k=(
+                        budget.retrieval_top_k
+                    ),
+                    candidate_pool_count=len(
+                        candidate_pool
+                    ),
+                    candidate_pool_limit=(
+                        budget.candidate_pool_k
+                    ),
+                    final_top_k=effective_top_k,
+                    candidate_budget_reason=(
+                        budget.reason
+                    ),
                 )
             )
 
@@ -569,7 +617,7 @@ class AgenticRetrievalExecutor:
                     AgenticRetrievalResult(
                         query=original_query,
                         hits=list(
-                            accumulated_hits
+                            selected_hits
                         ),
                         rounds=rounds,
                         grade=final_grade,
@@ -586,7 +634,7 @@ class AgenticRetrievalExecutor:
         return AgenticRetrievalResult(
             query=original_query,
             hits=list(
-                accumulated_hits
+                selected_hits
             ),
             rounds=rounds,
             grade=final_grade,
