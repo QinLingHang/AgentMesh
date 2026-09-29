@@ -1,32 +1,23 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
-import re
-from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from app.document_text_normalization import normalize_document_text
+from app.rag.chunking import (
+    ChunkSpan,
+    ChunkingPolicy,
+    StructuralBlock,
+    extract_structural_blocks,
+    legacy_fixed_window_spans,
+    pack_blocks,
+)
 from app.rag.runtime import RetrievalDocument
 
 
-_MARKDOWN_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-_NUMBERED_HEADING_RE = re.compile(
-    r"^(\d+(?:\.\d+){0,5})[.)、]?\s+(.+?)\s*$"
-)
-_CHINESE_CHAPTER_RE = re.compile(
-    r"^第\s*([一二三四五六七八九十百千万0-9]+)\s*[章节篇部]\s*(.*)$"
-)
-_CHINESE_HEADING_RE = re.compile(
-    r"^([一二三四五六七八九十百]+)[、.．]\s*(.+?)\s*$"
-)
-_SENTENCE_END_RE = re.compile(r"[。！？!?；;]\s*|(?<!\b[A-Z])\.\s+")
-
-
-@dataclass(frozen=True, slots=True)
-class _Section:
-    start: int
-    end: int
-    heading_path: tuple[str, ...]
+_CONTEXT_PRESERVING_STRATEGY = "context_preserving_structure_v2"
+_FIXED_FALLBACK_STRATEGY = "fixed_window_fallback_v1"
 
 
 def chunk_text(
@@ -37,276 +28,196 @@ def chunk_text(
     chunk_size: int = 500,
     overlap: int = 100,
 ) -> list[RetrievalDocument]:
-    """Split text into deterministic, structure-aware retrieval chunks.
+    """Split normalized text into source-aligned retrieval chunks.
 
-    The public contract stays backward compatible with the original fixed-window
-    chunker. The implementation now prefers document/paragraph/sentence boundaries,
-    never crosses an identified heading section for overlap, and falls back to a
-    fixed character window when no usable boundary exists.
+    V2 treats document structure as a *preferred* boundary rather than a hard
+    instruction to emit a chunk. Adjacent small blocks are packed together,
+    oversized regions alone are recursively split, and overlap is introduced
+    only by those forced oversized splits. Truly unstructured text keeps the
+    legacy fixed-window behavior for deterministic fallback compatibility.
 
-    ``start`` and ``end`` offsets refer to the normalized text consumed here.
+    ``start`` and ``end`` offsets always refer to the normalized text consumed
+    here, and every returned ``chunk.text`` is exactly ``normalized[start:end]``.
+    No synthetic heading prefix or rewritten context is inserted.
     """
-    _validate_chunking_config(chunk_size=chunk_size, overlap=overlap)
+    policy = ChunkingPolicy.from_legacy(chunk_size=chunk_size, overlap=overlap)
 
     normalized = normalize_document_text(text)
     if not normalized:
         return []
 
     base_metadata = dict(metadata or {})
-    spans: list[tuple[int, int, tuple[str, ...]]] = []
+    document_type = _document_type(source=source, metadata=base_metadata)
+    analysis = extract_structural_blocks(normalized, document_type=document_type)
 
-    for section in _section_spans(normalized):
-        spans.extend(
-            (start, end, section.heading_path)
-            for start, end in _chunk_section(
-                normalized,
-                section_start=section.start,
-                section_end=section.end,
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
+    if analysis.has_structure:
+        spans = pack_blocks(
+            normalized,
+            blocks=analysis.blocks,
+            policy=policy,
         )
+        strategy = _CONTEXT_PRESERVING_STRATEGY
+    else:
+        spans = legacy_fixed_window_spans(normalized, policy=policy)
+        strategy = _FIXED_FALLBACK_STRATEGY
 
+    return _project_documents(
+        normalized,
+        source=source,
+        base_metadata=base_metadata,
+        blocks=analysis.blocks,
+        spans=spans,
+        strategy=strategy,
+        policy=policy,
+        document_type=document_type,
+    )
+
+
+def _project_documents(
+    text: str,
+    *,
+    source: str,
+    base_metadata: dict[str, Any],
+    blocks: tuple[StructuralBlock, ...],
+    spans: list[ChunkSpan],
+    strategy: str,
+    policy: ChunkingPolicy,
+    document_type: str,
+) -> list[RetrievalDocument]:
     chunks: list[RetrievalDocument] = []
-    for index, (raw_start, raw_end, heading_path) in enumerate(spans):
-        start, end = _trim_span(normalized, raw_start, raw_end)
+    previous_end: int | None = None
+
+    for span in spans:
+        start, end = _trim_span(text, span.start, span.end)
         if end <= start:
             continue
+        if end - start > policy.max_chars:
+            raise RuntimeError("chunking invariant violated: chunk exceeds hard max")
 
-        chunk = normalized[start:end]
-        chunk_metadata: dict[str, Any] = {
-            **base_metadata,
-            "chunkIndex": index,
-            "start": start,
-            "end": end,
-            "chunkLength": len(chunk),
-            "chunkStrategy": "structure_aware_recursive_v1",
-        }
-        if heading_path:
-            chunk_metadata["heading"] = heading_path[-1]
-            chunk_metadata["headingPath"] = list(heading_path)
+        chunk = text[start:end]
+        # Citation/source-offset invariant. Keep it explicit because changing the
+        # chunker must never silently create synthetic retrieval text.
+        if chunk != text[start:end]:  # pragma: no cover - defensive identity guard
+            raise RuntimeError("chunking invariant violated: source span mismatch")
+
+        intersecting = _intersecting_blocks(blocks, start=start, end=end)
+        metadata = _chunk_metadata(
+            base_metadata=base_metadata,
+            index=len(chunks),
+            start=start,
+            end=end,
+            chunk=chunk,
+            strategy=strategy,
+            split_reason=span.split_reason,
+            previous_end=previous_end,
+            blocks=intersecting,
+            document_type=document_type,
+            policy=policy,
+        )
 
         chunks.append(
             RetrievalDocument(
-                id=_chunk_id(source=source, index=index, text=chunk),
+                id=_chunk_id(source=source, index=len(chunks), text=chunk),
                 text=chunk,
                 source=source,
-                metadata=chunk_metadata,
+                metadata=metadata,
             )
         )
+        previous_end = end
 
     return chunks
 
 
-def _validate_chunking_config(*, chunk_size: int, overlap: int) -> None:
-    if chunk_size <= 0:
-        raise ValueError("chunk_size must be > 0")
-    if overlap < 0:
-        raise ValueError("overlap must be >= 0")
-    if overlap >= chunk_size:
-        raise ValueError("overlap must be smaller than chunk_size")
-
-
-def _section_spans(text: str) -> list[_Section]:
-    headings: list[tuple[int, int, str]] = []
-    offset = 0
-
-    for line_with_newline in text.splitlines(keepends=True):
-        line = line_with_newline.rstrip("\r\n")
-        info = _heading_info(line)
-        if info is not None:
-            level, title = info
-            headings.append((offset, level, title))
-        offset += len(line_with_newline)
-
-    # ``splitlines(keepends=True)`` omits a synthetic trailing line; headings still
-    # have correct offsets, and a heading-free document remains a single section.
-    if not headings:
-        return [_Section(start=0, end=len(text), heading_path=())]
-
-    sections: list[_Section] = []
-    heading_stack: list[str] = []
-    cursor = 0
-
-    for index, (heading_start, level, title) in enumerate(headings):
-        if heading_start > cursor:
-            sections.append(
-                _Section(
-                    start=cursor,
-                    end=heading_start,
-                    heading_path=tuple(heading_stack),
-                )
-            )
-
-        heading_stack = _updated_heading_stack(heading_stack, level=level, title=title)
-        next_start = headings[index + 1][0] if index + 1 < len(headings) else len(text)
-        sections.append(
-            _Section(
-                start=heading_start,
-                end=next_start,
-                heading_path=tuple(heading_stack),
-            )
-        )
-        cursor = next_start
-
-    return [section for section in sections if section.end > section.start]
-
-
-def _heading_info(line: str) -> tuple[int, str] | None:
-    stripped = line.strip()
-    if not stripped or len(stripped) > 120:
-        return None
-
-    markdown = _MARKDOWN_HEADING_RE.match(stripped)
-    if markdown:
-        return len(markdown.group(1)), markdown.group(2).strip()
-
-    chapter = _CHINESE_CHAPTER_RE.match(stripped)
-    if chapter:
-        title = stripped
-        return 1, title
-
-    numbered = _NUMBERED_HEADING_RE.match(stripped)
-    if numbered and not stripped.endswith(("。", "！", "？", ".", "!", "?")):
-        number = numbered.group(1)
-        raw_prefix = stripped[: numbered.start(2)].rstrip()
-        # Avoid treating ordinary ordered-list items such as ``1. install`` as
-        # top-level sections. Hierarchical numbering (1.1/1.2) and unpunctuated
-        # forms such as ``1 Introduction`` remain eligible headings.
-        if "." in number or raw_prefix == number:
-            title = numbered.group(2).strip()
-            level = min(6, number.count(".") + 1)
-            return level, f"{number} {title}".strip()
-
-    chinese = _CHINESE_HEADING_RE.match(stripped)
-    if chinese and not stripped.endswith(("。", "！", "？")):
-        return 2, stripped
-
-    return None
-
-
-def _updated_heading_stack(
-    heading_stack: list[str],
+def _chunk_metadata(
     *,
-    level: int,
-    title: str,
-) -> list[str]:
-    level = max(1, min(6, level))
-    updated = heading_stack[: level - 1]
-    while len(updated) < level - 1:
-        updated.append("")
-    updated.append(title)
-    return [item for item in updated if item]
+    base_metadata: dict[str, Any],
+    index: int,
+    start: int,
+    end: int,
+    chunk: str,
+    strategy: str,
+    split_reason: str,
+    previous_end: int | None,
+    blocks: tuple[StructuralBlock, ...],
+    document_type: str,
+    policy: ChunkingPolicy,
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        **base_metadata,
+        "chunkIndex": index,
+        "start": start,
+        "end": end,
+        "chunkLength": len(chunk),
+        "chunkStrategy": strategy,
+        "splitReason": split_reason,
+        "overlapChars": (
+            max(0, previous_end - start) if previous_end is not None else 0
+        ),
+        "sourceDocumentType": document_type,
+        "chunkPolicy": {
+            "minChars": policy.min_chars,
+            "targetChars": policy.target_chars,
+            "maxChars": policy.max_chars,
+            "overlapChars": policy.overlap_chars,
+        },
+    }
+
+    block_types = _unique(block.block_type for block in blocks)
+    section_ids = _unique(block.section_id for block in blocks)
+    heading_paths = _unique_tuple(block.heading_path for block in blocks if block.heading_path)
+
+    if block_types:
+        metadata["blockTypes"] = block_types
+    if section_ids:
+        metadata["sectionIds"] = section_ids
+        metadata["containsMultipleSections"] = len(section_ids) > 1
+    if heading_paths:
+        metadata["headingPaths"] = [list(path) for path in heading_paths]
+        # Preserve the legacy convenience keys for consumers that expect one
+        # primary heading while exposing all crossed sections separately.
+        metadata["headingPath"] = list(heading_paths[0])
+        metadata["heading"] = heading_paths[0][-1]
+
+    return metadata
 
 
-def _chunk_section(
-    text: str,
+def _intersecting_blocks(
+    blocks: tuple[StructuralBlock, ...],
     *,
-    section_start: int,
-    section_end: int,
-    chunk_size: int,
-    overlap: int,
-) -> list[tuple[int, int]]:
-    start = _skip_whitespace_forward(text, section_start, section_end)
-    result: list[tuple[int, int]] = []
+    start: int,
+    end: int,
+) -> tuple[StructuralBlock, ...]:
+    return tuple(block for block in blocks if block.end > start and block.start < end)
 
-    while start < section_end:
-        target_end = min(section_end, start + chunk_size)
-        if target_end < section_end:
-            end = _find_preferred_break(text, start=start, target_end=target_end)
-            if end <= start:
-                end = target_end
-        else:
-            end = section_end
 
-        trimmed_start, trimmed_end = _trim_span(text, start, end)
-        if trimmed_end > trimmed_start:
-            result.append((trimmed_start, trimmed_end))
+def _document_type(*, source: str, metadata: dict[str, Any]) -> str:
+    value = str(metadata.get("documentType", "") or "").strip().lower().lstrip(".")
+    if value:
+        return value
+    suffix = Path(source).suffix.strip().lower().lstrip(".")
+    return suffix or "text"
 
-        if end >= section_end:
-            break
 
-        next_start = max(section_start, end - overlap)
-        next_start = _align_overlap_start(
-            text,
-            candidate=next_start,
-            chunk_end=end,
-            section_start=section_start,
-            overlap=overlap,
-        )
-        next_start = _skip_whitespace_forward(text, next_start, section_end)
-
-        # Hard progress invariant. This also preserves the legacy fixed-window
-        # behavior for boundary-free text such as ``"A" * 600``.
-        if next_start <= start:
-            next_start = end
-        start = next_start
-
+def _unique(values) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
     return result
 
 
-def _find_preferred_break(text: str, *, start: int, target_end: int) -> int:
-    window_length = target_end - start
-    floor = start + max(1, int(window_length * 0.55))
-    fragment = text[floor:target_end]
-
-    for pattern in ("\n\n", "\n"):
-        position = fragment.rfind(pattern)
-        if position >= 0:
-            return floor + position + len(pattern)
-
-    sentence_end = None
-    for match in _SENTENCE_END_RE.finditer(fragment):
-        sentence_end = match.end()
-    if sentence_end is not None:
-        return floor + sentence_end
-
-    for separator in ("。", "！", "？", "；", ";", "，", ",", " "):
-        position = fragment.rfind(separator)
-        if position >= 0:
-            return floor + position + len(separator)
-
-    return target_end
-
-
-def _align_overlap_start(
-    text: str,
-    *,
-    candidate: int,
-    chunk_end: int,
-    section_start: int,
-    overlap: int,
-) -> int:
-    if overlap <= 0:
-        return chunk_end
-
-    candidate = max(section_start, candidate)
-    if candidate >= chunk_end:
-        return chunk_end
-
-    max_shift = max(8, overlap // 3)
-    search_end = min(chunk_end, candidate + max_shift)
-    fragment = text[candidate:search_end]
-
-    newline = fragment.find("\n")
-    if newline >= 0 and candidate + newline + 1 < chunk_end:
-        return candidate + newline + 1
-
-    sentence = _SENTENCE_END_RE.search(fragment)
-    if sentence is not None and candidate + sentence.end() < chunk_end:
-        return candidate + sentence.end()
-
-    space = fragment.find(" ")
-    if space >= 0 and candidate + space + 1 < chunk_end:
-        return candidate + space + 1
-
-    return candidate
-
-
-def _skip_whitespace_forward(text: str, start: int, end: int) -> int:
-    while start < end and text[start].isspace():
-        start += 1
-    return start
+def _unique_tuple(values) -> list[tuple[str, ...]]:
+    result: list[tuple[str, ...]] = []
+    seen: set[tuple[str, ...]] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _trim_span(text: str, start: int, end: int) -> tuple[int, int]:
