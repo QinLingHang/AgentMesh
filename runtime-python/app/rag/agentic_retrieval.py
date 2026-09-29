@@ -290,6 +290,9 @@ class AgenticRetrievalRound:
     candidate_pool_limit: int = 0
     final_top_k: int = 0
     candidate_budget_reason: str = "base"
+    recovery_decomposition_attempted: bool = False
+    recovery_decomposition_query_count: int = 0
+    recovery_decomposition_status: str = "not_triggered"
 
     @property
     def round_number(self) -> int:
@@ -361,6 +364,7 @@ class AgenticRetrievalExecutor:
         query_transformer: QueryTransformer | None = None,
         grader: EvidenceGrader | None = None,
         budget_policy: CandidateBudgetPolicy | None = None,
+        enable_evidence_retry_decomposition: bool = True,
     ) -> None:
         if (
             transformer is not None
@@ -384,6 +388,9 @@ class AgenticRetrievalExecutor:
         self.budget_policy = (
             budget_policy
             or AdaptiveCandidateBudgetPolicy()
+        )
+        self.enable_evidence_retry_decomposition = bool(
+            enable_evidence_retry_decomposition
         )
 
     async def retrieve(
@@ -438,6 +445,8 @@ class AgenticRetrievalExecutor:
             sufficient=False,
             reason="retrieval not started",
         )
+
+        recovery_decomposition_used = False
 
         for round_index in range(
             effective_max_rounds
@@ -507,6 +516,65 @@ class AgenticRetrievalExecutor:
                     )
                 )
 
+            # Runtime recovery for evidence-insufficient paths.
+            #
+            # Router decomposition remains authoritative when explicitly
+            # enabled. Otherwise, after one insufficient round, allow one
+            # bounded decomposition of the ORIGINAL query. Using the original
+            # query avoids losing a facet that a rewrite may already have
+            # compressed away.
+            recovery_decomposition_attempted = False
+            recovery_decomposition_status = "not_triggered"
+            recovery_decomposition_queries: list[str] = []
+
+            should_recover_with_decomposition = (
+                self.enable_evidence_retry_decomposition
+                and not enable_decomposition
+                and not recovery_decomposition_used
+                and previous_round is not None
+                and not previous_round.sufficient
+            )
+
+            if should_recover_with_decomposition:
+                recovery_decomposition_used = True
+                recovery_decomposition_attempted = True
+
+                try:
+                    proposed_recovery_queries = (
+                        await self
+                        .transformer
+                        .decompose(
+                            original_query
+                        )
+                    )
+                except Exception:
+                    proposed_recovery_queries = []
+                    recovery_decomposition_status = "failed"
+                else:
+                    blocked_queries = {
+                        original_query.lower(),
+                        round_query.lower(),
+                    }
+
+                    recovery_decomposition_queries = [
+                        item
+                        for item in _deduplicate_texts(
+                            proposed_recovery_queries
+                        )
+                        if item.lower()
+                        not in blocked_queries
+                    ]
+
+                    recovery_decomposition_status = (
+                        "applied"
+                        if recovery_decomposition_queries
+                        else "no_distinct_queries"
+                    )
+
+                candidate_queries.extend(
+                    recovery_decomposition_queries
+                )
+
             candidate_queries = (
                 _deduplicate_texts(
                     candidate_queries
@@ -518,11 +586,20 @@ class AgenticRetrievalExecutor:
                     round_query
                 ]
 
+            round_decomposition_enabled = (
+                enable_decomposition
+                or bool(
+                    recovery_decomposition_queries
+                )
+            )
+
             budget = self.budget_policy.resolve(
                 final_top_k=effective_top_k,
                 round_index=round_index,
                 enable_multi_query=enable_multi_query,
-                enable_decomposition=enable_decomposition,
+                enable_decomposition=(
+                    round_decomposition_enabled
+                ),
             )
 
             # ----------------------------------------------------
@@ -605,6 +682,15 @@ class AgenticRetrievalExecutor:
                     final_top_k=effective_top_k,
                     candidate_budget_reason=(
                         budget.reason
+                    ),
+                    recovery_decomposition_attempted=(
+                        recovery_decomposition_attempted
+                    ),
+                    recovery_decomposition_query_count=len(
+                        recovery_decomposition_queries
+                    ),
+                    recovery_decomposition_status=(
+                        recovery_decomposition_status
                     ),
                 )
             )
