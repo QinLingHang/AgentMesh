@@ -82,29 +82,53 @@ func appendDurableSnapshotTx(ctx context.Context, tx *sql.Tx, taskID int64, task
 	return err
 }
 
-// SyncAndListDurableTaskEvents verifies ownership before reading either the job
-// or its journal. A snapshot is persisted on subscription so a completion
-// committed immediately before a gateway crash remains visible after restart.
-// It deliberately contains no result text, prompts, worker endpoints or tokens.
-func (r *MySQL) SyncAndListDurableTaskEvents(ctx context.Context, uid, taskID, after int64, limit int) ([]model.DurableTaskEvent, string, error) {
+// AuthorizeDurableWorkerLiveStream validates the exact current worker attempt
+// before an ephemeral model delta is admitted to Redis. The Redis event still
+// carries execution/fence metadata and is re-validated when read, closing the
+// small race where a fence can advance immediately after this read.
+func (r *MySQL) AuthorizeDurableWorkerLiveStream(ctx context.Context, jobID int64, executionID, workerID, leaseToken string, fenceEpoch int64) (int64, bool, error) {
+	var taskID int64
+	err := r.db.QueryRowContext(ctx, `
+		SELECT t.id
+		FROM runtime_jobs j JOIN tasks t ON t.id=j.task_id
+		WHERE j.id=? AND j.execution_id=? AND j.worker_id=? AND j.lease_token=?
+		  AND j.fence_epoch=? AND j.status IN ('DISPATCHING','ACCEPTED')
+		  AND j.lease_expires_at > UTC_TIMESTAMP(6)
+		  AND t.status='RUNNING' AND t.delivery_mode='durable'
+	`, jobID, executionID, workerID, leaseToken, fenceEpoch).Scan(&taskID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return taskID, true, nil
+}
+
+// SyncAndListDurableTaskEventsWithSnapshot verifies ownership before reading
+// either the job or its journal and returns the authoritative attempt identity
+// used to fence Redis-backed live deltas. A snapshot is persisted on
+// subscription so a completion committed immediately before a gateway crash
+// remains visible after restart.
+func (r *MySQL) SyncAndListDurableTaskEventsWithSnapshot(ctx context.Context, uid, taskID, after int64, limit int) ([]model.DurableTaskEvent, model.DurableTaskStreamSnapshot, error) {
 	if after < 0 || taskID <= 0 || uid <= 0 {
-		return nil, "", ErrNotOwned
+		return nil, model.DurableTaskStreamSnapshot{}, ErrNotOwned
 	}
 	if limit <= 0 || limit > 100 {
 		limit = 100
 	}
-	var taskStatus, jobStatus, executionID string
-	var fenceEpoch int64
+	var snapshot model.DurableTaskStreamSnapshot
+	snapshot.TaskID = taskID
 	err := r.db.QueryRowContext(ctx, `
 		SELECT t.status, j.status, j.execution_id, j.fence_epoch
 		FROM tasks t INNER JOIN runtime_jobs j ON j.task_id = t.id
 		WHERE t.id = ? AND t.user_id = ? AND t.delivery_mode = 'durable'
-	`, taskID, uid).Scan(&taskStatus, &jobStatus, &executionID, &fenceEpoch)
+	`, taskID, uid).Scan(&snapshot.Status, &snapshot.JobStatus, &snapshot.ExecutionID, &snapshot.FenceEpoch)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, "", ErrNotOwned
+		return nil, model.DurableTaskStreamSnapshot{}, ErrNotOwned
 	}
 	if err != nil {
-		return nil, "", err
+		return nil, model.DurableTaskStreamSnapshot{}, err
 	}
 	// Re-check the observed state in the INSERT's SELECT. A concurrent cancel,
 	// completion or fence replacement cannot add a stale snapshot after it wins.
@@ -115,10 +139,10 @@ func (r *MySQL) SyncAndListDurableTaskEvents(ctx context.Context, uid, taskID, a
 		FROM tasks t INNER JOIN runtime_jobs j ON j.task_id=t.id
 		WHERE t.id=? AND t.user_id=? AND t.delivery_mode='durable'
 		  AND t.status=? AND j.status=? AND j.execution_id=? AND j.fence_epoch=?
-	`, durableEventFingerprint(taskStatus, jobStatus, executionID, fenceEpoch),
-		taskID, uid, taskStatus, jobStatus, executionID, fenceEpoch)
+	`, durableEventFingerprint(snapshot.Status, snapshot.JobStatus, snapshot.ExecutionID, snapshot.FenceEpoch),
+		taskID, uid, snapshot.Status, snapshot.JobStatus, snapshot.ExecutionID, snapshot.FenceEpoch)
 	if err != nil {
-		return nil, "", err
+		return nil, model.DurableTaskStreamSnapshot{}, err
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
@@ -127,7 +151,7 @@ func (r *MySQL) SyncAndListDurableTaskEvents(ctx context.Context, uid, taskID, a
 		ORDER BY sequence ASC LIMIT ?
 	`, taskID, after, limit)
 	if err != nil {
-		return nil, "", err
+		return nil, model.DurableTaskStreamSnapshot{}, err
 	}
 	defer rows.Close()
 	events := make([]model.DurableTaskEvent, 0, limit)
@@ -135,12 +159,20 @@ func (r *MySQL) SyncAndListDurableTaskEvents(ctx context.Context, uid, taskID, a
 		var e model.DurableTaskEvent
 		if err := rows.Scan(&e.Sequence, &e.TaskID, &e.Status, &e.JobStatus, &e.FenceEpoch,
 			&e.EventType, &e.Phase, &e.PhaseStatus, &e.CreatedAt); err != nil {
-			return nil, "", err
+			return nil, model.DurableTaskStreamSnapshot{}, err
 		}
 		events = append(events, e)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, "", err
+		return nil, model.DurableTaskStreamSnapshot{}, err
 	}
-	return events, taskStatus, nil
+	return events, snapshot, nil
+}
+
+// SyncAndListDurableTaskEvents preserves the historical repository contract
+// used by existing tests and callers while the browser SSE path consumes the
+// stronger snapshot-aware variant above.
+func (r *MySQL) SyncAndListDurableTaskEvents(ctx context.Context, uid, taskID, after int64, limit int) ([]model.DurableTaskEvent, string, error) {
+	events, snapshot, err := r.SyncAndListDurableTaskEventsWithSnapshot(ctx, uid, taskID, after, limit)
+	return events, snapshot.Status, err
 }

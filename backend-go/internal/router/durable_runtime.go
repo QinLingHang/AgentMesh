@@ -26,4 +26,5 @@ func registerInternalDurableRuntimeRoutes(internal *gin.RouterGroup, deps Depend
 	internal.POST("/runtime/workers/heartbeat", deps.DurableRuntimeHandler.Heartbeat)
 	internal.POST("/runtime/jobs/:jobId/result", deps.DurableRuntimeHandler.Callback)
 	internal.POST("/runtime/jobs/:jobId/phase", deps.DurableRuntimeHandler.WorkerPhase)
+	internal.POST("/runtime/jobs/:jobId/stream", deps.DurableRuntimeHandler.WorkerStream)
 }

@@ -17,6 +17,76 @@ from app.distributed.result_transport import HttpResultTransport, ResultDelivery
 logger = logging.getLogger(__name__)
 
 
+def _split_utf8_chunks(value: str, max_bytes: int) -> list[str]:
+    if not value:
+        return []
+    if len(value.encode("utf-8")) <= max_bytes:
+        return [value]
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for char in value:
+        encoded = char.encode("utf-8")
+        if current and size + len(encoded) > max_bytes:
+            chunks.append("".join(current))
+            current = []
+            size = 0
+        current.append(char)
+        size += len(encoded)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def _safe_failure_category(exc: BaseException) -> str:
+    """Return a bounded non-secret failure taxonomy.
+
+    Never returns exception messages. It only inspects structural exception
+    metadata and the exception chain so wrapped ModelError categories survive
+    DAG / Runtime wrappers.
+    """
+    model_categories = {
+        "auth": "MODEL_AUTH",
+        "timeout": "MODEL_TIMEOUT",
+        "rate_limit": "MODEL_RATE_LIMIT",
+        "unavailable": "MODEL_UNAVAILABLE",
+        "bad_request": "MODEL_BAD_REQUEST",
+        "unknown": "MODEL_UNKNOWN",
+    }
+
+    current: BaseException | None = exc
+    seen: set[int] = set()
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+
+        error_type = getattr(current, "error_type", None)
+        raw_error_type = getattr(error_type, "value", error_type)
+
+        if isinstance(raw_error_type, str):
+            normalized = raw_error_type.strip().lower()
+            if normalized in model_categories:
+                return model_categories[normalized]
+
+        class_name = type(current).__name__.strip()
+
+        if class_name == "ModelRuntimeResolutionError":
+            return "MODEL_RUNTIME_RESOLUTION"
+
+        current = (
+            getattr(current, "__cause__", None)
+            or getattr(current, "__context__", None)
+        )
+
+    name = type(exc).__name__.strip() or "RuntimeExecutionError"
+    safe = "".join(
+        ch for ch in name
+        if ch.isalnum() or ch in {"_", "-"}
+    )[:80]
+
+    return safe or "RuntimeExecutionError"
+
+
 class DurableExecutionEnvelope(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -79,7 +149,7 @@ class DurableExecutionManager:
         shutdown_grace_seconds: float,
         dedupe_retention_seconds: float,
         runner: Callable[[RuntimeRequest], Awaitable[RuntimeResponse]],
-        event_runner: Callable[[RuntimeRequest, Callable[[object], None]], Awaitable[RuntimeResponse]] | None = None,
+        event_runner: Callable[[RuntimeRequest, Callable[[object], None], Callable[[str], None]], Awaitable[RuntimeResponse]] | None = None,
         node_id: str = "",
         node_zone: str = "",
         node_version: str = "",
@@ -260,32 +330,41 @@ class DurableExecutionManager:
             return True
 
     async def _execute(self, envelope: DurableExecutionEnvelope) -> None:
-        # Trace delivery is a bounded, best-effort side channel. No user text,
-        # tool arguments/results or raw trace titles ever leave this worker.
+        # Trace and answer-delta delivery are bounded, best-effort side channels.
+        # The authoritative Runtime response still travels through the durable
+        # result transport and is persisted by Go/MySQL exactly once.
         phase_queue: asyncio.Queue[tuple[int, str, str]] | None = None
         phase_sender: asyncio.Task[None] | None = None
-        sequence = 0
+        delta_queue: asyncio.Queue[tuple[int, str]] | None = None
+        delta_sender: asyncio.Task[None] | None = None
+        phase_sequence = 0
+        delta_sequence = 0
         if self._event_runner is not None and self.control_plane_base_url and envelope.fence_epoch > 0:
             phase_queue = asyncio.Queue(maxsize=64)
+            delta_queue = asyncio.Queue(maxsize=512)
             phase_sender = asyncio.create_task(
                 self._send_worker_phases(envelope, phase_queue),
                 name=f"agentmesh-phase-{envelope.execution_id}",
+            )
+            delta_sender = asyncio.create_task(
+                self._send_worker_deltas(envelope, delta_queue),
+                name=f"agentmesh-delta-{envelope.execution_id}",
             )
 
         loop = asyncio.get_running_loop()
 
         def on_trace(trace: object) -> None:
-            nonlocal sequence
+            nonlocal phase_sequence
             if phase_queue is None or not self._is_current_attempt(envelope):
                 return
             kind = str(getattr(trace, "kind", "")).strip().lower()
             status = str(getattr(trace, "status", "")).strip().lower()
             if kind not in {"task", "planner", "scheduler", "agent", "tool", "mcp", "rag", "knowledge", "memory", "model"}:
                 return
-            if status not in {"running", "completed", "error", "skipped"} or sequence >= 256:
+            if status not in {"running", "completed", "error", "skipped"} or phase_sequence >= 256:
                 return
-            sequence += 1
-            ordinal = sequence
+            phase_sequence += 1
+            ordinal = phase_sequence
 
             def enqueue() -> None:
                 try:
@@ -296,19 +375,46 @@ class DurableExecutionManager:
 
             loop.call_soon_threadsafe(enqueue)
 
-        async def flush_phases() -> None:
-            if phase_sender is None or phase_queue is None:
+        def on_delta(chunk: str) -> None:
+            nonlocal delta_sequence
+            if delta_queue is None or not self._is_current_attempt(envelope):
+                return
+            value = str(chunk or "")
+            if not value:
+                return
+            for bounded in _split_utf8_chunks(value, 16 * 1024):
+                if delta_sequence >= 1_000_000:
+                    return
+                delta_sequence += 1
+                ordinal = delta_sequence
+
+                def enqueue(item: tuple[int, str] = (ordinal, bounded)) -> None:
+                    try:
+                        delta_queue.put_nowait(item)
+                    except asyncio.QueueFull:
+                        # Live rendering may degrade during a control-plane outage,
+                        # but final answer persistence and job outcome continue.
+                        pass
+
+                loop.call_soon_threadsafe(enqueue)
+
+        async def flush_sidechannels() -> None:
+            queues = [queue for queue in (phase_queue, delta_queue) if queue is not None]
+            if not queues:
                 return
             # Run scheduled callbacks before waiting for pending HTTP writes.
             await asyncio.sleep(0)
             try:
-                await asyncio.wait_for(phase_queue.join(), timeout=1.5)
+                await asyncio.wait_for(
+                    asyncio.gather(*(queue.join() for queue in queues)),
+                    timeout=2.5,
+                )
             except asyncio.TimeoutError:
                 pass
 
         try:
-            if self._event_runner is not None and phase_queue is not None:
-                response = await self._event_runner(envelope.request, on_trace)
+            if self._event_runner is not None and phase_queue is not None and delta_queue is not None:
+                response = await self._event_runner(envelope.request, on_trace, on_delta)
             else:
                 response = await self._runner(envelope.request)
         except asyncio.CancelledError:
@@ -316,30 +422,39 @@ class DurableExecutionManager:
             # canceled by a higher fence. A previously stored outbox event is
             # preserved and Go will apply the authoritative fence.
             if self._is_current_attempt(envelope):
-                await flush_phases()
+                await flush_sidechannels()
                 await self._deliver_callback(envelope, status="canceled")
             raise
         except Exception as exc:
-            # Never send raw exception text: it may contain prompt/tool/provider
-            # data. The class name is enough for control-plane failure taxonomy.
-            category = type(exc).__name__.strip() or "RuntimeExecutionError"
-            await flush_phases()
+            # Never send raw exception text: it may contain prompts, tool
+            # payloads, provider responses or credentials. Walk only the
+            # structural exception chain and retain a bounded safe taxonomy.
+            category = _safe_failure_category(exc)
+            logger.warning(
+                "runtime execution failed: category=%s",
+                category,
+            )
+            await flush_sidechannels()
             await self._deliver_callback(
                 envelope,
                 status="failed",
                 error_category=category,
             )
         else:
-            await flush_phases()
+            await flush_sidechannels()
             await self._deliver_callback(
                 envelope,
                 status="completed",
                 response=response,
             )
         finally:
-            if phase_sender is not None:
-                phase_sender.cancel()
-                await asyncio.gather(phase_sender, return_exceptions=True)
+            for sender in (phase_sender, delta_sender):
+                if sender is not None:
+                    sender.cancel()
+            await asyncio.gather(
+                *(sender for sender in (phase_sender, delta_sender) if sender is not None),
+                return_exceptions=True,
+            )
             asyncio.create_task(self._send_heartbeat_once())
 
     async def _send_worker_phases(
@@ -372,6 +487,47 @@ class DurableExecutionManager:
                     except (httpx.HTTPError, OSError):
                         # Loss of transient phase telemetry never retries a job.
                         pass
+                finally:
+                    queue.task_done()
+
+    async def _send_worker_deltas(
+        self,
+        envelope: DurableExecutionEnvelope,
+        queue: asyncio.Queue[tuple[int, str]],
+    ) -> None:
+        endpoint = (
+            f"{self.control_plane_base_url}/internal/v1/runtime/jobs/"
+            f"{envelope.job_id}/stream"
+        )
+        headers = {"X-Internal-Token": self.internal_token}
+        async with httpx.AsyncClient(timeout=1.5, trust_env=False) as client:
+            while True:
+                ordinal, delta = await queue.get()
+                try:
+                    if not self._is_current_attempt(envelope):
+                        continue
+                    payload = {
+                        "workerId": self.worker_id,
+                        "executionId": envelope.execution_id,
+                        "leaseToken": envelope.lease_token,
+                        "fenceEpoch": envelope.fence_epoch,
+                        "ordinal": ordinal,
+                        "type": "delta",
+                        "delta": delta,
+                    }
+                    # Deterministic fence+ordinal Redis IDs make one bounded
+                    # retry safe if the first response is lost after commit.
+                    for attempt in range(2):
+                        try:
+                            response = await client.post(endpoint, json=payload, headers=headers)
+                            if 200 <= int(getattr(response, "status_code", 0)) < 300:
+                                break
+                            if int(getattr(response, "status_code", 0)) < 500:
+                                break
+                        except (httpx.HTTPError, OSError):
+                            pass
+                        if attempt == 0:
+                            await asyncio.sleep(0.05)
                 finally:
                     queue.task_done()
 

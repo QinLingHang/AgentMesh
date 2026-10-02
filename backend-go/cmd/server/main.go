@@ -242,6 +242,7 @@ func main() {
 			CircuitOpenFor:          cfg.DurableRuntime.CircuitOpenFor,
 		},
 	)
+	durableRuntimeS.SetLiveStreamStore(cache.NewDurableStreamStore(rdb, 0, 0))
 
 	runtimeEventConsumer := eventbus.NewRuntimeEventConsumer(
 		sqlDB,

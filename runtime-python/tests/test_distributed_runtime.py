@@ -11,6 +11,7 @@ from app.distributed.execution_manager import (
     WorkerUnavailable,
 )
 from app.schemas import RuntimeRequest
+from app.models.errors import ModelError, ModelErrorType
 
 
 def request(request_id: str = "durable-request") -> RuntimeRequest:
@@ -173,6 +174,44 @@ async def test_failure_callback_uses_exception_class_only_never_raw_secret_detai
     serialized = repr(callbacks)
     assert "DO-NOT-LEAK" not in serialized
     assert "secret-token" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_wrapped_model_failure_preserves_safe_taxonomy_without_secret_detail():
+    callbacks: list[dict] = []
+
+    async def runner(_):
+        try:
+            raise ModelError(
+                ModelErrorType.BAD_REQUEST,
+                "provider-body api_key=DO-NOT-LEAK",
+                retryable=False,
+            )
+        except ModelError as exc:
+            raise RuntimeError("runtime wrapper") from exc
+
+    m = manager(runner=runner)
+    m._deliver_callback = MethodType(
+        lambda self, env, **kw: capture_callbacks(
+            callbacks,
+            self,
+            env,
+            **kw,
+        ),
+        m,
+    )
+
+    await m.submit(envelope())
+    await asyncio.gather(
+        *(record.task for record in m._records.values())
+    )
+
+    assert callbacks[0]["status"] == "failed"
+    assert callbacks[0]["error_category"] == "MODEL_BAD_REQUEST"
+
+    serialized = repr(callbacks)
+    assert "DO-NOT-LEAK" not in serialized
+    assert "provider-body" not in serialized
 
 
 @pytest.mark.asyncio

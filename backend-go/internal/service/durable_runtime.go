@@ -41,6 +41,7 @@ type DurableRuntimeService struct {
 	repo        repository.DurableRuntimeRepository
 	taskService *TaskService
 	runtime     *runtimeclient.Client
+	liveStream  DurableLiveStreamStore
 	cfg         DurableRuntimeConfig
 
 	cancel          context.CancelFunc
@@ -58,6 +59,25 @@ type DurableExecutionCallback struct {
 	Status          string                         `json:"status"`
 	Response        *runtimeclient.ExecuteResponse `json:"response,omitempty"`
 	ErrorCategory   string                         `json:"errorCategory,omitempty"`
+}
+
+// DurableLiveStreamStore is a short-lived replay side channel for model output.
+// Implementations must never replace MySQL task/result persistence.
+type DurableLiveStreamStore interface {
+	AppendDelta(context.Context, model.DurableLiveDelta) (string, bool, error)
+	ReadDeltas(context.Context, int64, string, int64) ([]model.DurableLiveDelta, error)
+}
+
+// DurableWorkerDelta carries only generated answer text plus the minimum
+// worker-attempt identity required for lease/fence validation.
+type DurableWorkerDelta struct {
+	WorkerID    string `json:"workerId"`
+	ExecutionID string `json:"executionId"`
+	LeaseToken  string `json:"leaseToken"`
+	FenceEpoch  int64  `json:"fenceEpoch"`
+	Ordinal     int64  `json:"ordinal"`
+	Type        string `json:"type"`
+	Delta       string `json:"delta"`
 }
 
 // DurableWorkerPhase is deliberately metadata-only. The handler ignores extra
@@ -100,6 +120,56 @@ func (s *DurableRuntimeService) WorkerPhase(ctx context.Context, jobID int64, ph
 	}
 	return writer.AppendDurableWorkerPhase(ctx, jobID, phase.ExecutionID, phase.WorkerID,
 		phase.LeaseToken, phase.FenceEpoch, phase.Ordinal, phase.Phase, phase.Status)
+}
+
+// SetLiveStreamStore enables bounded Redis-backed durable token replay. It is
+// intentionally optional for tests and degraded deployments; task completion
+// correctness never depends on the live stream being available.
+func (s *DurableRuntimeService) SetLiveStreamStore(store DurableLiveStreamStore) {
+	if s != nil {
+		s.liveStream = store
+	}
+}
+
+// WorkerDelta admits one bounded model-output chunk from the exact current
+// worker attempt. Stale workers are rejected by lease/fence identity before
+// Redis append, and the same metadata is re-checked again during browser read.
+func (s *DurableRuntimeService) WorkerDelta(ctx context.Context, jobID int64, event DurableWorkerDelta) (bool, error) {
+	event.WorkerID = strings.TrimSpace(event.WorkerID)
+	event.ExecutionID = strings.TrimSpace(event.ExecutionID)
+	event.LeaseToken = strings.TrimSpace(event.LeaseToken)
+	event.Type = strings.ToLower(strings.TrimSpace(event.Type))
+	if event.Type == "" {
+		event.Type = "delta"
+	}
+	if jobID <= 0 || event.WorkerID == "" || event.ExecutionID == "" || event.LeaseToken == "" ||
+		event.FenceEpoch <= 0 || event.Ordinal <= 0 || event.Ordinal > 1_000_000 ||
+		event.Type != "delta" || event.Delta == "" || len([]byte(event.Delta)) > 32*1024 {
+		return false, ErrInvalidInput
+	}
+	if s.liveStream == nil {
+		return false, errors.New("durable live stream unavailable")
+	}
+	authorizer, ok := s.repo.(interface {
+		AuthorizeDurableWorkerLiveStream(context.Context, int64, string, string, string, int64) (int64, bool, error)
+	})
+	if !ok {
+		return false, errors.New("durable live stream authorization unavailable")
+	}
+	taskID, accepted, err := authorizer.AuthorizeDurableWorkerLiveStream(
+		ctx, jobID, event.ExecutionID, event.WorkerID, event.LeaseToken, event.FenceEpoch,
+	)
+	if err != nil || !accepted {
+		return false, err
+	}
+	_, _, err = s.liveStream.AppendDelta(ctx, model.DurableLiveDelta{
+		TaskID: taskID, ExecutionID: event.ExecutionID, FenceEpoch: event.FenceEpoch,
+		Ordinal: event.Ordinal, Delta: event.Delta, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func NewDurableRuntimeService(
@@ -983,18 +1053,33 @@ func (s *DurableRuntimeService) Topology(ctx context.Context) (*model.RuntimeTop
 	return topology, nil
 }
 
-// TaskEvents reads an owner-scoped, metadata-only durable state journal. The
-// repository validates ownership on every poll, including after reconnect.
-func (s *DurableRuntimeService) TaskEvents(ctx context.Context, uid, taskID, after int64) ([]model.DurableTaskEvent, string, error) {
+// TaskEventBatch reads the owner-scoped durable state journal together with
+// the authoritative attempt identity used to fence Redis-backed live deltas.
+func (s *DurableRuntimeService) TaskEventBatch(ctx context.Context, uid, taskID, after int64) ([]model.DurableTaskEvent, model.DurableTaskStreamSnapshot, error) {
 	reader, ok := s.repo.(interface {
-		SyncAndListDurableTaskEvents(context.Context, int64, int64, int64, int) ([]model.DurableTaskEvent, string, error)
+		SyncAndListDurableTaskEventsWithSnapshot(context.Context, int64, int64, int64, int) ([]model.DurableTaskEvent, model.DurableTaskStreamSnapshot, error)
 	})
 	if !ok {
-		return nil, "", errors.New("durable event storage unavailable")
+		return nil, model.DurableTaskStreamSnapshot{}, errors.New("durable event storage unavailable")
 	}
-	events, status, err := reader.SyncAndListDurableTaskEvents(ctx, uid, taskID, after, 100)
+	events, snapshot, err := reader.SyncAndListDurableTaskEventsWithSnapshot(ctx, uid, taskID, after, 100)
 	if errors.Is(err, repository.ErrNotOwned) {
-		return nil, "", ErrNotFound
+		return nil, model.DurableTaskStreamSnapshot{}, ErrNotFound
 	}
-	return events, status, err
+	return events, snapshot, err
+}
+
+// TaskEvents preserves the historical state-only service contract.
+func (s *DurableRuntimeService) TaskEvents(ctx context.Context, uid, taskID, after int64) ([]model.DurableTaskEvent, string, error) {
+	events, snapshot, err := s.TaskEventBatch(ctx, uid, taskID, after)
+	return events, snapshot.Status, err
+}
+
+// TaskLiveDeltas reads short-lived answer chunks only after the caller has
+// completed the owner-scoped MySQL check through TaskEventBatch.
+func (s *DurableRuntimeService) TaskLiveDeltas(ctx context.Context, taskID int64, after string) ([]model.DurableLiveDelta, error) {
+	if s == nil || s.liveStream == nil {
+		return nil, nil
+	}
+	return s.liveStream.ReadDeltas(ctx, taskID, after, 256)
 }
