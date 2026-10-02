@@ -1,0 +1,300 @@
+/* ============================================================
+   AgentMesh Element Plus Light Theme
+   Prevent Vben dark tokens from leaking into AgentMesh.
+   ============================================================ */
+
+html.agentmesh-ui-light {
+  --el-color-primary: #6c4cff !important;
+  --el-color-primary-light-3: #8b76ff !important;
+  --el-color-primary-light-5: #aa9cff !important;
+  --el-color-primary-light-7: #cec6ff !important;
+  --el-color-primary-light-8: #e1dcff !important;
+  --el-color-primary-light-9: #f2efff !important;
+  --el-color-primary-dark-2: #5638e2 !important;
+  --el-color-success: #2cbf79 !important;
+  --el-color-warning: #d8932f !important;
+  --el-color-danger: #e55d6d !important;
+  --el-bg-color: #fff !important;
+  --el-bg-color-page: #f7f8fc !important;
+  --el-bg-color-overlay: #fff !important;
+  --el-fill-color: #f4f5f9 !important;
+  --el-fill-color-light: #f7f8fc !important;
+  --el-fill-color-lighter: #fafbfe !important;
+  --el-fill-color-extra-light: #fcfcff !important;
+  --el-fill-color-dark: #eceff5 !important;
+  --el-fill-color-darker: #e4e8f0 !important;
+  --el-fill-color-blank: #fff !important;
+  --el-text-color-primary: #202334 !important;
+  --el-text-color-regular: #596176 !important;
+  --el-text-color-secondary: #8b92a6 !important;
+  --el-text-color-placeholder: #9ca4b6 !important;
+  --el-text-color-disabled: #b6bdca !important;
+  --el-border-color: #e3e6ef !important;
+  --el-border-color-light: #eceef4 !important;
+  --el-border-color-lighter: #f1f2f7 !important;
+  --el-border-color-extra-light: #f6f7fa !important;
+  --el-border-color-dark: #d6dbe7 !important;
+  --el-border-color-darker: #c8cedc !important;
+  --el-mask-color: rgb(24 28 42 / 42%) !important;
+  --el-box-shadow: 0 10px 30px rgb(47 43 88 / 9%) !important;
+  --el-box-shadow-light: 0 8px 24px rgb(47 43 88 / 8%) !important;
+
+  color-scheme: light !important;
+}
+
+html.agentmesh-ui-light body {
+  color: #202334 !important;
+  background: #f7f8fc !important;
+}
+
+/* ---------------- Inputs / Selects ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-input__wrapper,
+html.agentmesh-ui-light .agentmesh-app .el-select__wrapper,
+html.agentmesh-ui-light .agentmesh-app .el-date-editor.el-input__wrapper {
+  min-height: 38px;
+  background: #fff !important;
+  border-radius: 10px !important;
+  box-shadow: 0 0 0 1px #e2e6ef inset !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-input__wrapper:hover,
+html.agentmesh-ui-light .agentmesh-app .el-select__wrapper:hover {
+  box-shadow: 0 0 0 1px #cdd3e0 inset !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-input__wrapper.is-focus,
+html.agentmesh-ui-light .agentmesh-app .el-select__wrapper.is-focused {
+  box-shadow:
+    0 0 0 1px #765cff inset,
+    0 0 0 3px rgb(108 76 255 / 9%) !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-input__inner,
+html.agentmesh-ui-light .agentmesh-app .el-select__selected-item {
+  color: #202334 !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-input__inner::placeholder,
+html.agentmesh-ui-light .agentmesh-app .el-textarea__inner::placeholder {
+  color: #9ca4b6 !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-textarea__inner {
+  color: #202334 !important;
+  background: #fff !important;
+  border: 0 !important;
+  border-radius: 10px !important;
+  box-shadow: 0 0 0 1px #e2e6ef inset !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-textarea__inner:focus {
+  box-shadow:
+    0 0 0 1px #765cff inset,
+    0 0 0 3px rgb(108 76 255 / 9%) !important;
+}
+
+/* ---------------- Input number ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-input-number__decrease,
+html.agentmesh-ui-light .agentmesh-app .el-input-number__increase {
+  color: #687085 !important;
+  background: #f7f8fc !important;
+  border-color: #e3e6ef !important;
+}
+
+/* ---------------- Buttons ---------------- */
+
+/* ?????????????? */
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--default:not(.is-link) {
+  color: #3f465b !important;
+  background: #fff !important;
+  border-color: #dfe3ed !important;
+  box-shadow: none !important;
+}
+
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--default:not(.is-link):hover {
+  color: #6046e5 !important;
+  background: #f7f5ff !important;
+  border-color: #cfc6ff !important;
+}
+
+/* ????? AgentMesh ? */
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--primary:not(.is-link) {
+  color: #fff !important;
+  background: #6c4cff !important;
+  border-color: #6c4cff !important;
+  box-shadow: 0 7px 18px rgb(108 76 255 / 17%) !important;
+}
+
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--primary:not(.is-link):hover {
+  background: #7b61ff !important;
+  border-color: #7b61ff !important;
+}
+
+/* ????????????? */
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--danger:not(.is-link) {
+  color: #d94f63 !important;
+  background: #fff6f7 !important;
+  border-color: #ffd8df !important;
+  box-shadow: none !important;
+}
+
+html.agentmesh-ui-light
+  .agentmesh-app
+  .el-button.el-button--danger:not(.is-link):hover {
+  color: #c94156 !important;
+  background: #fff0f2 !important;
+  border-color: #ffbdc8 !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-button.is-link {
+  background: transparent !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* ---------------- Switch ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-switch {
+  --el-switch-on-color: #6c4cff !important;
+  --el-switch-off-color: #d8dde8 !important;
+}
+
+/* ---------------- Tabs ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-tabs__item {
+  color: #8b92a6 !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tabs__item:hover,
+html.agentmesh-ui-light .agentmesh-app .el-tabs__item.is-active {
+  color: #6c4cff !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tabs__active-bar {
+  background: #6c4cff !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tabs__nav-wrap::after {
+  height: 1px !important;
+  background: #e8eaf2 !important;
+}
+
+/* ---------------- Tags ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-tag:not(.el-tag--success):not(.el-tag--danger):not(.el-tag--warning) {
+  color: #5e45dc !important;
+  background: #f2efff !important;
+  border-color: #ddd6ff !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tag.el-tag--success {
+  color: #168a57 !important;
+  background: #ecfbf4 !important;
+  border-color: #c9f2df !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tag.el-tag--danger {
+  color: #d64d61 !important;
+  background: #fff2f4 !important;
+  border-color: #ffd6dc !important;
+}
+
+html.agentmesh-ui-light .agentmesh-app .el-tag.el-tag--warning {
+  color: #9d6a16 !important;
+  background: #fff8ea !important;
+  border-color: #f5dfad !important;
+}
+
+/* ---------------- Tables ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-table {
+  --el-table-bg-color: #fff !important;
+  --el-table-tr-bg-color: #fff !important;
+  --el-table-header-bg-color: #fafbfe !important;
+  --el-table-row-hover-bg-color: #faf9ff !important;
+  --el-table-border-color: #eceef4 !important;
+  --el-table-text-color: #42495c !important;
+  --el-table-header-text-color: #777f93 !important;
+}
+
+/* ---------------- Forms ---------------- */
+
+html.agentmesh-ui-light .agentmesh-app .el-form-item__label {
+  color: #555d70 !important;
+}
+
+/* ---------------- Dialog / Drawer ---------------- */
+
+html.agentmesh-ui-light .el-dialog,
+html.agentmesh-ui-light .el-drawer {
+  color: #202334 !important;
+  background: #fff !important;
+}
+
+html.agentmesh-ui-light .el-dialog__title,
+html.agentmesh-ui-light .el-drawer__title {
+  color: #202334 !important;
+}
+
+/* ---------------- Teleported Select / Dropdown ---------------- */
+
+html.agentmesh-ui-light .el-popper,
+html.agentmesh-ui-light .el-select__popper,
+html.agentmesh-ui-light .el-dropdown__popper {
+  color: #202334 !important;
+  background: #fff !important;
+  border-color: #e3e6ef !important;
+  box-shadow: 0 12px 30px rgb(47 43 88 / 10%) !important;
+}
+
+html.agentmesh-ui-light .el-select-dropdown__item {
+  color: #4d5568 !important;
+}
+
+html.agentmesh-ui-light .el-select-dropdown__item.is-hovering {
+  background: #f7f5ff !important;
+}
+
+html.agentmesh-ui-light .el-select-dropdown__item.is-selected {
+  color: #6c4cff !important;
+  background: #f2efff !important;
+}
+
+/* ---------------- Checkbox / Radio ---------------- */
+
+html.agentmesh-ui-light .el-checkbox__input.is-checked .el-checkbox__inner,
+html.agentmesh-ui-light .el-radio__input.is-checked .el-radio__inner {
+  background: #6c4cff !important;
+  border-color: #6c4cff !important;
+}
+
+html.agentmesh-ui-light .el-checkbox__input.is-checked + .el-checkbox__label,
+html.agentmesh-ui-light .el-radio__input.is-checked + .el-radio__label {
+  color: #6046e5 !important;
+}
+
+/* ---------------- Loading / empty ---------------- */
+
+html.agentmesh-ui-light .el-loading-mask {
+  background: rgb(255 255 255 / 78%) !important;
+}
+
+/* ?? AgentMesh ????????? */
+html.agentmesh-ui-light .agentmesh-app,
+html.agentmesh-ui-light .am-shell,
+html.agentmesh-ui-light .am-shell-main,
+html.agentmesh-ui-light .am-shell-content {
+  background: #f7f8fc !important;
+}
