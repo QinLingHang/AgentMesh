@@ -269,83 +269,81 @@ func (r *MySQL) HeartbeatRuntimeWorker(ctx context.Context, worker model.Runtime
 		worker.NodeCapacity = worker.Capacity
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
+	// Commit the authoritative worker heartbeat before refreshing derived node
+	// topology. The former transaction held the worker row/index X locks while
+	// the node aggregate scanned runtime_workers again, creating the inverse
+	// lock order of stale detection. Each unit is idempotent and independently
+	// retried; a later aggregate failure cannot roll back a live heartbeat.
+	if err := withMySQLLockRetry(ctx, mysqlLockRetryAttempts, func() error {
+		_, err := r.db.ExecContext(ctx, `
+			INSERT INTO runtime_workers(
+				worker_id, node_id, zone, version, started_at, endpoint, capacity,
+				active_executions, draining, status, last_heartbeat_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', UTC_TIMESTAMP(6))
+			ON DUPLICATE KEY UPDATE
+				node_id = VALUES(node_id),
+				zone = VALUES(zone),
+				version = VALUES(version),
+				started_at = COALESCE(runtime_workers.started_at, VALUES(started_at)),
+				endpoint = VALUES(endpoint),
+				capacity = VALUES(capacity),
+				active_executions = VALUES(active_executions),
+				draining = VALUES(draining),
+				status = 'ACTIVE',
+				last_heartbeat_at = UTC_TIMESTAMP(6)
+		`, worker.WorkerID, worker.NodeID, worker.Zone, worker.Version, worker.StartedAt,
+			worker.Endpoint, worker.Capacity, worker.ActiveExecutions, worker.Draining)
 		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO runtime_workers(
-			worker_id, node_id, zone, version, started_at, endpoint, capacity,
-			active_executions, draining, status, last_heartbeat_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', UTC_TIMESTAMP(6))
-		ON DUPLICATE KEY UPDATE
-			node_id = VALUES(node_id),
-			zone = VALUES(zone),
-			version = VALUES(version),
-			started_at = COALESCE(runtime_workers.started_at, VALUES(started_at)),
-			endpoint = VALUES(endpoint),
-			capacity = VALUES(capacity),
-			active_executions = VALUES(active_executions),
-			draining = VALUES(draining),
-			status = 'ACTIVE',
-			last_heartbeat_at = UTC_TIMESTAMP(6)
-	`, worker.WorkerID, worker.NodeID, worker.Zone, worker.Version, worker.StartedAt,
-		worker.Endpoint, worker.Capacity, worker.ActiveExecutions, worker.Draining)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO runtime_nodes(
-			node_id, zone, version, capacity, declared_capacity, active_executions, worker_count,
-			draining, status, last_heartbeat_at
-		) VALUES(?, ?, ?, ?, ?, ?, 1, ?, 'ACTIVE', UTC_TIMESTAMP(6))
-		ON DUPLICATE KEY UPDATE
-			zone = VALUES(zone),
-			version = VALUES(version),
-			declared_capacity = VALUES(declared_capacity),
-			draining = VALUES(draining),
-			status = 'ACTIVE',
-			last_heartbeat_at = UTC_TIMESTAMP(6)
-	`, worker.NodeID, worker.Zone, worker.Version, worker.NodeCapacity, worker.NodeCapacity,
-		worker.ActiveExecutions, worker.Draining)
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 
-	// Aggregate the current worker view into the node row so multiple Runtime
-	// worker processes on one machine are capacity-aware rather than racing on
-	// independent heartbeat counters.
-	_, err = tx.ExecContext(ctx, `
-		UPDATE runtime_nodes n
-		SET n.capacity = LEAST(
-				GREATEST(n.declared_capacity, 1),
-				GREATEST(COALESCE((
-					SELECT SUM(w.capacity) FROM runtime_workers w
-					WHERE w.node_id = ? AND w.status = 'ACTIVE'
-				), 0), 1)
-			),
-			n.active_executions = COALESCE((
-				SELECT COUNT(*) FROM runtime_jobs j
-				WHERE j.node_id = ? AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')
-			), 0),
-			n.worker_count = COALESCE((
-				SELECT COUNT(*) FROM runtime_workers w
-				WHERE w.node_id = ? AND w.status = 'ACTIVE'
-			), 0),
-			n.draining = CASE WHEN EXISTS(
-				SELECT 1 FROM runtime_workers w
-				WHERE w.node_id = ? AND w.status = 'ACTIVE' AND w.draining = 0
-			) THEN 0 ELSE 1 END,
-			n.last_heartbeat_at = UTC_TIMESTAMP(6)
-		WHERE n.node_id = ?
-	`, worker.NodeID, worker.NodeID, worker.NodeID, worker.NodeID, worker.NodeID)
-	if err != nil {
+	if err := withMySQLLockRetry(ctx, mysqlLockRetryAttempts, func() error {
+		_, err := r.db.ExecContext(ctx, `
+			INSERT INTO runtime_nodes(
+				node_id, zone, version, capacity, declared_capacity, active_executions, worker_count,
+				draining, status, last_heartbeat_at
+			) VALUES(?, ?, ?, ?, ?, ?, 1, ?, 'ACTIVE', UTC_TIMESTAMP(6))
+			ON DUPLICATE KEY UPDATE
+				zone = VALUES(zone),
+				version = VALUES(version),
+				declared_capacity = VALUES(declared_capacity),
+				draining = VALUES(draining),
+				status = 'ACTIVE',
+				last_heartbeat_at = UTC_TIMESTAMP(6)
+		`, worker.NodeID, worker.Zone, worker.Version, worker.NodeCapacity, worker.NodeCapacity,
+			worker.ActiveExecutions, worker.Draining)
+		return err
+	}); err != nil {
 		return err
 	}
-	return tx.Commit()
+
+	return withMySQLLockRetry(ctx, mysqlLockRetryAttempts, func() error {
+		return r.refreshRuntimeNodeAggregate(ctx, worker.NodeID)
+	})
+}
+
+func (r *MySQL) refreshRuntimeNodeAggregate(ctx context.Context, nodeID string) error {
+	var activeCapacity, activeExecutions, workerCount, nonDrainingWorkers int
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN w.status='ACTIVE' THEN w.capacity ELSE 0 END), 0),
+			(SELECT COUNT(*) FROM runtime_jobs j
+			 WHERE j.node_id=? AND j.status IN ('LEASED','DISPATCHING','ACCEPTED','RESULT_PENDING','COMPLETING')),
+			COALESCE(SUM(CASE WHEN w.status='ACTIVE' THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN w.status='ACTIVE' AND w.draining=0 THEN 1 ELSE 0 END), 0)
+		FROM runtime_workers w
+		WHERE w.node_id=?
+	`, nodeID, nodeID).Scan(&activeCapacity, &activeExecutions, &workerCount, &nonDrainingWorkers); err != nil {
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE runtime_nodes
+		SET capacity=LEAST(GREATEST(declared_capacity, 1), GREATEST(?, 1)),
+			active_executions=?, worker_count=?, draining=?, last_heartbeat_at=UTC_TIMESTAMP(6)
+		WHERE node_id=?
+	`, activeCapacity, activeExecutions, workerCount, nonDrainingWorkers == 0, nodeID)
+	return err
 }
 
 func (r *MySQL) RenewRuntimeExecutionLeases(
@@ -612,7 +610,7 @@ func (r *MySQL) ClaimNextRuntimeJob(
 	res, err := tx.ExecContext(ctx, `
 		UPDATE runtime_jobs
 		SET status = 'LEASED', worker_id = ?, node_id = ?, lease_token = ?,
-			fence_epoch = fence_epoch + 1, lease_expires_at = ?,
+			execution_id = UUID(), fence_epoch = fence_epoch + 1, lease_expires_at = ?,
 			attempt_count = attempt_count + 1, last_error = NULL
 		WHERE id = ? AND status = 'QUEUED'
 	`, workerID, nodeID, leaseToken, leaseExpires, jobID)
@@ -1001,24 +999,73 @@ func (r *MySQL) RecoverLostAcceptedRuntimeJobs(
 }
 
 func (r *MySQL) MarkStaleRuntimeTopology(ctx context.Context, staleBefore time.Time) (int64, int64, error) {
-	workerRes, err := r.db.ExecContext(ctx, `
-		UPDATE runtime_workers
-		SET status='OFFLINE'
-		WHERE status='ACTIVE' AND last_heartbeat_at < ?
-	`, staleBefore.UTC())
+	var workers, nodes int64
+	err := withMySQLLockRetry(ctx, mysqlLockRetryAttempts, func() error {
+		var err error
+		workers, nodes, err = r.markStaleRuntimeTopologyOnce(ctx, staleBefore.UTC())
+		return err
+	})
+	return workers, nodes, err
+}
+
+func (r *MySQL) markStaleRuntimeTopologyOnce(ctx context.Context, staleBefore time.Time) (int64, int64, error) {
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	nodeRes, err := r.db.ExecContext(ctx, `
-		UPDATE runtime_nodes
-		SET status='OFFLINE'
-		WHERE status='ACTIVE' AND last_heartbeat_at < ?
-	`, staleBefore.UTC())
+	defer func() { _ = tx.Rollback() }()
+
+	markByPrimaryKey := func(table, idColumn string) (int64, error) {
+		rows, queryErr := tx.QueryContext(ctx, `SELECT `+idColumn+` FROM `+table+`
+			WHERE status='ACTIVE' AND last_heartbeat_at < ? ORDER BY `+idColumn, staleBefore)
+		if queryErr != nil {
+			return 0, queryErr
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if scanErr := rows.Scan(&id); scanErr != nil {
+				_ = rows.Close()
+				return 0, scanErr
+			}
+			ids = append(ids, id)
+		}
+		if rowsErr := rows.Err(); rowsErr != nil {
+			_ = rows.Close()
+			return 0, rowsErr
+		}
+		if closeErr := rows.Close(); closeErr != nil {
+			return 0, closeErr
+		}
+
+		var affected int64
+		for _, id := range ids {
+			res, updateErr := tx.ExecContext(ctx, `UPDATE `+table+`
+				SET status='OFFLINE' WHERE `+idColumn+`=?
+				AND status='ACTIVE' AND last_heartbeat_at < ?`, id, staleBefore)
+			if updateErr != nil {
+				return 0, updateErr
+			}
+			count, rowsErr := res.RowsAffected()
+			if rowsErr != nil {
+				return 0, rowsErr
+			}
+			affected += count
+		}
+		return affected, nil
+	}
+
+	workers, err := markByPrimaryKey("runtime_workers", "worker_id")
 	if err != nil {
 		return 0, 0, err
 	}
-	workers, _ := workerRes.RowsAffected()
-	nodes, _ := nodeRes.RowsAffected()
+	nodes, err := markByPrimaryKey("runtime_nodes", "node_id")
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
 	return workers, nodes, nil
 }
 

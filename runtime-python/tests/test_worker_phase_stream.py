@@ -49,7 +49,7 @@ async def test_worker_emits_only_whitelisted_metadata_before_result(monkeypatch)
     async def runner(request):
         return SimpleNamespace(model_dump=lambda **_: {})
 
-    async def event_runner(request, sink):
+    async def event_runner(request, sink, delta_sink):
         sink(SimpleNamespace(kind="tool", status="running", title="SECRET_TITLE", detail="SECRET_RESULT"))
         sink(SimpleNamespace(kind="mcp", status="completed", title="SECRET_TITLE", detail="SECRET_ARGUMENT"))
         sink(SimpleNamespace(kind="arbitrary_secret_kind", status="running", detail="SECRET"))
@@ -106,12 +106,117 @@ async def test_phase_transport_failure_does_not_fail_business_result(monkeypatch
     async def runner(request):
         return SimpleNamespace(model_dump=lambda **_: {})
 
-    async def event_runner(request, sink):
+    async def event_runner(request, sink, delta_sink):
         sink(SimpleNamespace(kind="model", status="completed"))
         return await runner(request)
 
     manager = DurableExecutionManager(
         worker_id="phase-worker", worker_endpoint="http://worker.invalid",
+        capacity=1, internal_token="token", control_plane_base_url="http://go.invalid",
+        heartbeat_interval_seconds=60, callback_timeout_seconds=1,
+        callback_max_retries=1, shutdown_grace_seconds=1,
+        dedupe_retention_seconds=60, runner=runner, event_runner=event_runner,
+    )
+
+    async def fake_callback(self, env, *, status, response=None, error_category=""):
+        result_status.append(status)
+
+    async def no_heartbeat(self):
+        return None
+
+    manager._deliver_callback = MethodType(fake_callback, manager)
+    manager._send_heartbeat_once = MethodType(no_heartbeat, manager)
+    await manager.submit(envelope())
+    await next(iter(manager._records.values())).task
+    assert result_status == ["completed"]
+
+@pytest.mark.asyncio
+async def test_worker_streams_bounded_model_deltas_before_result(monkeypatch):
+    submissions = []
+    result_status = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def post(self, url, *, json, headers):
+            assert headers["X-Internal-Token"] == "test-token"
+            if url.endswith("/stream"):
+                submissions.append(json)
+            return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+    async def runner(request):
+        return SimpleNamespace(model_dump=lambda **_: {})
+
+    async def event_runner(request, trace_sink, delta_sink):
+        trace_sink(SimpleNamespace(kind="model", status="running"))
+        delta_sink("你")
+        delta_sink("好")
+        return await runner(request)
+
+    manager = DurableExecutionManager(
+        worker_id="delta-worker", worker_endpoint="http://worker.invalid",
+        capacity=1, internal_token="test-token", control_plane_base_url="http://go.invalid",
+        heartbeat_interval_seconds=60, callback_timeout_seconds=1,
+        callback_max_retries=1, shutdown_grace_seconds=1,
+        dedupe_retention_seconds=60, runner=runner, event_runner=event_runner,
+    )
+
+    async def fake_callback(self, env, *, status, response=None, error_category=""):
+        result_status.append(status)
+
+    async def no_heartbeat(self):
+        return None
+
+    manager._deliver_callback = MethodType(fake_callback, manager)
+    manager._send_heartbeat_once = MethodType(no_heartbeat, manager)
+    await manager.submit(envelope())
+    await next(iter(manager._records.values())).task
+
+    assert result_status == ["completed"]
+    assert [entry["ordinal"] for entry in submissions] == [1, 2]
+    assert [entry["delta"] for entry in submissions] == ["你", "好"]
+    assert all(entry["type"] == "delta" for entry in submissions)
+    assert all(entry["fenceEpoch"] == 4 for entry in submissions)
+    assert all(set(entry) == {
+        "workerId", "executionId", "leaseToken", "fenceEpoch", "ordinal", "type", "delta",
+    } for entry in submissions)
+
+@pytest.mark.asyncio
+async def test_delta_transport_failure_does_not_fail_business_result(monkeypatch):
+    class BrokenClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def post(self, *_args, **_kwargs):
+            raise httpx.ConnectError("no live stream endpoint")
+
+    monkeypatch.setattr(httpx, "AsyncClient", BrokenClient)
+    result_status = []
+
+    async def runner(request):
+        return SimpleNamespace(model_dump=lambda **_: {})
+
+    async def event_runner(request, trace_sink, delta_sink):
+        delta_sink("still-finalizes")
+        return await runner(request)
+
+    manager = DurableExecutionManager(
+        worker_id="delta-worker", worker_endpoint="http://worker.invalid",
         capacity=1, internal_token="token", control_plane_base_url="http://go.invalid",
         heartbeat_interval_seconds=60, callback_timeout_seconds=1,
         callback_max_retries=1, shutdown_grace_seconds=1,

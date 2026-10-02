@@ -74,3 +74,90 @@ func TestKnowledgeRuntimeDurableEventReplayOwnershipAndFence(t *testing.T) {
 		}
 	}
 }
+
+type captureDurableLiveStream struct {
+	events []model.DurableLiveDelta
+}
+
+func (s *captureDurableLiveStream) AppendDelta(_ context.Context, event model.DurableLiveDelta) (string, bool, error) {
+	for _, existing := range s.events {
+		if existing.FenceEpoch == event.FenceEpoch && existing.Ordinal == event.Ordinal {
+			if existing.ExecutionID == event.ExecutionID && existing.Delta == event.Delta {
+				return "duplicate", false, nil
+			}
+			return "", false, errors.New("ordinal conflict")
+		}
+	}
+	s.events = append(s.events, event)
+	return "captured", true, nil
+}
+
+func (s *captureDurableLiveStream) ReadDeltas(_ context.Context, _ int64, _ string, _ int64) ([]model.DurableLiveDelta, error) {
+	return append([]model.DurableLiveDelta(nil), s.events...), nil
+}
+
+func TestDurableWorkerDeltaRequiresCurrentFenceAndLease(t *testing.T) {
+	s, repo, uid := p8Fixture(t)
+	ctx := context.Background()
+	capture := &captureDurableLiveStream{}
+	s.SetLiveStreamStore(capture)
+
+	submitted := p8Run(t, s, uid, "durable live delta fence")
+	if err := repo.HeartbeatRuntimeWorker(ctx, model.RuntimeWorker{
+		WorkerID: "delta-worker", Endpoint: "http://runtime.invalid:9572", Capacity: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const lease = "delta-worker-lease"
+	job, _, err := repo.ClaimNextRuntimeJob(ctx, "delta-worker", lease, time.Second)
+	if err != nil || job == nil {
+		t.Fatalf("claim: job=%+v err=%v", job, err)
+	}
+	if ok, err := repo.MarkRuntimeJobDispatching(ctx, job.ID, "delta-worker", lease); err != nil || !ok {
+		t.Fatalf("dispatching: ok=%v err=%v", ok, err)
+	}
+	if ok, err := repo.MarkRuntimeJobAccepted(ctx, job.ID, "delta-worker", lease); err != nil || !ok {
+		t.Fatalf("accepted: ok=%v err=%v", ok, err)
+	}
+
+	accepted, err := s.WorkerDelta(ctx, job.ID, DurableWorkerDelta{
+		WorkerID: "delta-worker", ExecutionID: job.ExecutionID, LeaseToken: lease,
+		FenceEpoch: job.FenceEpoch, Ordinal: 1, Type: "delta", Delta: "hello",
+	})
+	if err != nil || !accepted || len(capture.events) != 1 {
+		t.Fatalf("current delta rejected: accepted=%v events=%+v err=%v", accepted, capture.events, err)
+	}
+	if capture.events[0].TaskID != submitted.Task.ID || capture.events[0].Delta != "hello" {
+		t.Fatalf("unexpected captured delta: %+v", capture.events[0])
+	}
+
+	staleAttempts := []struct {
+		name  string
+		delta DurableWorkerDelta
+	}{
+		{name: "execution", delta: DurableWorkerDelta{
+			WorkerID: "delta-worker", ExecutionID: "stale-execution", LeaseToken: lease,
+			FenceEpoch: job.FenceEpoch, Ordinal: 2, Type: "delta", Delta: "stale",
+		}},
+		{name: "worker", delta: DurableWorkerDelta{
+			WorkerID: "stale-worker", ExecutionID: job.ExecutionID, LeaseToken: lease,
+			FenceEpoch: job.FenceEpoch, Ordinal: 2, Type: "delta", Delta: "stale",
+		}},
+		{name: "lease", delta: DurableWorkerDelta{
+			WorkerID: "delta-worker", ExecutionID: job.ExecutionID, LeaseToken: "stale-lease",
+			FenceEpoch: job.FenceEpoch, Ordinal: 2, Type: "delta", Delta: "stale",
+		}},
+		{name: "fence", delta: DurableWorkerDelta{
+			WorkerID: "delta-worker", ExecutionID: job.ExecutionID, LeaseToken: lease,
+			FenceEpoch: job.FenceEpoch + 1, Ordinal: 2, Type: "delta", Delta: "stale",
+		}},
+	}
+	for _, attempt := range staleAttempts {
+		t.Run(attempt.name, func(t *testing.T) {
+			accepted, err := s.WorkerDelta(ctx, job.ID, attempt.delta)
+			if err != nil || accepted || len(capture.events) != 1 {
+				t.Fatalf("stale %s must be ignored: accepted=%v events=%+v err=%v", attempt.name, accepted, capture.events, err)
+			}
+		})
+	}
+}

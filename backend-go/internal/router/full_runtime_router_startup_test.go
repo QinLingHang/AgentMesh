@@ -20,15 +20,16 @@ func TestKnowledgeRuntimeFullRouterRegistersAllTaskRoutesWithoutPanic(t *testing
 		InternalToken:         "knowledge-runtime-router-test-token",
 	})
 	want := map[string]bool{
-		"GET /api/tasks/:id/cost":       false,
-		"GET /api/tasks/:id/events":     false,
-		"POST /api/tasks/:id/cancel":    false,
-		"POST /api/tasks/:id/resume":    false,
-		"DELETE /api/tasks/:id":         false,
-		"POST /api/tasks/submit-stream": false,
-		"POST /api/tasks/run-durable":   false,
-		"GET /livez":                    false,
-		"GET /readyz":                   false,
+		"GET /api/tasks/:id/cost":                      false,
+		"GET /api/tasks/:id/events":                    false,
+		"POST /api/tasks/:id/cancel":                   false,
+		"POST /api/tasks/:id/resume":                   false,
+		"DELETE /api/tasks/:id":                        false,
+		"POST /api/tasks/submit-stream":                false,
+		"POST /api/tasks/run-durable":                  false,
+		"POST /internal/v1/runtime/jobs/:jobId/stream": false,
+		"GET /livez":                                   false,
+		"GET /readyz":                                  false,
 	}
 	for _, route := range engine.Routes() {
 		key := route.Method + " " + route.Path

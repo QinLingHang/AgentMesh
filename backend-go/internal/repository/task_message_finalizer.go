@@ -5,22 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"example.com/agentmesh-control-plane/internal/model"
-
-	mysqlDriver "github.com/go-sql-driver/mysql"
 )
 
 const taskMessageFinalizeAttempts = 3
-
-func isRetryableTaskMessageFinalizeError(err error) bool {
-	var mysqlErr *mysqlDriver.MySQLError
-	if !errors.As(err, &mysqlErr) {
-		return false
-	}
-	return mysqlErr.Number == 1205 || mysqlErr.Number == 1213
-}
 
 func (r *MySQL) withTaskMessageTransaction(
 	ctx context.Context,
@@ -47,14 +36,11 @@ func (r *MySQL) withTaskMessageTransaction(
 
 		_ = tx.Rollback()
 		lastErr = err
-		if !isRetryableTaskMessageFinalizeError(err) || attempt == taskMessageFinalizeAttempts-1 {
+		if !isRetryableMySQLLockError(err) || attempt == taskMessageFinalizeAttempts-1 {
 			return err
 		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(time.Duration(attempt+1) * 20 * time.Millisecond):
+		if err := waitForMySQLLockRetry(ctx, attempt); err != nil {
+			return err
 		}
 	}
 
